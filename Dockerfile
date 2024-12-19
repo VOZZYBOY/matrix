@@ -7,6 +7,13 @@ WORKDIR /app
 # Copy the project files
 COPY . .
 
+# Install Yandex Cloud CLI
+RUN curl https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash && \
+    mv /root/yandex-cloud/bin/yc /usr/local/bin/yc
+
+# Verify installation
+RUN yc --version
+
 # Install dependencies
 RUN pip install --upgrade pip
 RUN pip install -r requirements.txt
