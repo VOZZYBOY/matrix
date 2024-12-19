@@ -1,18 +1,18 @@
 # Use the official Python image as a base
 FROM python:3.9-slim
 
-# Set working directory
-WORKDIR /app
-
-# Copy the project files
-COPY . .
-
 # Install Yandex Cloud CLI
 RUN curl https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash && \
     mv /root/yandex-cloud/bin/yc /usr/local/bin/yc
 
 # Verify installation
 RUN yc --version
+
+# Set working directory
+WORKDIR /app
+
+# Copy the project files
+COPY . .
 
 # Install dependencies
 RUN pip install --upgrade pip
