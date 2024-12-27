@@ -198,7 +198,7 @@ async def end_session(user_id: str):
         logger.error(f"Ошибка завершения сессии для пользователя {user_id}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Ошибка завершения сессии: {str(e)}")
 
-
+# --- Запуск FastAPI ---
 if __name__ == "__main__":
     logger.info("Запуск FastAPI сервера...")
     uvicorn.run(app, host="0.0.0.0", port=8001)
