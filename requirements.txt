@@ -6,3 +6,4 @@ yandex-chain==0.0.10
 langchain==0.2.1
 langchain_community==0.2.1
 textblob==0.15.3
+yandex-cloud-ml-sdk
