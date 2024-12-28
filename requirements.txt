@@ -1,7 +1,4 @@
-fastapi
-uvicorn
-requests
-yandex_cloud_ml_sdk
-logging
-time
-threading
+fastapi==0.95.2
+uvicorn==0.22.0
+requests==2.32.3
+yandex_cloud_ml_sdk==0.2.4
