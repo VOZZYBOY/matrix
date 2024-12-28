@@ -1,9 +1,7 @@
 fastapi==0.95.2
 uvicorn==0.22.0
 requests==2.31.0
-pydantic==1.10.8
-yandex-chain==0.0.10
-langchain==0.2.1
-langchain_community==0.2.1
-textblob==0.15.3
-yandex-cloud-ml-sdk==0.2.4
+yandex_cloud_ml_sdk
+logging
+time
+threading
