@@ -74,20 +74,22 @@ instruction = """
 • Избегай конфликтов и провокаций, сохраняй профессионализм и уважение к мнению собеседника
 """
 
+
 assistant = sdk.assistants.create(
     model=sdk.models.completions("yandexgpt", model_version="rc"),
-    ttl_days=4,
-    expiration_policy="since_last_active",
+    ttl_days=365,  # Устанавливаем максимальное разрешённое время жизни
+    expiration_policy="since_last_active",  # Продлевается при каждом обращении
     max_tokens=300,
     instruction=instruction
 )
-logger.info("Ассистент успешно создан с промптом.")
+logger.info("Ассистент успешно создан с максимальным временем жизни (365 дней).")
 
 app = FastAPI()
 
 threads = {}
 
 def cleanup_inactive_threads(timeout=1800):
+ 
     while True:
         current_time = time.time()
         inactive_users = [
@@ -106,6 +108,7 @@ def cleanup_inactive_threads(timeout=1800):
 threading.Thread(target=cleanup_inactive_threads, daemon=True).start()
 
 def fetch_services(tenant_id: str, mydtoken: str) -> list[str]:
+    
     logger.info(f"Запрос к внешнему API: tenant_id={tenant_id}")
     headers = {"Authorization": f"Bearer {mydtoken}"}
     params = {"tenantId": tenant_id}
@@ -134,14 +137,12 @@ async def ask_assistant(
     mydtoken: str,
     tenant_id: str
 ):
-    """
-    Эндпоинт для отправки вопроса ассистенту.
-    """
+
     logger.info(f"Получен запрос от {user_id}. Вопрос: {question}")
     try:
         if user_id not in threads:
             logger.info(f"Создаём новый тред для {user_id}")
-            thread_obj = sdk.threads.create(name=f"Thread-{user_id}", ttl_days=5, expiration_policy="static")
+            thread_obj = sdk.threads.create(name=f"Thread-{user_id}", ttl_days=365, expiration_policy="since_last_active")
             threads[user_id] = {
                 "thread": thread_obj,
                 "last_active": time.time(),
@@ -189,11 +190,7 @@ async def ask_assistant(
 
 @app.post("/end-session")
 async def end_session(user_id: str):
-    """
-    Завершает сессию пользователя и удаляет тред.
-    тенант указывайте любой как и user_id,user_id испоьзуется для сохранения контекста
-    можно использовать наши user_id
-    """
+    
     try:
         if user_id in threads:
             threads[user_id]["thread"].delete()
