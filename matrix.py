@@ -8,11 +8,11 @@ import logging
 import os
 import time
 
-# Логгирование
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", encoding="utf-8")
 logger = logging.getLogger(__name__)
 
-# Конфигурация
+
 FOLDER_ID = "b1gnq2v60fut60hs9vfb"
 API_KEY = "AQVNw5Kg0jXoaateYQWdSr2k8cbst_y4_WcbvZrW"
 EXTERNAL_API_URL = "https://dev.back.matrixcrm.ru/api/v1/AI/servicesByFilters"
@@ -122,7 +122,7 @@ async def ask_assistant(
     try:
         recognized_text = None
 
-        # Обработка голосового сообщения
+        
         if file:
             temp_path = f"/tmp/{file.filename}"
             try:
@@ -136,12 +136,12 @@ async def ask_assistant(
             if not recognized_text:
                 raise HTTPException(status_code=500, detail="Ошибка распознавания речи из файла.")
 
-        # Определяем текст для обработки
+        
         input_text = recognized_text if recognized_text else question
         if not input_text:
             raise HTTPException(status_code=400, detail="Необходимо передать текст или файл.")
 
-        # Проверяем существование треда
+        
         if user_id not in threads:
             logger.info(f"Создаём новый тред для {user_id}")
             thread_obj = sdk.threads.create(name=f"Thread-{user_id}", ttl_days=365, expiration_policy="since_last_active")
@@ -155,7 +155,7 @@ async def ask_assistant(
             thread_obj = threads[user_id]["thread"]
             threads[user_id]["last_active"] = time.time()
 
-        # Проверка запроса на услуги
+        
         if "услуги" in input_text.lower():
             if not threads[user_id]["services"]:
                 services = await fetch_services(tenant_id, mydtoken)
@@ -163,7 +163,7 @@ async def ask_assistant(
             else:
                 services = threads[user_id]["services"]
 
-            # Передача услуг ассистенту
+            
             service_context = [{"name": srv["serviceName"], 
                                 "price": srv.get("price", "нет цены"), 
                                 "filial": srv.get("filialName", "не указан"), 
@@ -172,7 +172,7 @@ async def ask_assistant(
 
         thread_obj.write(input_text)
 
-        # Запуск ассистента
+        
         logger.info("Отправка треда ассистенту.")
         run = assistant.run(thread_obj)
         result = run.wait()
