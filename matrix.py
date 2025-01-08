@@ -1,14 +1,18 @@
-from fastapi import FastAPI, HTTPException
-import requests
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from voicerecognise import recognize_audio_with_sdk
 from yandex_cloud_ml_sdk import YCloudML
+import aiohttp
 import uvicorn
+import asyncio
 import logging
+import os
 import time
-import threading
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# Логгирование
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", encoding="utf-8")
 logger = logging.getLogger(__name__)
 
+# Конфигурация
 FOLDER_ID = "b1gnq2v60fut60hs9vfb"
 API_KEY = "AQVNw5Kg0jXoaateYQWdSr2k8cbst_y4_WcbvZrW"
 EXTERNAL_API_URL = "https://dev.back.matrixcrm.ru/api/v1/AI/servicesByFilters"
@@ -73,124 +77,118 @@ instruction = """
 • Если разговор отклоняется от темы, тактично направь его обратно к обсуждению косметологических услуг и их преимуществ.
 • Избегай конфликтов и провокаций, сохраняй профессионализм и уважение к мнению собеседника
 """
-
-
 assistant = sdk.assistants.create(
     model=sdk.models.completions("yandexgpt", model_version="rc"),
-    ttl_days=365,  # Устанавливаем максимальное разрешённое время жизни
-    expiration_policy="since_last_active",  # Продлевается при каждом обращении
+    ttl_days=365,
+    expiration_policy="since_last_active",
     max_tokens=300,
     instruction=instruction
 )
 logger.info("Ассистент успешно создан с максимальным временем жизни (365 дней).")
 
 app = FastAPI()
-
 threads = {}
 
-def cleanup_inactive_threads(timeout=1800):
- 
-    while True:
-        current_time = time.time()
-        inactive_users = [
-            user_id for user_id, data in threads.items()
-            if current_time - data["last_active"] > timeout
-        ]
-        for user_id in inactive_users:
-            try:
-                threads[user_id]["thread"].delete()
-                del threads[user_id]
-                logger.info(f"Тред для пользователя {user_id} удален за неактивность.")
-            except Exception as e:
-                logger.error(f"Ошибка удаления треда для пользователя {user_id}: {str(e)}")
-        time.sleep(60)
-
-threading.Thread(target=cleanup_inactive_threads, daemon=True).start()
-
-def fetch_services(tenant_id: str, mydtoken: str) -> list[str]:
-    
+async def fetch_services(tenant_id: str, mydtoken: str) -> list[dict]:
+    """
+    Асинхронное получение списка услуг из внешнего API.
+    """
     logger.info(f"Запрос к внешнему API: tenant_id={tenant_id}")
     headers = {"Authorization": f"Bearer {mydtoken}"}
     params = {"tenantId": tenant_id}
     try:
-        response = requests.get(EXTERNAL_API_URL, headers=headers, params=params)
-        response.raise_for_status()
-        items = response.json().get("data", {}).get("items", [])
-        logger.info(f"Получены услуги: {len(items)}.")
-        services_list = []
-        for srv in items:
-            name = srv["serviceName"]
-            price = srv.get("price", "нет цены")
-            filial = srv.get("filialName", "не указан")
-            employee = srv.get("employeeFullName", "не указан")
-            line = f"{name} — {price} руб., Филиал: {filial}, Специалист: {employee}"
-            services_list.append(line)
-        return services_list
-    except requests.RequestException as e:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(EXTERNAL_API_URL, headers=headers, params=params) as response:
+                response.raise_for_status()
+                data = await response.json()
+                items = data.get("data", {}).get("items", [])
+                logger.info(f"Получено {len(items)} услуг.")
+                return items
+    except Exception as e:
         logger.error(f"Ошибка при запросе данных из внешнего API: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Ошибка получения данных из API: {str(e)}")
 
 @app.post("/ask")
 async def ask_assistant(
-    user_id: str,
-    question: str,
-    mydtoken: str,
-    tenant_id: str
+    user_id: str = Form(...),
+    mydtoken: str = Form(...),
+    tenant_id: str = Form(...),
+    question: str = Form(None),
+    file: UploadFile = File(None)
 ):
-
-    logger.info(f"Получен запрос от {user_id}. Вопрос: {question}")
+    """
+    Эндпоинт для обработки запросов ассистенту.
+    """
     try:
+        recognized_text = None
+
+        # Обработка голосового сообщения
+        if file:
+            temp_path = f"/tmp/{file.filename}"
+            try:
+                with open(temp_path, "wb") as temp_file:
+                    temp_file.write(await file.read())
+                recognized_text = recognize_audio_with_sdk(temp_path)
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
+            if not recognized_text:
+                raise HTTPException(status_code=500, detail="Ошибка распознавания речи из файла.")
+
+        # Определяем текст для обработки
+        input_text = recognized_text if recognized_text else question
+        if not input_text:
+            raise HTTPException(status_code=400, detail="Необходимо передать текст или файл.")
+
+        # Проверяем существование треда
         if user_id not in threads:
             logger.info(f"Создаём новый тред для {user_id}")
             thread_obj = sdk.threads.create(name=f"Thread-{user_id}", ttl_days=365, expiration_policy="since_last_active")
             threads[user_id] = {
                 "thread": thread_obj,
                 "last_active": time.time(),
-                "services": [],
-                "services_loaded": False
+                "services": None
             }
-            thread_obj.write("Первое сообщение. Поздоровайся и спроси, чем помочь.")
+            thread_obj.write("Первое сообщение. Чем могу помочь?")
         else:
             thread_obj = threads[user_id]["thread"]
             threads[user_id]["last_active"] = time.time()
-            thread_obj.write("Продолжение диалога, не здоровайся заново.")
 
-        cosmetics_keywords = ["космет", "кожа", "лицо", "уход", "услуг", "крем", "эпиляц", "чистка"]
-        lower_q = question.lower()
-        relevant = any(kw in lower_q for kw in cosmetics_keywords)
-        want_services = any(
-            phrase in lower_q
-            for phrase in ["покажи услуги", "услуги", "какие услуги", "список услуг"]
-        )
-
-        if not relevant and not want_services:
-            thread_obj.write("Я не разбираюсь в этом вопросе, давайте вернемся к обсуждению косметологии.")
-        else:
-            if want_services:
-                if not threads[user_id]["services_loaded"]:
-                    services = fetch_services(tenant_id, mydtoken)
-                    threads[user_id]["services"] = services
-                    threads[user_id]["services_loaded"] = True
-                else:
-                    services = threads[user_id]["services"]
-                service_text = "\n".join(services)
-                thread_obj.write(f"Список наших услуг:\n{service_text}")
+        # Проверка запроса на услуги
+        if "услуги" in input_text.lower():
+            if not threads[user_id]["services"]:
+                services = await fetch_services(tenant_id, mydtoken)
+                threads[user_id]["services"] = services
             else:
-                thread_obj.write("Пользователь спрашивает о косметологии (не про услуги).")
+                services = threads[user_id]["services"]
 
-        thread_obj.write(question)
+            # Передача услуг ассистенту
+            service_context = [{"name": srv["serviceName"], 
+                                "price": srv.get("price", "нет цены"), 
+                                "filial": srv.get("filialName", "не указан"), 
+                                "employee": srv.get("employeeFullName", "не указан")} for srv in services]
+            thread_obj.write(f"Контекст услуг:\n{service_context}")
+
+        thread_obj.write(input_text)
+
+        # Запуск ассистента
+        logger.info("Отправка треда ассистенту.")
         run = assistant.run(thread_obj)
         result = run.wait()
 
         logger.info(f"Ответ ассистента: {result.text}")
         return {"response": result.text}
+
     except Exception as e:
-        logger.error(f"Ошибка: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Ошибка обработки: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка обработки: {str(e)}")
 
 @app.post("/end-session")
 async def end_session(user_id: str):
-    
+    """
+    Завершение сессии пользователя.
+    """
     try:
         if user_id in threads:
             threads[user_id]["thread"].delete()
