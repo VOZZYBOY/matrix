@@ -9,8 +9,8 @@ import threading
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-FOLDER_ID = "b1gb9k14k5ui80g91tnp"
-API_KEY = "AQVN2zTBAsQpVdzUXigKkKzPTA8q3uys6r_rR2de"
+FOLDER_ID = "b1gnq2v60fut60hs9vfb"
+API_KEY = "AQVNw5Kg0jXoaateYQWdSr2k8cbst_y4_WcbvZrW"
 EXTERNAL_API_URL = "https://dev.back.matrixcrm.ru/api/v1/AI/servicesByFilters"
 
 sdk = YCloudML(folder_id=FOLDER_ID, auth=API_KEY)
