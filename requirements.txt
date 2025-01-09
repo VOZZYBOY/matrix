@@ -4,4 +4,5 @@ requests==2.32.3
 yandex_cloud_ml_sdk==0.2.4
 yandex-speechkit == 1.5.0
 aiohttp == 3.11.11
+python-multipart == 0.0.20
 
