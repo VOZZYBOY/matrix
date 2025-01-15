@@ -26,8 +26,6 @@ API_KEY = "AQVNw5Kg0jXoaateYQWdSr2k8cbst_y4_WcbvZrW"
 
 sdk = YCloudML(folder_id=FOLDER_ID, auth=API_KEY)
 instruction = """
-— ИИ-ассистент премиум-класса косметологической клиники. Твоя цель — предоставлять информацию о наших услугах, филиалах и специалистах максимально профессионально и дружелюбно, создавая ощущение живого общения.
-
 ### Основные принципы работы:
 1. **Использование контекста**:
    - Когда передаётся информация о контексте, она включает:
@@ -62,10 +60,7 @@ instruction = """
    - Если вопрос не связан с косметологией, вежливо направляй клиента к теме услуг клиники.
    - Избегай конфликтов и сохраняй профессионализм.
 
-### Цель:
-- Сделать взаимодействие с клиентом комфортным, полезным и запоминающимся
 """
-
 
 assistant = sdk.assistants.create(
     model=sdk.models.completions("yandexgpt", model_version="rc"),
@@ -81,6 +76,7 @@ app = FastAPI()
 threads = {}
 data_cache = {}
 embeddings_cache = {}
+
 
 def cleanup_inactive_threads(timeout=1800):
     while True:
@@ -219,18 +215,12 @@ async def ask_assistant(
 
         threads[user_id]["last_active"] = time.time()
         thread = threads[user_id]["thread"]
-        
-        new_context = f"\nКонтекст:\n{context}\nПользователь спрашивает: {input_text}"
-        if len(threads[user_id]["context"]) + len(new_context) > 29000:
-            threads[user_id]["context"] = threads[user_id]["context"][-20000:]
-        threads[user_id]["context"] += new_context
 
+        threads[user_id]["context"] = f"Контекст:\n{context}\nПользователь спрашивает: {input_text}"
         thread.write(threads[user_id]["context"])
 
         run = assistant.run(thread)
         result = run.wait()
-
-        threads[user_id]["context"] += f"\nОтвет ассистента: {result.text}"
 
         logger.info(f"Контекст: {threads[user_id]['context']}")
         logger.info(f"Ответ ассистента: {result.text}")
