@@ -17,18 +17,16 @@ BASE_DIR = "base"
 os.makedirs(BASE_DIR, exist_ok=True)
 API_URL = "https://dev.back.matrixcrm.ru/api/v1/AI/servicesByFilters"
 
-
 logger.info("Загрузка модели векторного поиска...")
 search_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 logger.info("Модель успешно загружена.")
-
 
 FOLDER_ID = "b1gnq2v60fut60hs9vfb"
 API_KEY = "AQVNw5Kg0jXoaateYQWdSr2k8cbst_y4_WcbvZrW"
 
 sdk = YCloudML(folder_id=FOLDER_ID, auth=API_KEY)
 instruction = """
-Ты — ИИ-ассистент премиум-класса косметологической клиники. Твоя цель — предоставлять информацию о наших услугах, филиалах и специалистах максимально профессионально и дружелюбно, создавая ощущение живого общения.
+— ИИ-ассистент премиум-класса косметологической клиники. Твоя цель — предоставлять информацию о наших услугах, филиалах и специалистах максимально профессионально и дружелюбно, создавая ощущение живого общения.
 
 ### Основные принципы работы:
 1. **Использование контекста**:
@@ -68,6 +66,7 @@ instruction = """
 - Сделать взаимодействие с клиентом комфортным, полезным и запоминающимся
 """
 
+
 assistant = sdk.assistants.create(
     model=sdk.models.completions("yandexgpt", model_version="rc"),
     ttl_days=365,
@@ -80,8 +79,8 @@ logger.info("Ассистент успешно инициализирован.")
 
 app = FastAPI()
 threads = {}
-data_cache = {}  
-embeddings_cache = {}  
+data_cache = {}
+embeddings_cache = {}
 
 
 def cleanup_inactive_threads(timeout=1800):
@@ -148,8 +147,11 @@ def load_json_data(tenant_id):
     embeddings_cache[tenant_id] = search_model.encode(documents, convert_to_tensor=True)
 
 def extract_text_fields(record):
-    excluded_keys = {"id", "categoryId", "currencyId", "langId", "employeeId", "employeeDescription"}
-    return " ".join(str(value) for key, value in record.items() if key not in excluded_keys and value is not None)
+    excluded_keys = {"id", "categoryId", "duration", "langId", "currencyId", "employeeId"}
+    return " ".join(
+        str(value) for key, value in record.items() if key not in excluded_keys and value is not None
+    )
+
 
 @app.post("/ask")
 async def ask_assistant(
@@ -191,7 +193,7 @@ async def ask_assistant(
         query_embedding = search_model.encode(input_text, convert_to_tensor=True)
         similarities = util.pytorch_cos_sim(query_embedding, document_embeddings)
         similarities = similarities[0]
-        top_results = similarities.topk(10)
+        top_results = similarities.topk(20) 
 
         search_results = [
             {
@@ -203,9 +205,9 @@ async def ask_assistant(
             for idx in top_results[1].tolist()
         ]
 
-        context = "\n".join([
-            f"Услуга: {res['text']}\nЦена: {res['price']} руб.\nФилиал: {res['filial']}\nСпециалист: {res['specialist']}"
-            for res in search_results
+        context = "Наиболее релевантные услуги:\n" + "\n".join([
+            f"{idx+1}. Услуга: {res['text']}\n   Цена: {res['price']} руб.\n   Филиал: {res['filial']}\n   Специалист: {res['specialist']}"
+            for idx, res in enumerate(search_results)
         ])
 
         if user_id not in threads:
@@ -222,11 +224,13 @@ async def ask_assistant(
         threads[user_id]["last_active"] = time.time()
         thread = threads[user_id]["thread"]
 
-        threads[user_id]["context"] = f"Контекст:\n{context}\nПользователь спрашивает: {input_text}"
+        threads[user_id]["context"] += f"\nКонтекст:\n{context}\nПользователь спрашивает: {input_text}"
         thread.write(threads[user_id]["context"])
 
         run = assistant.run(thread)
         result = run.wait()
+
+        threads[user_id]["context"] += f"\nОтвет ассистента: {result.text}"
 
         logger.info(f"Контекст: {threads[user_id]['context']}")
         logger.info(f"Ответ ассистента: {result.text}")
