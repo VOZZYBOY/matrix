@@ -154,7 +154,7 @@ def extract_text_fields(record):
 @app.post("/ask")
 async def ask_assistant(
     user_id: str = Form(...),
-    question: str = Form(Non),
+    question: str = Form(None),
     mydtoken: str = Form(...),
     tenant_id: str = Form(...),
     file: UploadFile = File(None)
