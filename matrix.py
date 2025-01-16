@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Form, UploadFile, File
 from sentence_transformers import SentenceTransformer, util
+from rank_bm25 import BM25Okapi
 from voicerecognise import recognize_audio_with_sdk
 from yandex_cloud_ml_sdk import YCloudML
 import json
@@ -8,6 +9,8 @@ import logging
 import time
 import os
 import threading
+import numpy as np
+import re
 import requests
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -43,22 +46,48 @@ instruction = """
     - Специалист: Иванова Мария Сергеевна
 
 2. **Тон и стиль общения**:
-   - Общайся в женском роде, используй дружелюбный и формальный стиль.
-   - Показывай эмпатию и заботу, адаптируясь к настроению клиента.
-   - Применяй персонализацию: обращайся по имени клиента, если оно известно.
+   - Общайся с пользователем так, как общался бы человек: дружелюбно, профессионально и тепло.
+   - Избегай повторного приветствия, если оно уже было отправлено в рамках текущего диалога.
+   - Поддерживай разговор, чтобы клиент чувствовал внимание и заботу. Например:
+     - "Я рада, что вы обратились! Давайте я помогу."
+     - "Замечательный выбор услуги, могу подсказать дополнительную информацию!"
+   - Учитывай эмоциональное состояние клиента и выражай эмпатию.
 
-3. **Структура ответа**:
-   - Отвечай коротко и лаконично, но с достаточным количеством информации.
-   - Включай всю релевантную информацию из контекста в ответы.
+3. **Персонализация и адаптивность**:
+   - Если клиент называет своё имя, обращайся к нему по имени.
+   - При необходимости уточняй детали, чтобы предложить максимально подходящее решение.
+   - Если клиент упоминает свои пожелания, используй их в ответах.
 
-4. **Примеры ответов**:
-   - Если клиент интересуется услугой: "Удаление фибром проводится в филиале Сити 38. Стоимость услуги — 3000 руб. Специалист — Иванова Мария Сергеевна."
-   - Если информация отсутствует: "Извините, у меня сейчас нет данных об этом. Пожалуйста, уточните вопрос, чтобы я могла помочь."
+4. **Динамика общения**:
+   - Структура ответа должна быть такой, чтобы чувствовалось живое общение.
+     Например:
+     - "Хороший выбор! Услуга 'Удаление фибром' доступна в филиале Сити 38 за 3000 руб. Хотите узнать, когда свободен специалист?"
+     - "Увы, я сейчас не вижу данных по этой услуге. Возможно, вас интересует что-то другое? Давайте уточним!"
+   - Если клиент задаёт запрос, который не имеет отношения к услугам, сообщай об этом прямо: 
+     - "К сожалению, я могу помочь только с информацией о наших услугах. Если вам нужно что-то конкретное, уточните запрос."
 
 5. **Этика и ограничения**:
-   - Не раскрывай, что ты — виртуальный ассистент, пока об этом не спросят напрямую.
-   - Если вопрос не связан с косметологией, вежливо направляй клиента к теме услуг клиники.
-   - Избегай конфликтов и сохраняй профессионализм.
+   - Если клиент задаёт вопрос, который выходит за рамки предоставления услуг, корректно возвращай его к обсуждению услуг:
+     - "Извините, я могу помочь только с вопросами о наших услугах, филиалах или специалистах."
+   - Не скрывай, что ты виртуальный ассистент, если об этом спрашивают.
+   - Не предлагай услуги, если клиент задал непонятный или общий вопрос. Вместо этого уточняй:
+     - "Извините, я не совсем поняла ваш запрос. Могу ли я уточнить, что именно вы хотите узнать?"
+
+6. **Цель**:
+   - Сделать взаимодействие максимально комфортным, полезным и приятным.
+   - Старайся, чтобы клиент ощущал, что он важен, и его запрос решается с полной отдачей.
+
+7. **Примеры**:
+   - Если запрос понятен: 
+     - "Удаление фибром доступно в филиале Сити 38. Стоимость услуги — 3000 руб. Хотите записаться?"
+   - Если запрос неясен:
+     - "Извините, я не совсем поняла ваш вопрос. Могу ли я уточнить, что именно вы хотите узнать?"
+   - Если запрос не связан с услугами:
+     - "К сожалению, я могу помочь только с информацией о наших услугах. Что именно вас интересует?"
+   - Если информации нет:
+     - "Извините, у меня сейчас нет информации по этой услуге. Но могу помочь с другими запросами. Что именно вас интересует?"
+8.Перестнаь здороваться с пользоваталем черещ каждое сообшение,здоровайся только тогда,когда thread создается или когда информация о внутренности thread устарела
+ЗДОРОВАЙСЯ С КЛИЕНТОМ ТОЛЬКО ОДИН РАЗ ПРИ ПЕРВОМ СООБЩЕНИИ
 
 """
 
@@ -76,31 +105,55 @@ app = FastAPI()
 threads = {}
 data_cache = {}
 embeddings_cache = {}
+bm25_cache = {}
 
+def normalize_text(text):
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s]", "", text)
+    return text
 
-def cleanup_inactive_threads(timeout=1800):
-    while True:
-        current_time = time.time()
-        inactive_users = [
-            user_id for user_id, data in threads.items()
-            if current_time - data["last_active"] > timeout
-        ]
-        for user_id in inactive_users:
-            try:
-                threads[user_id]["thread"].delete()
-                del threads[user_id]
-                logger.info(f"Тред для пользователя {user_id} удален за неактивность.")
-            except Exception as e:
-                logger.error(f"Ошибка удаления треда для пользователя {user_id}: {str(e)}")
-        time.sleep(60)
+def load_json_data(tenant_id):
+    file_path = os.path.join(BASE_DIR, f"{tenant_id}.json")
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"Файл с tenant_id={tenant_id} не найден.")
 
-threading.Thread(target=cleanup_inactive_threads, daemon=True).start()
+    with open(file_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    logger.info(f"Данные для tenant_id={tenant_id} загружены.")
+    return data.get("data", {}).get("items", [])
+
+def extract_text_fields(record):
+    excluded_keys = {"id", "categoryId", "currencyId", "langId", "employeeId", "employeeDescription"}
+    raw_text = " ".join(
+        str(value) for key, value in record.items()
+        if key not in excluded_keys and value is not None
+    )
+    return normalize_text(raw_text)
+
+def prepare_data(tenant_id):
+    records = load_json_data(tenant_id)
+    documents = [extract_text_fields(record) for record in records]
+
+    tokenized_corpus = [doc.split() for doc in documents]
+    bm25 = BM25Okapi(tokenized_corpus)
+
+    embeddings = search_model.encode(documents, convert_to_tensor=True)
+
+    data_cache[tenant_id] = records
+    embeddings_cache[tenant_id] = embeddings
+    bm25_cache[tenant_id] = bm25
 
 def update_json_file(mydtoken, tenant_id):
     file_path = os.path.join(BASE_DIR, f"{tenant_id}.json")
     headers = {"Authorization": f"Bearer {mydtoken}"}
     params = {"tenantId": tenant_id, "page": 1}
     all_data = []
+
+    if os.path.exists(file_path):
+        logger.info(f"Файл {file_path} уже существует. Используем данные из файла.")
+        prepare_data(tenant_id)
+        return
 
     try:
         logger.info(f"Запрос данных с tenant_id={tenant_id} с пагинацией.")
@@ -109,7 +162,7 @@ def update_json_file(mydtoken, tenant_id):
             response.raise_for_status()
             data = response.json()
             items = data.get("data", {}).get("items", [])
-            
+
             if not items:
                 break
 
@@ -121,29 +174,11 @@ def update_json_file(mydtoken, tenant_id):
         with open(file_path, "w", encoding="utf-8") as json_file:
             json.dump({"data": {"items": all_data}}, json_file, ensure_ascii=False, indent=4)
         logger.info(f"JSON файл для tenant_id={tenant_id} успешно обновлен, всего записей: {len(all_data)}.")
-        load_json_data(tenant_id)
+        prepare_data(tenant_id)
 
     except requests.RequestException as e:
         logger.error(f"Ошибка при запросе данных из API: {str(e)}")
         raise HTTPException(status_code=500, detail="Ошибка обновления JSON файла.")
-
-def load_json_data(tenant_id):
-    file_path = os.path.join(BASE_DIR, f"{tenant_id}.json")
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail=f"Файл с tenant_id={tenant_id} не найден.")
-
-    with open(file_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
-    logger.info(f"Данные для tenant_id={tenant_id} загружены.")
-    data_cache[tenant_id] = data
-
-    documents = [extract_text_fields(doc) for doc in data.get("data", {}).get("items", [])]
-    embeddings_cache[tenant_id] = search_model.encode(documents, convert_to_tensor=True)
-
-def extract_text_fields(record):
-    excluded_keys = {"id", "categoryId", "currencyId", "langId", "employeeId", "employeeDescription"}
-    return " ".join(str(value) for key, value in record.items() if key not in excluded_keys and value is not None)
 
 @app.post("/ask")
 async def ask_assistant(
@@ -173,34 +208,40 @@ async def ask_assistant(
         if not input_text:
             raise HTTPException(status_code=400, detail="Необходимо передать текст или файл.")
 
-        file_path = os.path.join(BASE_DIR, f"{tenant_id}.json")
-        if not os.path.exists(file_path):
+        if tenant_id not in data_cache:
             update_json_file(mydtoken, tenant_id)
 
-        if tenant_id not in embeddings_cache:
-            load_json_data(tenant_id)
+        normalized_question = normalize_text(input_text)
 
-        document_embeddings = embeddings_cache[tenant_id]
-
-        query_embedding = search_model.encode(input_text, convert_to_tensor=True)
-        similarities = util.pytorch_cos_sim(query_embedding, document_embeddings)
+        query_embedding = search_model.encode(normalized_question, convert_to_tensor=True)
+        similarities = util.pytorch_cos_sim(query_embedding, embeddings_cache[tenant_id])
         similarities = similarities[0]
-        top_results = similarities.topk(10)
+        top_vector_indices = similarities.topk(10).indices.tolist()
+
+        bm25 = bm25_cache[tenant_id]
+        tokenized_query = normalized_question.split()
+        bm25_scores = bm25.get_scores(tokenized_query)
+        top_bm25_indices = np.argsort(bm25_scores)[::-1][:10]
+
+        hybrid_scores = {}
+        for idx in top_vector_indices:
+            hybrid_scores[idx] = similarities[idx].item() * 1.3
+        for idx in top_bm25_indices:
+            hybrid_scores[idx] = hybrid_scores.get(idx, 0) + bm25_scores[idx]
+
+        sorted_indices = sorted(hybrid_scores, key=hybrid_scores.get, reverse=True)[:10]
 
         search_results = [
             {
-                "text": data_cache[tenant_id]["data"]["items"][idx].get("serviceName", "Не указано"),
-                "price": data_cache[tenant_id]["data"]["items"][idx].get("price", "Цена не указана"),
-                "filial": data_cache[tenant_id]["data"]["items"][idx].get("filialName", "Филиал не указан"),
-                "specialist": data_cache[tenant_id]["data"]["items"][idx].get("employeeFullName", "Специалист не указан")
+                "text": data_cache[tenant_id][idx].get("serviceName", "Не указано"),
+                "price": data_cache[tenant_id][idx].get("price", "Цена не указана"),
+                "filial": data_cache[tenant_id][idx].get("filialName", "Филиал не указан"),
+                "specialist": data_cache[tenant_id][idx].get("employeeFullName", "Специалист не указан")
             }
-            for idx in top_results[1].tolist()
+            for idx in sorted_indices
         ]
 
-        context = "\n".join([
-            f"Услуга: {res['text']}\nЦена: {res['price']} руб.\nФилиал: {res['filial']}\nСпециалист: {res['specialist']}"
-            for res in search_results
-        ])
+        context = "\n".join([f"Услуга: {res['text']}\nЦена: {res['price']} руб.\nФилиал: {res['filial']}\nСпециалист: {res['specialist']}" for res in search_results])
 
         if user_id not in threads:
             threads[user_id] = {
@@ -216,11 +257,17 @@ async def ask_assistant(
         threads[user_id]["last_active"] = time.time()
         thread = threads[user_id]["thread"]
 
-        threads[user_id]["context"] = f"Контекст:\n{context}\nПользователь спрашивает: {input_text}"
+        new_context = f"\nКонтекст:\n{context}\nПользователь спрашивает: {input_text}"
+        if len(threads[user_id]["context"]) + len(new_context) > 29000:
+            threads[user_id]["context"] = threads[user_id]["context"][-20000:]
+        threads[user_id]["context"] += new_context
+
         thread.write(threads[user_id]["context"])
 
         run = assistant.run(thread)
         result = run.wait()
+
+        threads[user_id]["context"] += f"\nОтвет ассистента: {result.text}"
 
         logger.info(f"Контекст: {threads[user_id]['context']}")
         logger.info(f"Ответ ассистента: {result.text}")
