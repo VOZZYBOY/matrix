@@ -171,16 +171,14 @@ def generate_openai_response(context: str, history: list, question: str) -> str:
         {"role": "system", "content": context}
     ]
     
-
-    for entry in history[-3:]:
+    for entry in history[-5:]:
         messages.append({"role": "user", "content": entry['user_query']})
         messages.append({"role": "assistant", "content": entry['assistant_response']})
     
-    messages.append({"role": "user", "content": question})
-    
+    messages.append({"role": "user", "content": question}) 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4-0125-preview",
             messages=messages,
             temperature=0.7,
             max_tokens=1000
@@ -189,7 +187,6 @@ def generate_openai_response(context: str, history: list, question: str) -> str:
     except Exception as e:
         logger.error(f"Ошибка OpenAI API: {str(e)}")
         return "Извините, произошла ошибка обработки запроса"
-
 @app.post("/ask")
 async def ask_assistant(
     user_id: str = Form(...),
@@ -199,7 +196,6 @@ async def ask_assistant(
     file: UploadFile = File(None)
 ):
     try:
-        # Очистка старых сессий (30 минут неактивности)
         current_time = time.time()
         expired_users = [uid for uid, data in conversation_history.items() 
                         if current_time - data["last_active"] > 1800]
@@ -231,16 +227,16 @@ async def ask_assistant(
         normalized_question = normalize_text(input_text)
         tokenized_query = tokenize_text(normalized_question)
 
-        # Поиск по BM25
+       
         bm25_scores = bm25_cache[tenant_id].get_scores(tokenized_query)
         top_bm25_indices = np.argsort(bm25_scores)[::-1][:10].tolist()
 
-        # Векторный поиск
+        
         query_embedding = search_model.encode(normalized_question, convert_to_tensor=True)
         similarities = util.pytorch_cos_sim(query_embedding, embeddings_cache[tenant_id])
         top_vector_indices = similarities[0].topk(10).indices.tolist()
 
-        # Объединение результатов
+   
         combined_indices = list(set(top_bm25_indices + top_vector_indices))[:10]
 
         search_results = [
@@ -258,7 +254,7 @@ async def ask_assistant(
             for res in search_results
         ])
 
-        # Инициализация или обновление истории
+       
         if user_id not in conversation_history:
             conversation_history[user_id] = {
                 "history": [],
