@@ -24,8 +24,8 @@ os.makedirs(BASE_DIR, exist_ok=True)
 API_URL = "https://dev.back.matrixcrm.ru/api/v1/AI/servicesByFilters"
 
 # Yandex Cloud конфигурация
-YANDEX_FOLDER_ID = "<ваш_идентификатор_каталога>"
-YANDEX_API_KEY = "<ваш_API-ключ>"
+YANDEX_FOLDER_ID = "AQVNw5Kg0jXoaateYQWdSr2k8cbst_y4_WcbvZrW"
+YANDEX_API_KEY = "b1gnq2v60fut60hs9vfb"
 
 logger.info("Загрузка модели векторного поиска...")
 search_model = SentenceTransformer("sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
