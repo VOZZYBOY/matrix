@@ -79,35 +79,52 @@ async def load_json_data(tenant_id: str) -> List[dict]:
         return json.loads(content).get("data", {}).get("items", [])
 
 async def prepare_data(tenant_id: str):
+    """Загружает данные в кэш только если их нет или они устарели"""
     async with cache_locks["data"]:
+        
         if tenant_id in data_cache:
-            return
+            cached_data = data_cache[tenant_id]
+            if time.time() - cached_data["timestamp"] < 3600:
+                return
+
         records = await load_json_data(tenant_id)
         documents = [extract_text_fields(record) for record in records]
         
-        loop = asyncio.get_event_loop()
-        embeddings = await loop.run_in_executor(
-            None,
-            lambda: search_model.encode(documents, convert_to_tensor=True)
-        )
-        
-        tokenized_corpus = [tokenize_text(doc) for doc in documents]
-        bm25 = BM25Okapi(tokenized_corpus)
 
+        loop = asyncio.get_event_loop()
+        embeddings, bm25 = await asyncio.gather(
+            loop.run_in_executor(
+                None, 
+                lambda: search_model.encode(documents, convert_to_tensor=True)
+            ),
+            loop.run_in_executor(
+                None,
+                lambda: BM25Okapi([tokenize_text(doc) for doc in documents])
+            )
+        )
         async with cache_locks["embeddings"], cache_locks["bm25"]:
             data_cache[tenant_id] = {
                 "records": records,
-                "raw_texts": documents
+                "raw_texts": documents,
+                "timestamp": time.time() 
             }
             embeddings_cache[tenant_id] = embeddings
             bm25_cache[tenant_id] = bm25
 
 async def update_json_file(mydtoken: str, tenant_id: str):
+    """Обновляет файл только при необходимости"""
     file_path = os.path.join(BASE_DIR, f"{tenant_id}.json")
-    
-    if os.path.exists(file_path):
-        logger.info(f"Файл {file_path} уже существует. Используем данные из файла.")
-        await prepare_data(tenant_id)
+    need_update = False
+
+    if not os.path.exists(file_path):
+        need_update = True
+    else:
+        file_age = time.time() - os.path.getmtime(file_path)
+        if file_age > 2_592_000:  
+            need_update = True
+
+    if not need_update:
+        logger.info(f"Файл {file_path} актуален, пропускаем обновление.")
         return
 
     try:
@@ -135,11 +152,19 @@ async def update_json_file(mydtoken: str, tenant_id: str):
                     ensure_ascii=False, 
                     indent=4
                 ))
-        await prepare_data(tenant_id)
+
+        
+        async with cache_locks["data"]:
+            if tenant_id in data_cache:
+                del data_cache[tenant_id]
+            if tenant_id in embeddings_cache:
+                del embeddings_cache[tenant_id]
+            if tenant_id in bm25_cache:
+                del bm25_cache[tenant_id]
 
     except Exception as e:
-        logger.error(f"Ошибка при запросе данных из API: {str(e)}")
-        raise HTTPException(status_code=500, detail="Ошибка обновления JSON файла.")
+        logger.error(f"Ошибка при обновлении файла: {str(e)}")
+        raise HTTPException(status_code=500, detail="Ошибка обновления данных.")
 
 async def rerank_with_cross_encoder(tenant_id: str, query: str, candidates: List[int]) -> List[int]:
     cross_inp = [(query, data_cache[tenant_id]["raw_texts"][idx]) for idx in candidates]
@@ -179,7 +204,6 @@ async def generate_yandexgpt_response(context: str, history: List[dict], questio
         {"role": "system", "text": f"Вот список 10 услуг:\n{context}\n"}
     ]
     
-    
     for entry in history[-3:]:
         messages.append({"role": "user", "text": entry['user_query']})
         messages.append({"role": "assistant", "text": entry['assistant_response']})
@@ -215,7 +239,6 @@ async def ask_assistant(
     file: UploadFile = File(None)
 ):
     try:
-        
         current_time = time.time()
         expired_users = [
             uid for uid, data in conversation_history.items()
@@ -248,9 +271,11 @@ async def ask_assistant(
         if not input_text:
             raise HTTPException(status_code=400, detail="Необходимо передать текст или файл.")
 
+        force_update = False 
         
-        if tenant_id not in data_cache:
+        if force_update or tenant_id not in data_cache:
             await update_json_file(mydtoken, tenant_id)
+        
         await prepare_data(tenant_id)
 
         normalized_question = normalize_text(input_text)
@@ -272,7 +297,6 @@ async def ask_assistant(
         reranked_indices = await rerank_with_cross_encoder(tenant_id, normalized_question, combined_indices)
         top_10_indices = reranked_indices[:10]
 
-       
         context = "\n".join([
             f"{i+1}. Услуга: {data_cache[tenant_id]['records'][idx].get('serviceName', 'Не указано')}\n"
             f"   Цена: {data_cache[tenant_id]['records'][idx].get('price', 'Цена не указана')} руб.\n"
@@ -281,7 +305,6 @@ async def ask_assistant(
             for i, idx in enumerate(top_10_indices)
         ])
 
-      
         if user_id not in conversation_history:
             conversation_history[user_id] = {
                 "history": [],
@@ -289,7 +312,6 @@ async def ask_assistant(
                 "greeted": False
             }
 
-       
         if not conversation_history[user_id]["greeted"]:
             context = (
                 "Здравствуйте! Я администратор косметологической клиники. "
@@ -300,7 +322,6 @@ async def ask_assistant(
 
         conversation_history[user_id]["last_active"] = time.time()
 
-       
         response_text = await generate_yandexgpt_response(
             context=context,
             history=conversation_history[user_id]["history"],
