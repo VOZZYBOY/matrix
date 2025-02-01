@@ -150,7 +150,7 @@ async def update_json_file(mydtoken: str, tenant_id: str):
             max_pages = 200
             current_page = 0
 
-            while True:
+            while current_page < max_pages:
                 async with session.get(API_URL, headers=headers, params=params) as response:
                     response.raise_for_status()
                     data = await response.json()
@@ -162,6 +162,7 @@ async def update_json_file(mydtoken: str, tenant_id: str):
                     all_data.extend(items)
                     logger.info(f"Получено {len(items)} записей с страницы {params['page']}.")
                     params["page"] += 1
+                    current_page += 1
 
             async with aiofiles.open(file_path, "w", encoding="utf-8") as json_file:
                 await json_file.write(json.dumps(
