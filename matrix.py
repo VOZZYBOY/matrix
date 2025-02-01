@@ -11,11 +11,12 @@ import re
 import pickle
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Form, UploadFile, File
-from sentence_transformers import SentenceTransformer, util, CrossEncoder
+from sentence_transformers import SentenceTransformer,CrossEncoder
 from rank_bm25 import BM25Okapi
 from voicerecognise import recognize_audio_with_sdk
 from yandex_cloud_ml_sdk import YCloudML
 from typing import Dict, List, Optional
+import faiss  
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,6 +24,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
+
 
 BASE_DIR = "base"
 EMBEDDINGS_DIR = "embeddings_data"
@@ -33,9 +35,10 @@ API_URL = "https://dev.back.matrixcrm.ru/api/v1/AI/servicesByFilters"
 YANDEX_FOLDER_ID = "b1gnq2v60fut60hs9vfb"
 YANDEX_API_KEY = "AQVNw5Kg0jXoaateYQWdSr2k8cbst_y4_WcbvZrW"
 
+
 logger.info("Загрузка моделей...")
 search_model = SentenceTransformer("sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
-cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')  # Кросс-энкодер для реранкинга
 logger.info("Модели успешно загружены.")
 
 conversation_history: Dict[str, Dict] = {}
@@ -84,8 +87,9 @@ async def prepare_data(tenant_id: str):
     data_file = tenant_path / "data.json"
     embeddings_file = tenant_path / "embeddings.npy"
     bm25_file = tenant_path / "bm25.pkl"
+    faiss_index_file = tenant_path / "faiss_index.index"  
 
-    if all([f.exists() for f in [data_file, embeddings_file, bm25_file]]):
+    if all([f.exists() for f in [data_file, embeddings_file, bm25_file, faiss_index_file]]):
         file_age = time.time() - os.path.getmtime(data_file)
         if file_age < 2_592_000: 
             async with aiofiles.open(data_file, "r") as f:
@@ -95,7 +99,8 @@ async def prepare_data(tenant_id: str):
             with open(bm25_file, "rb") as f:
                 bm25 = pickle.load(f)
             
-            return data, embeddings, bm25
+            index = faiss.read_index(str(faiss_index_file))  
+            return data, embeddings, bm25, index
 
     records = await load_json_data(tenant_id)
     documents = [extract_text_fields(record) for record in records]
@@ -112,6 +117,12 @@ async def prepare_data(tenant_id: str):
         )
     )
 
+   
+    dimension = embeddings.shape[1]  
+    index = faiss.IndexFlatL2(dimension)  
+    index.add(embeddings)  
+    faiss.write_index(index, str(faiss_index_file)) 
+
     async with aiofiles.open(data_file, "w") as f:
         await f.write(json.dumps({
             "records": records,
@@ -123,7 +134,7 @@ async def prepare_data(tenant_id: str):
     with open(bm25_file, "wb") as f:
         pickle.dump(bm25, f)
 
-    return {"records": records, "raw_texts": documents}, embeddings, bm25
+    return {"records": records, "raw_texts": documents}, embeddings, bm25, index
 
 async def update_json_file(mydtoken: str, tenant_id: str):
     """Обновляет данные и удаляет старые файлы"""
@@ -147,10 +158,7 @@ async def update_json_file(mydtoken: str, tenant_id: str):
             headers = {"Authorization": f"Bearer {mydtoken}"}
             params = {"tenantId": tenant_id, "page": 1}
             all_data = []
-            max_pages = 200
-            current_page = 0
-
-            while current_page < max_pages:
+            while True:
                 async with session.get(API_URL, headers=headers, params=params) as response:
                     response.raise_for_status()
                     data = await response.json()
@@ -162,7 +170,6 @@ async def update_json_file(mydtoken: str, tenant_id: str):
                     all_data.extend(items)
                     logger.info(f"Получено {len(items)} записей с страницы {params['page']}.")
                     params["page"] += 1
-                    current_page += 1
 
             async with aiofiles.open(file_path, "w", encoding="utf-8") as json_file:
                 await json_file.write(json.dumps(
@@ -175,14 +182,8 @@ async def update_json_file(mydtoken: str, tenant_id: str):
         logger.error(f"Ошибка при обновлении файла: {str(e)}")
         raise HTTPException(status_code=500, detail="Ошибка обновления данных.")
 
-async def rerank_with_cross_encoder(tenant_id: str, query: str, candidates: List[int]) -> List[int]:
-    tenant_path = get_tenant_path(tenant_id)
-    data_file = tenant_path / "data.json"
-    
-    async with aiofiles.open(data_file, "r") as f:
-        data = json.loads(await f.read())
-        raw_texts = data["raw_texts"]
-
+async def rerank_with_cross_encoder(query: str, candidates: List[int], raw_texts: List[str]) -> List[int]:
+    """Реранкинг топ-10 кандидатов с использованием кросс-энкодера"""
     cross_inp = [(query, raw_texts[idx]) for idx in candidates]
     loop = asyncio.get_event_loop()
     cross_scores = await loop.run_in_executor(
@@ -223,7 +224,8 @@ async def generate_yandexgpt_response(context: str, history: List[dict], questio
 
 5. **Стиль общения**:
    - Пиши живым и дружелюбным стилем, избегая канцеляризмов.
-   - Используй эмодзи для передачи эмоций (например, 😊, 😉, 👍).
+   - Используй эмодзи для передачи эмоций (например, 😊, 😉, 👍)
+   - Чередуй эмодзи,и не использий их очень часто.
    - Ориентируйся на контекст вопроса: если пользователь спрашивает про цены, добавь «💸», если про запись — «🗓», и т. п.
    - Если информация не найдена, вежливо сообщи об этом (без эмодзи).
 
@@ -231,10 +233,12 @@ async def generate_yandexgpt_response(context: str, history: List[dict], questio
    - Указывай цены с предлогом "от" (например, "от 12000 рублей").
    - Не здоровайся с пользователем повторно в рамках одного диалога.
    - Проявляй сопереживание, если пользователь делится проблемами, и можешь мягко пошутить, чтобы разрядить обстановку.
+   -Не выдумывай информации,если у тебя нет информации прямо скажи,
 
 7. **Контекст диалога**:
    - Учитывай историю диалога, чтобы ответы были последовательными и релевантными.
    - Если пользователь задает уточняющие вопросы, используй предыдущие ответы для более точных рекомендаций.
+   - Не переходи на другие темы и не отвечай на провакационные вопросы,своди все к тому,что ты асситент и это не в твоей 
 """
     messages = [
         {"role": "system", "text": system_prompt},
@@ -255,7 +259,7 @@ async def generate_yandexgpt_response(context: str, history: List[dict], questio
         result = await loop.run_in_executor(
             None,
             lambda: sdk.models.completions(model_uri)
-                .configure(temperature=0.7, max_tokens=2000)
+                .configure(temperature=0.6, max_tokens=4096)
                 .run(messages)
         )
 
@@ -313,27 +317,34 @@ async def ask_assistant(
         if force_update or not (get_tenant_path(tenant_id) / "data.json").exists():
             await update_json_file(mydtoken, tenant_id)
         
-        data_dict, embeddings, bm25 = await prepare_data(tenant_id)
+        data_dict, embeddings, bm25, faiss_index = await prepare_data(tenant_id)
 
         normalized_question = normalize_text(input_text)
         tokenized_query = tokenize_text(normalized_question)
 
         bm25_scores = bm25.get_scores(tokenized_query)
-        top_bm25_indices = np.argsort(bm25_scores)[::-1][:30].tolist()
+        top_bm25_indices = np.argsort(bm25_scores)[::-1][:50].tolist()
 
+        
         loop = asyncio.get_event_loop()
         query_embedding = await loop.run_in_executor(
             None,
-            lambda: search_model.encode(normalized_question, convert_to_tensor=True)
+            lambda: search_model.encode(normalized_question, convert_to_tensor=True).cpu().numpy()
         )
-        similarities = util.pytorch_cos_sim(query_embedding, embeddings)
-        top_vector_indices = similarities[0].topk(30).indices.tolist()
+        D, I = faiss_index.search(query_embedding.reshape(1, -1), 50) 
+        top_faiss_indices = I[0].tolist()
 
-        combined_indices = list(set(top_bm25_indices + top_vector_indices))[:50]
+        
+        combined_indices = list(set(top_bm25_indices + top_faiss_indices))[:50]
 
-        reranked_indices = await rerank_with_cross_encoder(tenant_id, normalized_question, combined_indices)
-        top_10_indices = reranked_indices[:10]
+       
+        top_10_indices = await rerank_with_cross_encoder(
+            query=normalized_question,
+            candidates=combined_indices[:10],
+            raw_texts=data_dict["raw_texts"]
+        )
 
+        
         context = "\n".join([
             f"{i+1}. Услуга: {data_dict['records'][idx].get('serviceName', 'Не указано')}\n"
             f"   Цена: {data_dict['records'][idx].get('price', 'Цена не указана')} руб.\n"
