@@ -8,12 +8,13 @@ import time
 import os
 import numpy as np
 import re
+import pickle
+from pathlib import Path
 from fastapi import FastAPI, HTTPException, Form, UploadFile, File
 from sentence_transformers import SentenceTransformer, util, CrossEncoder
 from rank_bm25 import BM25Okapi
 from voicerecognise import recognize_audio_with_sdk
 from yandex_cloud_ml_sdk import YCloudML
-from cachetools import TTLCache
 from typing import Dict, List, Optional
 
 logging.basicConfig(
@@ -24,7 +25,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BASE_DIR = "base"
+EMBEDDINGS_DIR = "embeddings_data"
 os.makedirs(BASE_DIR, exist_ok=True)
+os.makedirs(EMBEDDINGS_DIR, exist_ok=True)
 API_URL = "https://dev.back.matrixcrm.ru/api/v1/AI/servicesByFilters"
 
 YANDEX_FOLDER_ID = "b1gnq2v60fut60hs9vfb"
@@ -35,18 +38,15 @@ search_model = SentenceTransformer("sentence-transformers/paraphrase-multilingua
 cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
 logger.info("Модели успешно загружены.")
 
-data_cache = TTLCache(maxsize=100, ttl=1800)
-embeddings_cache = TTLCache(maxsize=100, ttl=1800)
-bm25_cache = TTLCache(maxsize=100, ttl=1800)
 conversation_history: Dict[str, Dict] = {}
 
-cache_locks = {
-    "data": asyncio.Lock(),
-    "embeddings": asyncio.Lock(),
-    "bm25": asyncio.Lock()
-}
-
 app = FastAPI()
+
+def get_tenant_path(tenant_id: str) -> Path:
+    """Создает папку для конкретного тенанта"""
+    tenant_path = Path(EMBEDDINGS_DIR) / tenant_id
+    tenant_path.mkdir(parents=True, exist_ok=True)
+    return tenant_path
 
 def normalize_text(text: str) -> str:
     text = text.lower().strip()
@@ -79,59 +79,76 @@ async def load_json_data(tenant_id: str) -> List[dict]:
         return json.loads(content).get("data", {}).get("items", [])
 
 async def prepare_data(tenant_id: str):
-    """Загружает данные в кэш только если их нет или они устарели"""
-    async with cache_locks["data"]:
-        
-        if tenant_id in data_cache:
-            cached_data = data_cache[tenant_id]
-            if time.time() - cached_data["timestamp"] < 3600:
-                return
+    """Загружает или генерирует данные для тенанта"""
+    tenant_path = get_tenant_path(tenant_id)
+    data_file = tenant_path / "data.json"
+    embeddings_file = tenant_path / "embeddings.npy"
+    bm25_file = tenant_path / "bm25.pkl"
 
-        records = await load_json_data(tenant_id)
-        documents = [extract_text_fields(record) for record in records]
-        
+    if all([f.exists() for f in [data_file, embeddings_file, bm25_file]]):
+        file_age = time.time() - os.path.getmtime(data_file)
+        if file_age < 2_592_000: 
+            async with aiofiles.open(data_file, "r") as f:
+                data = json.loads(await f.read())
+            
+            embeddings = np.load(embeddings_file)
+            with open(bm25_file, "rb") as f:
+                bm25 = pickle.load(f)
+            
+            return data, embeddings, bm25
 
-        loop = asyncio.get_event_loop()
-        embeddings, bm25 = await asyncio.gather(
-            loop.run_in_executor(
-                None, 
-                lambda: search_model.encode(documents, convert_to_tensor=True)
-            ),
-            loop.run_in_executor(
-                None,
-                lambda: BM25Okapi([tokenize_text(doc) for doc in documents])
-            )
+    records = await load_json_data(tenant_id)
+    documents = [extract_text_fields(record) for record in records]
+
+    loop = asyncio.get_event_loop()
+    embeddings, bm25 = await asyncio.gather(
+        loop.run_in_executor(
+            None, 
+            lambda: search_model.encode(documents, convert_to_tensor=True).cpu().numpy()
+        ),
+        loop.run_in_executor(
+            None,
+            lambda: BM25Okapi([tokenize_text(doc) for doc in documents])
         )
-        async with cache_locks["embeddings"], cache_locks["bm25"]:
-            data_cache[tenant_id] = {
-                "records": records,
-                "raw_texts": documents,
-                "timestamp": time.time() 
-            }
-            embeddings_cache[tenant_id] = embeddings
-            bm25_cache[tenant_id] = bm25
+    )
+
+    async with aiofiles.open(data_file, "w") as f:
+        await f.write(json.dumps({
+            "records": records,
+            "raw_texts": documents,
+            "timestamp": time.time()
+        }))
+
+    np.save(embeddings_file, embeddings)
+    with open(bm25_file, "wb") as f:
+        pickle.dump(bm25, f)
+
+    return {"records": records, "raw_texts": documents}, embeddings, bm25
 
 async def update_json_file(mydtoken: str, tenant_id: str):
-    """Обновляет файл только при необходимости"""
+    """Обновляет данные и удаляет старые файлы"""
+    tenant_path = get_tenant_path(tenant_id)
     file_path = os.path.join(BASE_DIR, f"{tenant_id}.json")
-    need_update = False
 
-    if not os.path.exists(file_path):
-        need_update = True
-    else:
+    if os.path.exists(file_path):
         file_age = time.time() - os.path.getmtime(file_path)
-        if file_age > 2_592_000:  
-            need_update = True
+        if file_age < 2_592_000:
+            logger.info(f"Файл {file_path} актуален, пропускаем обновление.")
+            return
 
-    if not need_update:
-        logger.info(f"Файл {file_path} актуален, пропускаем обновление.")
-        return
+    for f in tenant_path.glob("*"):
+        try:
+            os.remove(f)
+        except Exception as e:
+            logger.error(f"Ошибка удаления файла {f}: {e}")
 
     try:
         async with aiohttp.ClientSession() as session:
             headers = {"Authorization": f"Bearer {mydtoken}"}
             params = {"tenantId": tenant_id, "page": 1}
             all_data = []
+            max_pages = 200
+            current_page = 0
 
             while True:
                 async with session.get(API_URL, headers=headers, params=params) as response:
@@ -153,21 +170,19 @@ async def update_json_file(mydtoken: str, tenant_id: str):
                     indent=4
                 ))
 
-        
-        async with cache_locks["data"]:
-            if tenant_id in data_cache:
-                del data_cache[tenant_id]
-            if tenant_id in embeddings_cache:
-                del embeddings_cache[tenant_id]
-            if tenant_id in bm25_cache:
-                del bm25_cache[tenant_id]
-
     except Exception as e:
         logger.error(f"Ошибка при обновлении файла: {str(e)}")
         raise HTTPException(status_code=500, detail="Ошибка обновления данных.")
 
 async def rerank_with_cross_encoder(tenant_id: str, query: str, candidates: List[int]) -> List[int]:
-    cross_inp = [(query, data_cache[tenant_id]["raw_texts"][idx]) for idx in candidates]
+    tenant_path = get_tenant_path(tenant_id)
+    data_file = tenant_path / "data.json"
+    
+    async with aiofiles.open(data_file, "r") as f:
+        data = json.loads(await f.read())
+        raw_texts = data["raw_texts"]
+
+    cross_inp = [(query, raw_texts[idx]) for idx in candidates]
     loop = asyncio.get_event_loop()
     cross_scores = await loop.run_in_executor(
         None,
@@ -184,27 +199,48 @@ async def generate_yandexgpt_response(context: str, history: List[dict], questio
     3) Предлагает записаться на приём, если уместно.
     Использует дружелюбный тон.
     """
-    system_prompt = """Ты — ассистент косметологической клиники. Пиши от первого лица, дружелюбно, как если бы ты был живым администратором-консультантом:
-1. Прочитай 10 услуг в контексте и учти, что пользователь интересуется вопросами об услугах, ценах, специалистах.
-2. Выбери (до) 5 наиболее подходящих услуг или процедур. 
-   - Для каждой назови цену, филиал, специалиста (если есть).
-   - Объясни, почему это может подойти пользователю (коротко, 1-2 предложения).
-3. Если ничего не подходит, вежливо сообщи, что нужно уточнить запрос.
-4. В конце можешь предложить пользователю записаться на удобное время, если это уместно (например, «Хочется записаться на консультацию?»).
-5. Старайся писать живым и дружелюбным стилем, избегая канцеляризмов.
-6.Пиши вежливо и дружелюбно.
-- Добавляй в ответы эмодзи (например, 😊, 😉, 👍), особенно при приветствии или позитивных рекомендациях.
-- Ориентируйся на контекст вопроса: если пользователь спрашивает про цены, можешь поставить «💸», если про запись — «🗓», и т. п.
-- Если информация не найдена, вежливо сообщи об этом без эмодзи.
-7. Указывай все цены если они есть не просто числом,а добавляй предлог от,например от 12000 рублей,и так далее
-"""
+    system_prompt = """Ты — ассистент косметологической клиники по имени Аида. Пиши от первого лица, дружелюбно и тепло, как если бы ты был живым администратором-консультантом. Твоя задача — помогать пользователям подбирать услуги, отвечать на вопросы и создавать приятное впечатление от общения.
 
+1. **Анализ запроса**:
+   - Прочитай 10 услуг в контексте и учти, что пользователь интересуется вопросами об услугах, ценах, специалистах или других деталях.
+   - Если запрос неясен, задай уточняющие вопросы, чтобы лучше понять потребности пользователя.
+
+2. **Подбор услуг**:
+   - Выбери до 5 наиболее подходящих услуг или процедур.
+   - Для каждой услуги:
+     - Назови цену (например, "от 12000 рублей").
+     - Укажи филиал, где доступна услуга.
+     - Назови специалиста, если он указан.
+     - Объясни, почему эта услуга может подойти пользователю (коротко, 1-2 предложения).
+
+3. **Если ничего не подходит**:
+   - Вежливо сообщи, что нужно уточнить запрос, и предложи варианты, как это сделать (например, "Можешь уточнить, что именно тебя интересует?").
+
+4. **Завершение диалога**:
+   - Если уместно, предложи записаться на консультацию или процедуру (например, "Хочешь записаться на удобное время?").
+   - Добавь дружелюбное завершение (например, "Если остались вопросы, я всегда рада помочь!").
+
+5. **Стиль общения**:
+   - Пиши живым и дружелюбным стилем, избегая канцеляризмов.
+   - Используй эмодзи для передачи эмоций (например, 😊, 😉, 👍).
+   - Ориентируйся на контекст вопроса: если пользователь спрашивает про цены, добавь «💸», если про запись — «🗓», и т. п.
+   - Если информация не найдена, вежливо сообщи об этом (без эмодзи).
+
+6. **Особые указания**:
+   - Указывай цены с предлогом "от" (например, "от 12000 рублей").
+   - Не здоровайся с пользователем повторно в рамках одного диалога.
+   - Проявляй сопереживание, если пользователь делится проблемами, и можешь мягко пошутить, чтобы разрядить обстановку.
+
+7. **Контекст диалога**:
+   - Учитывай историю диалога, чтобы ответы были последовательными и релевантными.
+   - Если пользователь задает уточняющие вопросы, используй предыдущие ответы для более точных рекомендаций.
+"""
     messages = [
         {"role": "system", "text": system_prompt},
         {"role": "system", "text": f"Вот список 10 услуг:\n{context}\n"}
     ]
     
-    for entry in history[-3:]:
+    for entry in history[-10:]:
         messages.append({"role": "user", "text": entry['user_query']})
         messages.append({"role": "assistant", "text": entry['assistant_response']})
 
@@ -273,15 +309,15 @@ async def ask_assistant(
 
         force_update = False 
         
-        if force_update or tenant_id not in data_cache:
+        if force_update or not (get_tenant_path(tenant_id) / "data.json").exists():
             await update_json_file(mydtoken, tenant_id)
         
-        await prepare_data(tenant_id)
+        data_dict, embeddings, bm25 = await prepare_data(tenant_id)
 
         normalized_question = normalize_text(input_text)
         tokenized_query = tokenize_text(normalized_question)
 
-        bm25_scores = bm25_cache[tenant_id].get_scores(tokenized_query)
+        bm25_scores = bm25.get_scores(tokenized_query)
         top_bm25_indices = np.argsort(bm25_scores)[::-1][:30].tolist()
 
         loop = asyncio.get_event_loop()
@@ -289,7 +325,7 @@ async def ask_assistant(
             None,
             lambda: search_model.encode(normalized_question, convert_to_tensor=True)
         )
-        similarities = util.pytorch_cos_sim(query_embedding, embeddings_cache[tenant_id])
+        similarities = util.pytorch_cos_sim(query_embedding, embeddings)
         top_vector_indices = similarities[0].topk(30).indices.tolist()
 
         combined_indices = list(set(top_bm25_indices + top_vector_indices))[:50]
@@ -298,10 +334,10 @@ async def ask_assistant(
         top_10_indices = reranked_indices[:10]
 
         context = "\n".join([
-            f"{i+1}. Услуга: {data_cache[tenant_id]['records'][idx].get('serviceName', 'Не указано')}\n"
-            f"   Цена: {data_cache[tenant_id]['records'][idx].get('price', 'Цена не указана')} руб.\n"
-            f"   Филиал: {data_cache[tenant_id]['records'][idx].get('filialName', 'Филиал не указан')}\n"
-            f"   Специалист: {data_cache[tenant_id]['records'][idx].get('employeeFullName', 'Специалист не указан')}"
+            f"{i+1}. Услуга: {data_dict['records'][idx].get('serviceName', 'Не указано')}\n"
+            f"   Цена: {data_dict['records'][idx].get('price', 'Цена не указана')} руб.\n"
+            f"   Филиал: {data_dict['records'][idx].get('filialName', 'Филиал не указан')}\n"
+            f"   Специалист: {data_dict['records'][idx].get('employeeFullName', 'Специалист не указан')}"
             for i, idx in enumerate(top_10_indices)
         ])
 
@@ -331,7 +367,7 @@ async def ask_assistant(
         conversation_history[user_id]["history"].append({
             "user_query": input_text,
             "assistant_response": response_text,
-            "search_results": [data_cache[tenant_id]['records'][idx] for idx in top_10_indices]
+            "search_results": [data_dict['records'][idx] for idx in top_10_indices]
         })
 
         return {"response": response_text}
