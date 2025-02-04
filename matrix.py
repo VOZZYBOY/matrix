@@ -1,5 +1,5 @@
-import asyncio
 import aiohttp
+import asyncio
 import aiofiles
 import json
 import uvicorn
@@ -38,7 +38,7 @@ YANDEX_API_KEY = "AQVNw5Kg0jXoaateYQWdSr2k8cbst_y4_WcbvZrW"
 
 logger.info("Загрузка моделей...")
 search_model = SentenceTransformer("sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
-cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')  # Кросс-энкодер для реранкинга
 logger.info("Модели успешно загружены.")
 
 conversation_history: Dict[str, Dict] = {}
@@ -201,7 +201,7 @@ async def generate_yandexgpt_response(context: str, history: List[dict], questio
     3) Предлагает записаться на приём, если уместно.
     Использует дружелюбный тон.
     """
-    system_prompt = """
+    system_prompt =  system_prompt = """
 🔹 **Системный промпт для модели** 🔹
 
 **Ты – ассистент клиники MED YU MED.** Твоя задача – помогать пользователям находить информацию о специалистах, услугах, филиалах и ценах. Ты работаешь как **RAG-модель (Retrieval-Augmented Generation)**, что означает, что:
@@ -268,8 +268,6 @@ async def generate_yandexgpt_response(context: str, history: List[dict], questio
 
 Вопрос пользователя:
 {question}
-
-Ты – ассистент клиники. Твоя задача – предоставить точную информацию из контекста. Понимай, что могут быть уточняющие вопросы, и отвечай исходя из того, что уже было сказано. Пожалуйста, учитывай все данные из контекста.
 """
     messages = [
         {"role": "system", "text": system_prompt},
@@ -308,7 +306,7 @@ async def ask_assistant(
     question: Optional[str] = Form(None),
     mydtoken: str = Form(...),
     tenant_id: str = Form(...),
-    file: Optional[UploadFile] = File(None)
+    file: UploadFile = File(None)
 ):
     try:
         current_time = time.time()
