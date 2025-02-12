@@ -223,7 +223,7 @@ async def update_json_file(mydtoken: str, tenant_id: str):
             headers = {"Authorization": f"Bearer {mydtoken}"}
             params = {"tenantId": tenant_id, "page": 1}
             all_data = []
-            max_pages = 50  # ограничиваем загрузку до 50 страниц
+            max_pages = 50  
             while True:
                 if params["page"] > max_pages:
                     logger.info(f"Достигнут лимит {max_pages} страниц, завершаем загрузку.")
@@ -370,7 +370,7 @@ async def generate_yandexgpt_response(context: str, history: List[dict], questio
         result = await loop.run_in_executor(
             None,
             lambda: sdk.models.completions(model_uri)
-                .configure(temperature=0.6, max_tokens=4096)
+                .configure(temperature=0.55, max_tokens=1000)
                 .run(messages)
         )
         if result and result.alternatives:
@@ -442,14 +442,16 @@ async def ask_assistant(
             raw_texts=data_dict["raw_texts"]
         )
         
-        context = "\n".join([
-            f"{i+1}. Филиал: {data_dict['records'][idx].get('filialName', 'Не указан')} - Категория: {data_dict['records'][idx].get('categoryName', 'Не указана')}\n"
-            f"   Услуга: {data_dict['records'][idx].get('serviceName', 'Не указана')}\n"
-            f"   Цена: {data_dict['records'][idx].get('price', 'Цена не указана')} руб.\n"
-            f"   Специалист: {data_dict['records'][idx].get('employeeFullName', 'Не указан')}\n"
-            f"   Описание специалиста: {data_dict['records'][idx].get('employeeDescription', 'Описание не указано')}"
-            for i, idx in enumerate(top_10_indices[:5])
-        ])
+        context = "\n\n".join([
+    f"**Документ {i+1}:**\n" 
+    f"* Филиал: {data_dict['records'][idx].get('filialName', 'Не указан')}\n"
+    f"* Категория: {data_dict['records'][idx].get('categoryName', 'Не указана')}\n"
+    f"* Услуга: {data_dict['records'][idx].get('serviceName', 'Не указана')}\n"
+    f"* Цена: {data_dict['records'][idx].get('price', 'Цена не указана')} руб.\n"
+    f"* Специалист: {data_dict['records'][idx].get('employeeFullName', 'Не указан')}\n"
+    f"* Описание: {data_dict['records'][idx].get('employeeDescription', 'Описание не указано')}"  # <--  Можно добавить truncate_text
+    for i, idx in enumerate(top_10_indices[:5])
+])
         
         if user_id not in conversation_history:
             conversation_history[user_id] = {"history": [], "last_active": time.time(), "greeted": False}
