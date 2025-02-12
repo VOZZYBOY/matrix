@@ -223,7 +223,7 @@ async def update_json_file(mydtoken: str, tenant_id: str):
             headers = {"Authorization": f"Bearer {mydtoken}"}
             params = {"tenantId": tenant_id, "page": 1}
             all_data = []
-            max_pages = 50  
+            max_pages = 2000
             while True:
                 if params["page"] > max_pages:
                     logger.info(f"Достигнут лимит {max_pages} страниц, завершаем загрузку.")
@@ -449,7 +449,7 @@ async def ask_assistant(
     f"* Услуга: {data_dict['records'][idx].get('serviceName', 'Не указана')}\n"
     f"* Цена: {data_dict['records'][idx].get('price', 'Цена не указана')} руб.\n"
     f"* Специалист: {data_dict['records'][idx].get('employeeFullName', 'Не указан')}\n"
-    f"* Описание: {data_dict['records'][idx].get('employeeDescription', 'Описание не указано')}"  # <--  Можно добавить truncate_text
+    f"* Описание: {data_dict['records'][idx].get('employeeDescription', 'Описание не указано')}"  
     for i, idx in enumerate(top_10_indices[:5])
 ])
         
