@@ -260,7 +260,7 @@ async def rerank_with_cross_encoder(query: str, candidates: List[int], raw_texts
     return [candidates[i] for i in sorted_indices]
 
 
-# Пример схемы для function calling (если понадобится)
+
 free_times_function = {
     "name": "getFreeTimesOfEmployeeByChoosenServices",
     "description": "Получить свободное время сотрудника по выбранным услугам",
@@ -285,7 +285,7 @@ async def generate_yandexgpt_response(context: str, history: List[dict], questio
     """
     system_prompt = """# 🔹 Системный промпт для модели 🔹
 
-Ты – ассистент клиники MED YU MED. Твоя задача – помогать пользователям находить информацию о специалистах, услугах, филиалах и ценах. Ты работаешь как RAG-модель (Retrieval-Augmented Generation), что означает, что:
+Ты – ассистент клиники MED YU MED по имени Аида. Твоя задача – помогать пользователям находить информацию о специалистах, услугах, филиалах и ценах. Ты работаешь как RAG-модель (Retrieval-Augmented Generation), что означает, что:
 
 1. Весь контекст уже загружен – в нём есть подробные данные о специалистах, услугах, ценах и филиалах. Эта информация всегда доступна для поиска в контексте.
 
@@ -391,7 +391,7 @@ async def ask_assistant(
 ):
     try:
         current_time = time.time()
-        expired_users = [uid for uid, data in conversation_history.items() if current_time - data["last_active"] > 1800]
+        expired_users = [uid for uid, data in conversation_history.items() if current_time - data["last_active"] > 22296]
         for uid in expired_users:
             del conversation_history[uid]
 
@@ -428,7 +428,6 @@ async def ask_assistant(
             None,
             lambda: search_model.encode(normalized_question, convert_to_tensor=True).cpu().numpy()
         )
-        # Поиск в FAISS и фильтрация по расстоянию
         D, I = faiss_index.search(query_embedding.reshape(1, -1), 50)
         DISTANCE_THRESHOLD = 1.0
         filtered_faiss = [idx for idx, dist in zip(I[0].tolist(), D[0].tolist()) if dist < DISTANCE_THRESHOLD]
@@ -439,26 +438,21 @@ async def ask_assistant(
         combined_indices = list(set(top_bm25_indices + top_faiss_indices))[:50]
         top_10_indices = await rerank_with_cross_encoder(
             query=normalized_question,
-            candidates=combined_indices[:10],
+            candidates=combined_indices[:30],
             raw_texts=data_dict["raw_texts"]
         )
         
-        # Формирование контекста с учетом иерархии
         context = "\n".join([
             f"{i+1}. Филиал: {data_dict['records'][idx].get('filialName', 'Не указан')} - Категория: {data_dict['records'][idx].get('categoryName', 'Не указана')}\n"
             f"   Услуга: {data_dict['records'][idx].get('serviceName', 'Не указана')}\n"
             f"   Цена: {data_dict['records'][idx].get('price', 'Цена не указана')} руб.\n"
             f"   Специалист: {data_dict['records'][idx].get('employeeFullName', 'Не указан')}\n"
             f"   Описание специалиста: {data_dict['records'][idx].get('employeeDescription', 'Описание не указано')}"
-            for i, idx in enumerate(top_10_indices)
+            for i, idx in enumerate(top_10_indices[:5])
         ])
         
         if user_id not in conversation_history:
             conversation_history[user_id] = {"history": [], "last_active": time.time(), "greeted": False}
-
-        if not conversation_history[user_id]["greeted"]:
-            context = ("Здравствуйте! Я администратор клиники MED YU MED. С радостью помогу вам подобрать услугу или записаться на приём.\n" + context)
-            conversation_history[user_id]["greeted"] = True
 
         conversation_history[user_id]["last_active"] = time.time()
         response_text = await generate_yandexgpt_response(context, conversation_history[user_id]["history"], input_text)
