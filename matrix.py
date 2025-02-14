@@ -223,7 +223,7 @@ async def update_json_file(mydtoken: str, tenant_id: str):
             headers = {"Authorization": f"Bearer {mydtoken}"}
             params = {"tenantId": tenant_id, "page": 1}
             all_data = []
-            max_pages = 2000
+            max_pages = 500
             while True:
                 if params["page"] > max_pages:
                     logger.info(f"Достигнут лимит {max_pages} страниц, завершаем загрузку.")
