@@ -34,7 +34,7 @@ COPY app.py clinic_assistant.py ./
 COPY base/cleaned_data.json ./base/
 
 # Expose the application port
-EXPOSE 8000
+EXPOSE 8001
 
 # Start the application
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001"]
