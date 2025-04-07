@@ -1,11 +1,10 @@
 # Use the official Python image as a base
 FROM python:3.9-slim
 
-# Update and install curl
-RUN apt-get update && apt-get install -y curl && apt-get clean
-
-#Update and install ffmpeg
-RUN apt-get update && apt-get install -y ffmpeg && apt-get clean
+# Update and install curl and ffmpeg
+RUN apt-get update && \
+    apt-get install -y curl ffmpeg build-essential && \
+    apt-get clean
 
 # Install Yandex Cloud CLI
 RUN curl https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash && \
@@ -17,15 +16,25 @@ RUN yc --version
 # Set working directory
 WORKDIR /app
 
-# Copy the project files
-COPY . .
+# Copy just the requirements first for better caching
+COPY requirements.api.txt .
 
 # Install dependencies
-RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.api.txt && \
+    pip install --no-cache-dir --quiet flit && \
+    pip install --no-cache-dir --quiet -I git+https://github.com/yandex-cloud/yandex-cloud-ml-sdk.git@assistants_fc#egg=yandex-cloud-ml-sdk && \
+    pip install --no-cache-dir --upgrade --quiet pydantic
+
+# Make sure the base directory exists
+RUN mkdir -p /app/base
+
+# Copy the application files
+COPY app.py clinic_assistant.py ./
+COPY base/cleaned_data.json ./base/
 
 # Expose the application port
-EXPOSE 8001
+EXPOSE 8000
 
 # Start the application
-CMD ["uvicorn", "matrix:app", "--host", "0.0.0.0", "--port", "8001"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001"]
