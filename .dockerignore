@@ -42,7 +42,7 @@ venv.bak/
 *.log
 *.db
 *.sqlite3
-api.log # Твой файл логов
+api.log 
 
 # IDE / Editor specific
 .idea/
@@ -53,7 +53,7 @@ api.log # Твой файл логов
 .DS_Store
 Thumbs.db
 
-# Ненужные файлы из твоего проекта
+
 voicerecognise.py
 checkitfirtsnewcomer
-README.md # Часто документацию не включают в конечный образ
+README.md 
