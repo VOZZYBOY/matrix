@@ -1,1 +1,59 @@
+# .dockerignore
 
+# Git
+.git
+.gitignore
+
+# Python cache/artefacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environment
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Logs and databases
+*.log
+*.db
+*.sqlite3
+api.log # Твой файл логов
+
+# IDE / Editor specific
+.idea/
+.vscode/
+*.swp
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Ненужные файлы из твоего проекта
+voicerecognise.py
+checkitfirtsnewcomer
+README.md # Часто документацию не включают в конечный образ
