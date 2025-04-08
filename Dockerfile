@@ -30,7 +30,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 RUN mkdir -p /app/base
 
 # Copy the application files
-COPY app.py clinic_assistant.py ./
+COPY app.py matrix.py ./
 COPY base/cleaned_data.json ./base/
 
 # Expose the application port
