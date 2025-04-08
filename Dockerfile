@@ -3,9 +3,12 @@ FROM python:3.9-slim
 
 # Update and install curl and ffmpeg
 # Update and install curl, ffmpeg, build-essential AND git
+# Update and install curl, ffmpeg, build-essential AND git
+
 RUN apt-get update && \
-    apt-get install -y curl ffmpeg build-essential git && \ # <-- ДОБАВИТЬ 'git' СЮДА
+    apt-get install -y curl ffmpeg build-essential git && \
     apt-get clean
+    
 
 # Install Yandex Cloud CLI
 RUN curl https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash && \
