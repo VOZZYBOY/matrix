@@ -17,7 +17,7 @@ RUN yc --version
 WORKDIR /app
 
 # Copy just the requirements first for better caching
-COPY requirements.api.txt .
+COPY requirements.txt .
 
 # Install dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
