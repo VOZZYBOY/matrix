@@ -87,7 +87,6 @@ msgpack==1.1.0
 msrest==0.7.1
 multidict==6.1.0
 mypy-extensions==1.0.0
-networkx==3.4.2
 nltk==3.9.1
 numpy==1.26.4
 oauthlib==3.2.2
