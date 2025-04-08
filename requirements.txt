@@ -54,8 +54,7 @@ idna==3.10
 importlib_metadata==8.5.0
 importlib_resources==6.5.2
 iniconfig==2.0.0
-ipython==9.0.2
-ipython_pygments_lexers==1.1.1
+
 isodate==0.7.2
 jedi==0.19.2
 Jinja2==3.1.5
