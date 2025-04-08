@@ -22,7 +22,6 @@ chroma-hnswlib==0.7.6
 chromadb==0.6.3
 click==8.1.8
 coloredlogs==15.0.1
-context-python==0.18.0
 cryptography==44.0.2
 dataclasses-json==0.6.7
 decorator==5.2.1
