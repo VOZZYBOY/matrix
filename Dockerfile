@@ -21,7 +21,7 @@ COPY requirements.txt .
 
 # Install dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.api.txt && \
+    pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir --quiet flit && \
     pip install --no-cache-dir --quiet -I git+https://github.com/yandex-cloud/yandex-cloud-ml-sdk.git@assistants_fc#egg=yandex-cloud-ml-sdk && \
     pip install --no-cache-dir --upgrade --quiet pydantic
