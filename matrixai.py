@@ -146,7 +146,7 @@ def upload_rag_chunks(chunks_data: List[Dict[str, str]]) -> List[Any]:
             file_obj = sdk.files.upload_bytes(
                 chunk['text'].encode('utf-8'),
                 name=chunk.get('id', f'chunk_{int(time.time()*1000)}'),
-                ttl_days=1,
+                ttl_days= 300,
                 expiration_policy="static",
                 mime_type="text/plain"
             )
