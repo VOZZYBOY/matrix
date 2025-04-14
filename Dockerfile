@@ -36,6 +36,8 @@ RUN mkdir -p /app/base
 # Copy the application files
 COPY app.py matrixai.py ./
 COPY base/cleaned_data.json ./base/
+COPY static/ ./static/
+COPY templates/ ./templates/
 
 # Expose the application port
 EXPOSE 8001
