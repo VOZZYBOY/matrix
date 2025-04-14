@@ -1,93 +1,178 @@
-# MatrixAI
+# Med YU Med - Документация виртуального ассистента
 
+## Обзор
+Виртуальный ассистент Med YU Med - это AI-помощник на базе Yandex GPT, использующий технологию RAG (Retrieval-Augmented Generation) для поиска релевантной информации о врачах, услугах и ценах клиники.
 
+## Архитектура ассистента
 
-## Getting started
+Ассистент построен на базе следующих ключевых компонентов:
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+- **YandexGPT API** - для общения ассистента с пользователями
+- **RAG-индекс** - векторная база знаний о врачах и услугах клиники
+- **Function Calling** - набор функций для выполнения конкретных задач
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
+### Управление промтами
 
-## Add your files
+Ассистент поддерживает два типа промтов:
 
-- [ ] [Create](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#create-a-file) or [upload](https://docs.gitlab.com/ee/user/project/repository/web_editor.html#upload-a-file) files
-- [ ] [Add files using the command line](https://docs.gitlab.com/ee/gitlab-basics/add-file.html#add-a-file-using-the-command-line) or push an existing Git repository with the following command:
+- **Стандартный промт** - базовая инструкция для ассистента, включающая описание задач, ограничений и способов работы с инструментами
+- **Индивидуальный промт** - настраиваемый пользователем промт для специфических сценариев использования
 
+Обратите внимание: из-за ограничений Yandex Cloud API, промт не меняется в самом ассистенте, а добавляется к каждому сообщению пользователя перед отправкой в LLM:
+
+```python
+# Если передан полный текст промта, используем его
+if prompt_type == "custom" and prompt_text:
+    context = prompt_text
+    modified_message = f"{context}\n\nВопрос пользователя: {message}"
+elif prompt_type == "default":
+    # Добавляем стандартный промт
+    context = default_prompt
+    modified_message = f"{context}\n\nВопрос пользователя: {message}"
 ```
-cd existing_repo
-git remote add origin https://git.matrixcrm.ru/fqeniyev1/matrixai.git
-git branch -M main
-git push -uf origin main
+
+### Function Calling API
+
+Ассистент использует следующие функции для обработки конкретных запросов:
+
+| Функция | Описание | Обязательные параметры |
+|---------|----------|------------------------|
+| `FindEmployees` | Поиск сотрудников по имени, услуге или филиалу | Нет |
+| `GetServicePrice` | Получение цены услуги в конкретном филиале | `service_name` |
+| `ListFilials` | Получение списка всех филиалов клиники | Нет |
+| `GetEmployeeServices` | Получение списка услуг конкретного врача | `employee_name` |
+| `CheckServiceInFilial` | Проверка наличия услуги в конкретном филиале | `service_name`, `filial_name` |
+| `CompareServicePriceInFilials` | Сравнение цен на услугу в разных филиалах | `service_name`, `filial_names` (≥2) |
+
+### RAG система
+
+Система использует векторный поиск для извлечения релевантной информации из:
+- Описаний врачей и их квалификации
+- Описаний услуг и методик
+
+**Ограничение:** Yandex Cloud API позволяет использовать максимум 100 файлов для RAG.
+
+Процесс создания RAG индекса:
+
+```python
+def initialize_clinic_assistant():
+    rag_index = None
+    uploaded_rag_files = []
+    
+    # Поиск существующего индекса
+    all_indexes = sdk.search_indexes.list()
+    found_index = next((index for index in all_indexes 
+                      if index.name == RAG_INDEX_NAME), None)
+                      
+    if found_index:
+        rag_index = found_index
+        logging.warning(f"Найден существующий RAG индекс...")
+    else:
+        # Создание нового индекса
+        rag_chunks = preprocess_json_for_rag(global_clinic_data)
+        uploaded_rag_files = upload_rag_chunks(rag_chunks)
+        rag_index = create_rag_index(uploaded_rag_files, RAG_INDEX_NAME)
 ```
 
-## Integrate with your tools
+## Потоки работы
 
-- [ ] [Set up project integrations](https://git.matrixcrm.ru/fqeniyev1/matrixai/-/settings/integrations)
+Для каждого типа промта создается отдельный поток (thread) в Yandex Cloud, что позволяет сохранять разные контексты диалогов. При переключении между типами промтов меняется и используемый поток.
 
-## Collaborate with your team
+```python
+# Создаем структуру для хранения потоков по типам промтов
+if user_id not in user_sessions:
+    user_sessions[user_id] = {}
 
-- [ ] [Invite team members and collaborators](https://docs.gitlab.com/ee/user/project/members/)
-- [ ] [Create a new merge request](https://docs.gitlab.com/ee/user/project/merge_requests/creating_merge_requests.html)
-- [ ] [Automatically close issues from merge requests](https://docs.gitlab.com/ee/user/project/issues/managing_issues.html#closing-issues-automatically)
-- [ ] [Enable merge request approvals](https://docs.gitlab.com/ee/user/project/merge_requests/approvals/)
-- [ ] [Set auto-merge](https://docs.gitlab.com/ee/user/project/merge_requests/merge_when_pipeline_succeeds.html)
+# Получаем поток для конкретного типа промта
+user_thread = None
+if user_id in user_sessions and prompt_type in user_sessions[user_id]:
+    user_thread = user_sessions[user_id][prompt_type]
+```
 
-## Test and Deploy
+## Решение проблем
 
-Use the built-in continuous integration in GitLab.
+### Работа с потоками
 
-- [ ] [Get started with GitLab CI/CD](https://docs.gitlab.com/ee/ci/quick_start/index.html)
-- [ ] [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/ee/user/application_security/sast/)
-- [ ] [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/ee/topics/autodevops/requirements.html)
-- [ ] [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/ee/user/clusters/agent/)
-- [ ] [Set up protected environments](https://docs.gitlab.com/ee/ci/environments/protected_environments.html)
+Основная проблема при работе - возможная ситуация с удаленными потоками. Если поток был удален, но ссылка на него осталась в приложении, это приводит к ошибкам (`ValueError: you can't perform an action on Thread because it is deleted`).
 
-***
+Реализована проверка существования потока перед использованием:
 
-# Editing this README
+```python
+def get_thread(self, thread=None):
+    if thread is not None:
+        # Проверяем, не был ли поток удален
+        try:
+            thread.get()  # Проверка существования потока
+            return thread
+        except ValueError as e:
+            if "deleted" in str(e):
+                logging.warning(f"Обнаружен удаленный поток: {e}")
+                return None
+```
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+### Ограничения RAG
 
-## Suggestions for a good README
+Yandex Cloud ограничивает количество файлов до 100, что может быть недостаточно для больших баз знаний. Решения:
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+1. Объединение меньших чанков в более крупные
+2. Ограничение общего количества файлов до 90
+3. Регулярная очистка старых файлов через `cleanup_cloud_files()`
 
-## Name
-Choose a self-explaining name for your project.
+## API Endpoints
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+Основной сервер предоставляет следующие API:
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+| Endpoint | Метод | Описание |
+|----------|-------|----------|
+| `/ask` | POST | Отправка запроса ассистенту |
+| `/reset_session` | POST | Сброс сессии пользователя |
+| `/health` | GET | Проверка состояния системы |
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+### Пример запроса к API:
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+```json
+{
+  "message": "Какие услуги доступны в филиале Москва-сити?",
+  "user_id": "user_1234567890",
+  "reset_session": false,
+  "prompt_type": "default",
+  "prompt_text": null
+}
+```
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+## Инициализация и конфигурация
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+Базовые параметры настраиваются в начале файла `matrixai.py`:
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+```python
+FOLDER_ID = "b1gnq2v60fut60hs9vfb"
+API_KEY = "AQVNw5Kg0jXoaateYQWdSr2k8cbst_y4_WcbvZrW"
+JSON_DATA_PATH = "base/cleaned_data.json"
+MODEL_URI_SHORT = "yandexgpt/rc"
+RAG_INDEX_NAME = "clinic_rag_index_v2"
+ASSISTANT_NAME = "ClinicAssistant_V2"
+```
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+## Рекомендации по доработке
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+1. **Улучшение веб-интерфейса**:
+   - Добавление аутентификации пользователей
+   - Улучшение управления потоками промтов
+   
+2. **Оптимизация RAG**:
+   - Уменьшение количества файлов через более эффективное чанкирование
+   - Регулярная очистка устаревших файлов
+   
+3. **Расширение функциональности**:
+   - Добавление функций для записи на прием
+   - Интеграция с другими сервисами клиники
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+## Ограничения
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+1. Максимум 100 файлов для RAG индекса
+2. Промт не сохраняется в ассистенте, а добавляется к каждому сообщению
+3. Возможны проблемы с потоками при их удалении
 
-## License
-For open source projects, say how it is licensed.
+## Лицензия
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Проект распространяется под MIT License.

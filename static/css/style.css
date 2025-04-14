@@ -1,0 +1,1175 @@
+:root {
+    --primary: #fbd812;
+    --secondary: #000000;
+    --text: #ffffff;
+    --background: #0e0e0e;
+    --card-bg: #1a1a1a;
+    --border-radius: 8px;
+    --transition: all 0.3s ease;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: 'Roboto', Arial, sans-serif;
+}
+
+body {
+    background-color: var(--background);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.header {
+    background-color: var(--background);
+    border-bottom: 1px solid #222;
+    padding: 15px 0;
+    position: fixed;
+    width: 100%;
+    top: 0;
+    z-index: 100;
+}
+
+.container {
+    width: 100%;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 20px;
+}
+
+.header-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.logo {
+    display: flex;
+    align-items: center;
+}
+
+.logo a {
+    text-decoration: none;
+    color: var(--text);
+    font-size: 24px;
+    font-weight: bold;
+}
+
+.logo span {
+    color: var(--primary);
+}
+
+.logo small {
+    font-size: 12px;
+    font-weight: normal;
+    opacity: 0.7;
+    margin-left: 5px;
+}
+
+.logo a small {
+    font-size: 0.5em;
+    opacity: 0.7;
+    vertical-align: super;
+}
+
+.control-panel-label {
+    display: inline-block;
+    margin-left: 15px;
+    font-size: 1.2rem;
+    color: #aaa;
+    font-weight: 500;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border-left: 2px solid var(--primary);
+    padding-left: 15px;
+}
+
+.nav-menu {
+    display: flex;
+    gap: 20px;
+}
+
+.nav-menu a {
+    color: var(--text);
+    text-decoration: none;
+    font-size: 16px;
+    transition: var(--transition);
+}
+
+.nav-menu a:hover {
+    color: var(--primary);
+}
+
+.header-buttons {
+    display: flex;
+    gap: 15px;
+}
+
+.btn {
+    padding: 10px 20px;
+    border-radius: var(--border-radius);
+    font-size: 16px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: var(--transition);
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.btn-primary {
+    background-color: var(--primary);
+    color: var(--secondary);
+    border: none;
+}
+
+.btn-primary:hover {
+    opacity: 0.9;
+}
+
+.btn-outline {
+    background-color: transparent;
+    color: var(--text);
+    border: 1px solid var(--text);
+}
+
+.btn-outline:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+}
+
+.main-content {
+    margin-top: 80px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+.hero {
+    padding: 60px 0;
+    background: linear-gradient(rgba(0, 0, 0, 0.7), rgba(0, 0, 0, 0.7)), url('/static/img/dots-pattern.png');
+    background-size: cover;
+    position: relative;
+    overflow: hidden;
+}
+
+.hero::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-image: 
+        radial-gradient(circle at 20% 35%, rgba(251, 216, 18, 0.15) 0%, transparent 50%),
+        radial-gradient(circle at 75% 60%, rgba(251, 216, 18, 0.15) 0%, transparent 50%);
+    z-index: 0;
+}
+
+.hero-content {
+    position: relative;
+    z-index: 1;
+    max-width: 700px;
+    margin: 0 auto;
+    text-align: center;
+}
+
+.hero h1 {
+    font-size: 48px;
+    font-weight: 700;
+    margin-bottom: 20px;
+    line-height: 1.2;
+}
+
+.hero h1 span {
+    color: var(--primary);
+}
+
+.hero p {
+    font-size: 18px;
+    margin-bottom: 30px;
+    line-height: 1.6;
+}
+
+/* Стили для чата с панелью статистики */
+.chat-layout {
+    display: flex;
+    gap: 20px;
+    width: 100%;
+}
+
+.chat-container {
+    flex: 1;
+    margin: 20px 0;
+    width: 100%;
+    max-width: 800px;
+    background-color: var(--card-bg);
+    border-radius: var(--border-radius);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 140px);
+}
+
+/* Панель статуса системы */
+.system-info-panel {
+    width: 300px;
+    margin: 20px 0;
+}
+
+.system-info-card {
+    background-color: var(--card-bg);
+    border-radius: var(--border-radius);
+    padding: 20px;
+    height: auto;
+}
+
+.system-info-card h3 {
+    color: var(--primary);
+    font-size: 18px;
+    margin-bottom: 15px;
+    font-weight: 500;
+    border-bottom: 1px solid #333;
+    padding-bottom: 10px;
+}
+
+.info-row {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 15px;
+    align-items: center;
+}
+
+.info-label {
+    color: #aaa;
+    font-size: 14px;
+}
+
+.info-value {
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.status-indicator {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.status-indicator.online {
+    background-color: #4CAF50;
+}
+
+.status-indicator.offline {
+    background-color: #F44336;
+}
+
+.status-indicator.warning {
+    background-color: #FF9800;
+}
+
+.status-indicator.loading {
+    background-color: #ffc107;
+    box-shadow: 0 0 8px rgba(255, 193, 7, 0.5);
+    animation: pulse 1.5s infinite;
+}
+
+.info-update {
+    font-size: 12px;
+    color: #666;
+    margin-top: 20px;
+    text-align: center;
+}
+
+@keyframes pulse {
+    0% {
+        opacity: 0.4;
+    }
+    50% {
+        opacity: 1;
+    }
+    100% {
+        opacity: 0.4;
+    }
+}
+
+/* Адаптивность для мобильных устройств */
+@media (max-width: 1024px) {
+    .chat-layout {
+        flex-direction: column;
+    }
+    
+    .system-info-panel {
+        width: 100%;
+        margin-top: 0;
+    }
+    
+    .chat-container {
+        max-width: 100%;
+        margin-bottom: 0;
+    }
+}
+
+.chat-header {
+    background-color: var(--secondary);
+    padding: 15px 20px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.chat-header h2 {
+    font-size: 18px;
+    font-weight: 500;
+}
+
+.chat-messages {
+    flex: 1;
+    padding: 20px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.message {
+    max-width: 80%;
+    padding: 12px 16px;
+    border-radius: var(--border-radius);
+    line-height: 1.5;
+    white-space: pre-line;
+}
+
+.message-user {
+    align-self: flex-end;
+    background-color: var(--primary);
+    color: var(--secondary);
+}
+
+.message-assistant {
+    align-self: flex-start;
+    background-color: #2a2a2a;
+    color: var(--text);
+}
+
+/* Стили для первого сообщения */
+.message-first {
+    max-width: 90%;
+    border-left: 3px solid var(--primary);
+    background-color: rgba(42, 42, 42, 0.7);
+    padding: 16px 20px;
+}
+
+/* Стили для маркированного списка внутри сообщений */
+.message ul {
+    margin-top: 10px;
+    margin-bottom: 10px;
+    padding-left: 20px;
+}
+
+.message li {
+    margin-bottom: 5px;
+}
+
+/* Стили для эмодзи */
+.message .emoji {
+    font-size: 1.2em;
+    margin-right: 5px;
+}
+
+/* Стили для разделителей секций */
+.message .section {
+    margin-top: 15px;
+    margin-bottom: 5px;
+    font-weight: 500;
+}
+
+.chat-input {
+    padding: 20px;
+    background-color: #222;
+    display: flex;
+    gap: 10px;
+}
+
+.chat-input input {
+    flex: 1;
+    padding: 12px 15px;
+    border-radius: var(--border-radius);
+    border: none;
+    background-color: #333;
+    color: var(--text);
+    font-size: 16px;
+}
+
+.chat-input input:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(251, 216, 18, 0.3);
+}
+
+.chat-input button {
+    padding: 0 15px;
+    border-radius: var(--border-radius);
+    background-color: var(--primary);
+    color: var(--secondary);
+    border: none;
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.chat-input button:hover {
+    opacity: 0.9;
+}
+
+.typing-indicator {
+    display: flex;
+    gap: 4px;
+    padding: 10px;
+    align-self: flex-start;
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.typing-indicator.active {
+    opacity: 1;
+}
+
+.typing-indicator span {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    background-color: var(--primary);
+    border-radius: 50%;
+    animation: bounce 1.5s infinite ease-in-out;
+}
+
+.typing-indicator span:nth-child(2) {
+    animation-delay: 0.1s;
+}
+
+.typing-indicator span:nth-child(3) {
+    animation-delay: 0.2s;
+}
+
+.reset-btn {
+    background-color: transparent;
+    color: var(--primary);
+    border: none;
+    font-size: 14px;
+    cursor: pointer;
+    padding: 5px 10px;
+    border-radius: var(--border-radius);
+    margin-right: auto;
+    transition: var(--transition);
+}
+
+.reset-btn:hover {
+    text-decoration: underline;
+}
+
+@keyframes bounce {
+    0%, 80%, 100% { 
+        transform: translateY(0);
+    }
+    40% { 
+        transform: translateY(-6px);
+    }
+}
+
+@media (max-width: 768px) {
+    .header-content {
+        flex-direction: column;
+        gap: 15px;
+    }
+    
+    .nav-menu {
+        display: none;
+    }
+    
+    .hero h1 {
+        font-size: 36px;
+    }
+    
+    .message {
+        max-width: 90%;
+    }
+}
+
+.footer {
+    background-color: var(--secondary);
+    padding: 20px 0;
+    text-align: center;
+    margin-top: auto;
+}
+
+.footer p {
+    color: #666;
+    font-size: 14px;
+}
+
+.footer a {
+    color: var(--primary);
+    text-decoration: none;
+}
+
+.btn-wrapper {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.dev-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--primary);
+    letter-spacing: 1px;
+    position: absolute;
+    top: -15px;
+    white-space: nowrap;
+    font-weight: 500;
+}
+
+/* Стили для системы оценки сообщений */
+.message-rating {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 10px;
+    opacity: 0.5;
+    transition: opacity 0.3s ease;
+}
+
+.message-rating:hover {
+    opacity: 1;
+}
+
+.message-assistant .message-rating {
+    justify-content: flex-start;
+}
+
+.rating-btn {
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 5px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    width: 30px;
+    height: 30px;
+    transition: var(--transition);
+}
+
+.rating-btn:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+.rating-btn.active {
+    background-color: rgba(251, 216, 18, 0.2);
+}
+
+.rating-btn svg {
+    width: 16px;
+    height: 16px;
+    fill: var(--text);
+}
+
+.rating-btn.like.active svg {
+    fill: #4caf50;
+}
+
+.rating-btn.dislike.active svg {
+    fill: #f44336;
+}
+
+.rating-count {
+    font-size: 12px;
+    color: #888;
+}
+
+.rating-thanks {
+    font-size: 12px;
+    color: var(--primary);
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.rating-thanks.visible {
+    opacity: 1;
+}
+
+/* Стили для панели выбора промта */
+.prompt-selector {
+    margin-top: 20px;
+}
+
+.prompt-description {
+    font-size: 14px;
+    color: #aaa;
+    margin-bottom: 15px;
+}
+
+.prompt-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.prompt-btn {
+    background-color: #2a2a2a;
+    color: var(--text);
+    border: 1px solid #333;
+    border-radius: var(--border-radius);
+    padding: 10px 15px;
+    font-size: 14px;
+    cursor: pointer;
+    transition: var(--transition);
+    text-align: left;
+}
+
+.prompt-btn:hover {
+    background-color: #333;
+    border-color: var(--primary);
+}
+
+.prompt-btn.active {
+    background-color: rgba(251, 216, 18, 0.15);
+    border-color: var(--primary);
+    color: var(--primary);
+}
+
+.prompt-btn-custom {
+    border-style: dashed;
+    margin-top: 5px;
+    font-style: italic;
+}
+
+/* Стили для отображения и редактирования промта */
+.prompt-details {
+    margin-top: 20px;
+    border-top: 1px solid #333;
+    padding-top: 15px;
+}
+
+.prompt-text {
+    background-color: #2a2a2a;
+    border: 1px solid #333;
+    border-radius: var(--border-radius);
+    padding: 10px;
+    font-size: 13px;
+    margin: 10px 0;
+    max-height: 150px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    color: #bbb;
+    font-family: monospace;
+}
+
+.prompt-preview h4, .prompt-editor h4 {
+    font-size: 16px;
+    font-weight: 500;
+    margin-bottom: 10px;
+    color: #ddd;
+}
+
+#current-prompt-title {
+    color: var(--primary);
+}
+
+.btn-outline-small, .btn-primary-small {
+    padding: 5px 12px;
+    font-size: 14px;
+    border-radius: var(--border-radius);
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.btn-outline-small {
+    background-color: transparent;
+    color: var(--text);
+    border: 1px solid #555;
+}
+
+.btn-outline-small:hover {
+    border-color: var(--primary);
+    color: var(--primary);
+}
+
+.btn-primary-small {
+    background-color: var(--primary);
+    color: var(--secondary);
+    border: none;
+}
+
+.btn-primary-small:hover {
+    opacity: 0.9;
+}
+
+.editor-buttons {
+    display: flex;
+    gap: 10px;
+    margin-top: 10px;
+}
+
+#prompt-editor {
+    width: 100%;
+    background-color: #2a2a2a;
+    border: 1px solid #444;
+    border-radius: var(--border-radius);
+    padding: 10px;
+    color: #fff;
+    font-family: monospace;
+    font-size: 13px;
+    resize: vertical;
+}
+
+/* Стили для предупреждения */
+.prompt-warning {
+    margin: 15px 0;
+    background-color: rgba(220, 53, 69, 0.1);
+    border: 1px solid rgba(220, 53, 69, 0.3);
+    border-radius: var(--border-radius);
+    padding: 10px;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+.warning-icon {
+    font-size: 24px;
+    line-height: 1;
+}
+
+.prompt-warning p {
+    margin: 0;
+    font-size: 13px;
+    color: #f1b3b8;
+}
+
+.prompt-warning a {
+    color: var(--primary);
+    text-decoration: underline;
+}
+
+.prompt-warning a:hover {
+    text-decoration: none;
+}
+
+@media (max-width: 768px) {
+    .prompt-buttons {
+        flex-direction: row;
+        flex-wrap: wrap;
+    }
+    
+    .prompt-btn {
+        flex: 1;
+        min-width: 120px;
+        text-align: center;
+    }
+}
+
+/* Раздел для разработчиков */
+.developer-section {
+    background-color: var(--card-bg);
+    padding: 60px 0;
+    border-top: 1px solid #333;
+}
+
+.developer-section h2 {
+    color: var(--primary);
+    margin-bottom: 30px;
+    text-align: center;
+}
+
+.developer-content {
+    background-color: var(--background);
+    border-radius: 8px;
+    box-shadow: 0 0 20px rgba(0, 0, 0, 0.3);
+    padding: 30px;
+    border: 1px solid #333;
+}
+
+.markdown-content {
+    max-width: 900px;
+    margin: 0 auto;
+    line-height: 1.6;
+    color: var(--text);
+}
+
+.markdown-content h1 {
+    font-size: 2em;
+    margin-bottom: 0.8em;
+    color: var(--primary);
+}
+
+.markdown-content h2 {
+    font-size: 1.6em;
+    margin: 1.2em 0 0.6em;
+    padding-bottom: 0.3em;
+    border-bottom: 1px solid #333;
+    text-align: left;
+    color: var(--text);
+}
+
+.markdown-content h3 {
+    font-size: 1.3em;
+    margin: 1em 0 0.6em;
+    color: var(--primary);
+}
+
+.markdown-content p {
+    margin-bottom: 1em;
+    color: #ccc;
+}
+
+.markdown-content ul {
+    margin-bottom: 1em;
+    padding-left: 2em;
+    color: #ccc;
+}
+
+.markdown-content li {
+    margin-bottom: 0.5em;
+}
+
+.markdown-content code {
+    background-color: #2a2a2a;
+    padding: 0.2em 0.4em;
+    border-radius: 3px;
+    font-family: Consolas, Monaco, 'Andale Mono', monospace;
+    font-size: 0.9em;
+    color: var(--primary);
+}
+
+.markdown-content strong {
+    font-weight: 600;
+    color: var(--primary);
+}
+
+/* Системные логи */
+.logs-panel {
+    margin-top: 20px;
+}
+
+.logs-panel h3 {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.refresh-logs {
+    cursor: pointer;
+    opacity: 0.7;
+    transition: all 0.3s;
+}
+
+.refresh-logs:hover {
+    opacity: 1;
+    transform: rotate(180deg);
+}
+
+.logs-container {
+    display: flex;
+    flex-direction: column;
+    height: 350px;
+}
+
+.logs-tabs {
+    display: flex;
+    border-bottom: 1px solid #333;
+    margin-bottom: 10px;
+}
+
+.log-tab {
+    background: none;
+    border: none;
+    color: var(--text);
+    padding: 8px 15px;
+    cursor: pointer;
+    opacity: 0.7;
+    transition: all 0.2s;
+    border-bottom: 2px solid transparent;
+}
+
+.log-tab:hover {
+    opacity: 1;
+}
+
+.log-tab.active {
+    opacity: 1;
+    border-bottom: 2px solid var(--primary);
+    font-weight: 500;
+}
+
+.logs-content {
+    flex-grow: 1;
+    overflow-y: auto;
+    background-color: rgba(0, 0, 0, 0.2);
+    border-radius: 5px;
+    margin-bottom: 10px;
+}
+
+.logs-list {
+    padding: 10px;
+    font-family: 'Consolas', monospace;
+    font-size: 0.85rem;
+}
+
+.log-entry {
+    padding: 5px 8px;
+    margin-bottom: 6px;
+    border-radius: 3px;
+    display: flex;
+    align-items: flex-start;
+}
+
+.log-info {
+    border-left: 3px solid #4dabf7;
+    background-color: rgba(77, 171, 247, 0.1);
+}
+
+.log-warning {
+    border-left: 3px solid #ffd43b;
+    background-color: rgba(255, 212, 59, 0.1);
+}
+
+.log-error {
+    border-left: 3px solid #fa5252;
+    background-color: rgba(250, 82, 82, 0.1);
+}
+
+.log-time {
+    color: #777;
+    margin-right: 8px;
+    min-width: 70px;
+}
+
+.log-level {
+    font-weight: 600;
+    min-width: 70px;
+    text-transform: uppercase;
+    font-size: 0.75em;
+}
+
+.log-info .log-level {
+    color: #4dabf7;
+}
+
+.log-warning .log-level {
+    color: #ffd43b;
+}
+
+.log-error .log-level {
+    color: #fa5252;
+}
+
+.log-message {
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #ddd;
+    flex-grow: 1;
+}
+
+.logs-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 5px;
+}
+
+.logs-status {
+    font-size: 0.85rem;
+    color: #777;
+}
+
+#logs-count {
+    font-weight: 600;
+    color: var(--text);
+}
+
+#clear-logs-btn {
+    font-size: 0.85rem;
+    padding: 3px 12px;
+}
+
+/* Стиль для User ID */
+.btn-icon {
+    background: none;
+    border: none;
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+    font-size: 1rem;
+    padding: 0 5px;
+}
+
+.btn-icon:hover {
+    opacity: 1;
+}
+
+.id-editor {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+#user-id-input {
+    background-color: rgba(255, 255, 255, 0.1);
+    border: 1px solid #444;
+    border-radius: 4px;
+    padding: 5px 10px;
+    color: var(--text);
+    flex-grow: 1;
+}
+
+#user-id-display {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+#current-user-id {
+    font-family: 'Consolas', monospace;
+    color: var(--primary);
+}
+
+/* Стили для секции ID пользователя */
+.user-id-section {
+    margin-top: 20px;
+    padding: 15px;
+    background-color: #f5f5f5;
+    border-radius: 8px;
+}
+
+.user-id-section h3 {
+    margin-top: 0;
+    margin-bottom: 15px;
+    color: #333;
+}
+
+.user-id-container {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+#user-id-field {
+    flex: 1;
+    padding: 8px 12px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 14px;
+}
+
+.user-id-buttons {
+    display: flex;
+    gap: 10px;
+}
+
+/* Стили для панели логов */
+.logs-panel {
+    margin-top: 30px;
+    background-color: #f8f8f8;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.logs-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 15px;
+    background-color: #e0e0e0;
+    border-bottom: 1px solid #ccc;
+}
+
+.logs-panel-header h3 {
+    margin: 0;
+    color: #333;
+}
+
+#logs-container {
+    height: 300px;
+    overflow-y: auto;
+    padding: 10px 15px;
+    background-color: #1e1e1e;
+    color: #f0f0f0;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.log-entry {
+    margin-bottom: 5px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.log-time {
+    color: #888;
+    margin-right: 8px;
+}
+
+.log-info {
+    color: #4caf50;
+    margin-right: 8px;
+}
+
+.log-warning {
+    color: #ff9800;
+    margin-right: 8px;
+}
+
+.log-error {
+    color: #f44336;
+    margin-right: 8px;
+}
+
+.log-message {
+    color: #f0f0f0;
+}
+
+/* Стили для уведомлений */
+.notification {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 12px 20px;
+    background-color: #4caf50;
+    color: white;
+    border-radius: 4px;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+    z-index: 1000;
+    opacity: 1;
+    transition: opacity 0.3s ease;
+}
+
+.notification.error {
+    background-color: #f44336;
+}
+
+/* Адаптивные стили */
+@media (max-width: 768px) {
+    .user-id-container {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    
+    .user-id-buttons {
+        justify-content: space-between;
+    }
+    
+    #logs-container {
+        height: 200px;
+    }
+} 

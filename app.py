@@ -3,13 +3,19 @@ import time
 import uvicorn
 import atexit
 from typing import Dict, Optional, List, Any
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import asyncio
 from contextlib import asynccontextmanager
 from matrixai import initialize_clinic_assistant
+import os
+import json
+import uuid
+from datetime import datetime, timedelta
 
 
 logging.basicConfig(
@@ -29,7 +35,9 @@ user_sessions = {}
 class MessageRequest(BaseModel):
     message: str
     user_id: Optional[str] = None
-    reset_session: Optional[bool] = False
+    reset_session: bool = False
+    prompt_type: Optional[str] = None
+    prompt_text: Optional[str] = None
 
 
 class MessageResponse(BaseModel):
@@ -79,6 +87,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
 
 def get_clinic_agent():
     if clinic_agent is None:
@@ -94,8 +105,8 @@ def generate_user_id():
 
 
 @app.get("/")
-async def root():
-    return {"message": "API ассистента клиники Med YU Med работает"}
+async def read_root(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
 
 @app.post("/ask", response_model=MessageResponse, tags=["assistant"])
@@ -166,11 +177,7 @@ async def reset_session(
 
 @app.get("/health", tags=["health"])
 async def health_check():
-    if clinic_agent is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Ассистент не инициализирован"
-        )
+
     return {
         "status": "ok",
         "agent_initialized": clinic_agent is not None,
@@ -186,6 +193,55 @@ async def cleanup_inactive_sessions():
             logger.info(f"Активных сессий: {len(user_sessions)}")
         except Exception as e:
             logger.error(f"Ошибка при очистке неактивных сессий: {e}")
+
+
+def read_logs(max_lines=100):
+    logs = []
+    try:
+        with open('api.log', 'r', encoding='utf-8') as log_file:
+            lines = log_file.readlines()[-max_lines:]
+            
+            for line in lines:
+                try:
+                    parts = line.split(' [', 1)
+                    if len(parts) >= 2:
+                        time_str = parts[0].split(',')[0]
+                        level_and_message = parts[1].split('] ', 1)
+                        
+                        if len(level_and_message) >= 2:
+                            level = level_and_message[0]
+                            message = level_and_message[1].strip()
+                            
+                            logs.append({
+                                "time": time_str.split(' ')[1],
+                                "level": level,
+                                "message": message
+                            })
+                except Exception as e:
+                    logs.append({
+                        "time": "--:--:--",
+                        "level": "INFO",
+                        "message": line.strip()
+                    })
+        
+        return logs
+    except FileNotFoundError:
+        return [
+            {"time": datetime.now().strftime("%H:%M:%S"), "level": "INFO", "message": "Файл логов не найден"},
+            {"time": datetime.now().strftime("%H:%M:%S"), "level": "WARNING", "message": "Это тестовый лог для демонстрации функциональности"},
+            {"time": datetime.now().strftime("%H:%M:%S"), "level": "ERROR", "message": "Тестовая ошибка"}
+        ]
+    except Exception as e:
+        return [
+            {"time": datetime.now().strftime("%H:%M:%S"), "level": "ERROR", "message": f"Ошибка чтения логов: {str(e)}"}
+        ]
+
+
+@app.get("/logs")
+async def get_logs(max_lines: int = 100):
+    logs = read_logs(max_lines)
+    return {"logs": logs}
+
 
 if __name__ == "__main__":
     logger.info("Запуск сервера FastAPI")

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Med YU Med - Ассистент медицинской клиники</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <div class="logo">
+                    <a href="/">Med YU <span>Med</span> <small>(MVP)</small></a>
+                    <span class="control-panel-label">Control Panel</span>
+                </div>
+                <nav class="nav-menu">
+                    <a href="#developer-section">Для разработчиков</a>
+                </nav>
+                <div class="header-buttons">
+                    <div class="btn-wrapper">
+                        <div class="dev-label">в разработке</div>
+                        <a href="#" class="btn btn-primary">Записаться</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="main-content">
+        <section class="hero">
+            <div class="container">
+                <div class="hero-content">
+                    <h1>Виртуальный ассистент <span>Med YU Med</span></h1>
+                    <p>Задайте вопрос о наших услугах, врачах, ценах или филиалах. Виртуальный ассистент на базе AI поможет вам получить всю необходимую информацию.</p>
+                </div>
+            </div>
+        </section>
+
+        <section class="chat-section">
+            <div class="container">
+                <div class="chat-layout">
+                    <div class="chat-container">
+                        <div class="chat-header">
+                            <button id="reset-button" class="reset-btn">Сбросить</button>
+                            <h2>Чат с ассистентом клиники</h2>
+                        </div>
+                        <div id="messages-container" class="chat-messages">
+                            <div class="typing-indicator">
+                                <span></span>
+                                <span></span>
+                                <span></span>
+                            </div>
+                        </div>
+                        <div class="chat-input">
+                            <input type="text" id="message-input" placeholder="Введите ваше сообщение...">
+                            <button id="send-button" type="button">Отправить</button>
+                        </div>
+                    </div>
+                    
+                    <div class="system-info-panel">
+                        <div class="system-info-card">
+                            <h3>Состояние системы</h3>
+                            <div class="info-row">
+                                <div class="info-label">Статус ассистента:</div>
+                                <div id="assistant-status" class="info-value">
+                                    <span class="status-indicator loading"></span>
+                                    Загрузка...
+                                </div>
+                            </div>
+                            <div class="info-row">
+                                <div class="info-label">Активные сессии:</div>
+                                <div id="active-sessions" class="info-value">...</div>
+                            </div>
+                            <div class="info-row">
+                                <div class="info-label">User ID:</div>
+                                <div id="user-id-display" class="info-value">
+                                    <span id="current-user-id">...</span>
+                                    <button id="edit-user-id-btn" class="btn-icon">✏️</button>
+                                </div>
+                            </div>
+                            <div id="user-id-editor" class="info-row" style="display: none;">
+                                <div class="info-label">Новый ID:</div>
+                                <div class="info-value id-editor">
+                                    <input type="text" id="user-id-input" placeholder="Введите ID пользователя">
+                                    <button id="save-user-id-btn" class="btn-outline-small">Сохранить</button>
+                                    <button id="cancel-user-id-btn" class="btn-outline-small">Отмена</button>
+                                </div>
+                            </div>
+                            <div class="info-update">
+                                Последнее обновление: <span id="last-update-time">-</span>
+                            </div>
+                        </div>
+                        
+                        <div class="system-info-card prompt-selector">
+                            <h3>Выбор промта</h3>
+                            <p class="prompt-description">Выберите тип промта для ассистента:</p>
+                            <div class="prompt-buttons">
+                                <button class="prompt-btn active" data-prompt="default">Стандартный</button>
+                                <button class="prompt-btn prompt-btn-custom" data-prompt="custom">Индивидуальный</button>
+                            </div>
+                            
+                            <div class="prompt-warning">
+                                <div class="warning-icon">⚠️</div>
+                                <p>Промт должен содержать четкие инструкции о роли и задачах ассистента. 
+                                <a href="https://platform.openai.com/docs/guides/prompt-engineering" target="_blank">Руководство по Prompt Engineering</a></p>
+                            </div>
+                            
+                            <div class="prompt-details">
+                                <div class="prompt-preview">
+                                    <h4>Текущий промт: <span id="current-prompt-title">Стандартный</span></h4>
+                                    <div id="prompt-text" class="prompt-text"></div>
+                                    <div class="btn-wrapper">
+                                        <div class="dev-label">в разработке</div>
+                                        <button id="edit-prompt-btn" class="btn-outline-small">Редактировать</button>
+                                    </div>
+                                </div>
+                                
+                                <div class="prompt-editor" style="display: none;">
+                                    <h4>Редактирование промта</h4>
+                                    <textarea id="prompt-editor" rows="10"></textarea>
+                                    <div class="editor-buttons">
+                                        <button id="save-prompt-btn" class="btn-primary-small">Сохранить</button>
+                                        <button id="cancel-edit-btn" class="btn-outline-small">Отмена</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="developer-section" id="developer-section">
+            <div class="container">
+                <h2>Для разработчиков</h2>
+                <div class="developer-content">
+                    <div class="markdown-content">
+                        <h1>Документация виртуального ассистента Med YU Med</h1>
+                        
+                        <h2>Обзор</h2>
+                        <p>Виртуальный ассистент Med YU Med - это AI-помощник на базе Yandex GPT, использующий технологию RAG (Retrieval-Augmented Generation) для поиска релевантной информации о врачах, услугах и ценах клиники.</p>
+                        
+                        <h2>Архитектура ассистента</h2>
+                        <p>Ассистент построен на базе следующих ключевых компонентов:</p>
+                        <ul>
+                            <li><strong>YandexGPT API</strong> - для общения ассистента с пользователями</li>
+                            <li><strong>RAG-индекс</strong> - векторная база знаний о врачах и услугах клиники</li>
+                            <li><strong>Function Calling</strong> - набор функций для выполнения конкретных задач</li>
+                        </ul>
+                        
+                        <h3>Управление промтами</h3>
+                        <p>Ассистент поддерживает два типа промтов:</p>
+                        <ul>
+                            <li><strong>Стандартный промт</strong> - базовая инструкция для ассистента, включающая описание задач, ограничений и способов работы с инструментами</li>
+                            <li><strong>Индивидуальный промт</strong> - настраиваемый пользователем промт для специфических сценариев использования</li>
+                        </ul>
+                        <p>Обратите внимание: из-за ограничений Yandex Cloud API, промт не меняется в самом ассистенте, а добавляется к каждому сообщению пользователя, что может быть менее эффективно.</p>
+                        
+                        <h3>Function Calling API</h3>
+                        <p>Ассистент использует следующие функции для обработки конкретных запросов:</p>
+                        <ul>
+                            <li><code>FindEmployees</code> - поиск сотрудников по имени, услуге или филиалу</li>
+                            <li><code>GetServicePrice</code> - получение цены услуги в конкретном филиале</li>
+                            <li><code>ListFilials</code> - получение списка всех филиалов клиники</li>
+                            <li><code>GetEmployeeServices</code> - получение списка услуг конкретного врача</li>
+                            <li><code>CheckServiceInFilial</code> - проверка наличия услуги в конкретном филиале</li>
+                            <li><code>CompareServicePriceInFilials</code> - сравнение цен на услугу в разных филиалах</li>
+                        </ul>
+                        
+                        <h3>RAG система</h3>
+                        <p>Система использует векторный поиск для извлечения релевантной информации из:</p>
+                        <ul>
+                            <li>Описаний врачей и их квалификации</li>
+                            <li>Описаний услуг и методик</li>
+                        </ul>
+                        <p>Ограничение: Yandex Cloud API позволяет использовать максимум 100 файлов для RAG.</p>
+                        
+                        <h2>Потоки работы</h2>
+                        <p>Для каждого типа промта создается отдельный поток (thread) в Yandex Cloud, что позволяет сохранять разные контексты диалогов. При переключении между типами промтов меняется и используемый поток.</p>
+                        
+                        <h2>Решение проблем</h2>
+                        <h3>Работа с потоками</h3>
+                        <p>Основная проблема при работе - возможная ситуация с удаленными потоками. Если поток был удален, но ссылка на него осталась в приложении, это приводит к ошибкам. Реализована проверка существования потока перед использованием.</p>
+                        
+                        <h3>Ограничения RAG</h3>
+                        <p>Yandex Cloud ограничивает количество файлов до 100, что может быть недостаточно для больших баз знаний. Решение: объединение меньших чанков в более крупные и ограничение общего количества файлов до 90.</p>
+                        
+                        <h2>API Endpoints</h2>
+                        <p>Основной сервер предоставляет следующие API:</p>
+                        <ul>
+                            <li><code>POST /ask</code> - отправка запроса ассистенту</li>
+                            <li><code>POST /reset_session</code> - сброс сессии пользователя</li>
+                            <li><code>GET /health</code> - проверка состояния системы</li>
+                        </ul>
+                        
+                        <h2>Дополнительная информация</h2>
+                        <p>Полная документация и исходный код доступны в репозитории проекта. При разработке своих решений на базе этого ассистента учитывайте ограничения Yandex Cloud API и особенности работы с потоками.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <div class="user-id-section">
+            <h3>ID пользователя</h3>
+            <div class="user-id-controls">
+                <input type="text" id="user-id-field" placeholder="ID пользователя">
+                <button id="save-user-id-btn" class="btn">Сохранить</button>
+                <button id="reset-user-id-btn" class="btn">Сбросить</button>
+            </div>
+        </div>
+
+        <div class="logs-panel">
+            <h3>Системные логи</h3>
+            <div class="logs-control">
+                <button id="refresh-logs-btn" class="btn">Обновить</button>
+            </div>
+            <div id="logs-container" class="logs-container"></div>
+        </div>
+
+    </main>
+
+    <footer class="footer">
+        <div class="container">
+            <p>© 2023 Med YU Med. Все права защищены. <a href="#">Политика конфиденциальности</a></p>
+        </div>
+    </footer>
+
+    <script src="/static/js/script.js"></script>
+</body>
+</html> 

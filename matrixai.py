@@ -55,7 +55,7 @@ def printx(string):
 
 
 FOLDER_ID = "b1gnq2v60fut60hs9vfb"
-API_KEY = "AQVNw5Kg0jXoaateYQWdSr2k8cbst_y4_WcbvZrW"
+API_KEY = "AQVNw5Kg0jXoaateYQWdSr2k8cbst_y4_WcbvZrW" # Внимание: Храните API ключ безопасно!
 JSON_DATA_PATH = "base/cleaned_data.json"
 MODEL_URI_SHORT = "yandexgpt/rc"
 MODEL_URI_FULL = f"gpt://{FOLDER_ID}/{MODEL_URI_SHORT}"
@@ -96,7 +96,6 @@ except Exception as e:
     raise
 
 def preprocess_json_for_rag(data: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    rag_chunks_data = []
     employee_descriptions = {}
     service_descriptions = {}
 
@@ -112,25 +111,63 @@ def preprocess_json_for_rag(data: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         srv_desc = (srv_desc_raw or "").strip()
         srv_name = item.get("serviceName", "Название неизвестно")
 
-        if emp_id and emp_desc and emp_desc.lower() not in ('', 'опытный специалист', 'нет описания', 'dnasdasj'):
+        meaningful_employee_desc = emp_desc and emp_desc.lower() not in ('', 'опытный специалист', 'нет описания', 'dnasdasj', 'null')
+        if emp_id and meaningful_employee_desc:
             if emp_id not in employee_descriptions or len(emp_desc) > len(employee_descriptions[emp_id]['desc']):
                  employee_descriptions[emp_id] = {'name': emp_name, 'desc': emp_desc}
 
-        if srv_id and srv_desc:
+        meaningful_service_desc = srv_desc and srv_desc.lower() not in ('', 'нет описания', 'null')
+        if srv_id and meaningful_service_desc:
              if srv_id not in service_descriptions or len(srv_desc) > len(service_descriptions[srv_id]['desc']):
                  service_descriptions[srv_id] = {'name': srv_name, 'desc': srv_desc}
 
+    all_descriptions = []
+
     for emp_id, info in employee_descriptions.items():
         text = f"Информация о сотруднике {info['name']}: {info['desc']}"
-        rag_chunks_data.append({"id": f"emp_{emp_id}", "text": text})
+        all_descriptions.append({"id": f"emp_{emp_id}", "text": text, "type": "employee"})
 
     for srv_id, info in service_descriptions.items():
-        # Добавляем название услуги в текст для лучшего поиска RAG
         text = f"Услуга: {info.get('name', 'Без названия')}\nОписание: {info['desc']}"
-        rag_chunks_data.append({"id": f"srv_{srv_id}", "text": text})
+        all_descriptions.append({"id": f"srv_{srv_id}", "text": text, "type": "service"})
 
-    logging.info(f"Препроцессинг завершен. Создано {len(rag_chunks_data)} уникальных описаний для RAG.")
+    MAX_FILES = 90
+    descriptions_count = len(all_descriptions)
+
+    if descriptions_count == 0:
+        logging.warning("Не найдено значимых описаний для RAG в данных.")
+        return []
+
+    if descriptions_count <= MAX_FILES:
+        rag_chunks_data = [{"id": item["id"], "text": item["text"]} for item in all_descriptions]
+    else:
+        items_per_file = (descriptions_count + MAX_FILES - 1) // MAX_FILES
+        logging.info(f"Объединяем {descriptions_count} описаний в группы по {items_per_file} штук (максимум {MAX_FILES} групп)")
+
+        employees = [item for item in all_descriptions if item["type"] == "employee"]
+        services = [item for item in all_descriptions if item["type"] == "service"]
+
+        rag_chunks_data = []
+
+        for i in range(0, len(employees), items_per_file):
+            group = employees[i:i+items_per_file]
+            combined_text = "\n\n".join([f"### {item['id']}\n{item['text']}" for item in group])
+            rag_chunks_data.append({
+                "id": f"emp_group_{i//items_per_file}",
+                "text": combined_text
+            })
+
+        for i in range(0, len(services), items_per_file):
+            group = services[i:i+items_per_file]
+            combined_text = "\n\n".join([f"### {item['id']}\n{item['text']}" for item in group])
+            rag_chunks_data.append({
+                "id": f"srv_group_{i//items_per_file}",
+                "text": combined_text
+            })
+
+    logging.info(f"Препроцессинг завершен. Создано {len(rag_chunks_data)} групп описаний для RAG.")
     return rag_chunks_data
+
 
 def upload_rag_chunks(chunks_data: List[Dict[str, str]]) -> List[Any]:
     uploaded_files = []
@@ -143,9 +180,10 @@ def upload_rag_chunks(chunks_data: List[Dict[str, str]]) -> List[Any]:
             if not chunk.get('text'):
                  logging.warning(f"Пропуск пустого описания для ID: {chunk.get('id', 'N/A')}")
                  continue
+            file_name = chunk.get('id', f'chunk_{int(time.time()*1000)}_{hash(chunk["text"]) % 10000}')
             file_obj = sdk.files.upload_bytes(
                 chunk['text'].encode('utf-8'),
-                name=chunk.get('id', f'chunk_{int(time.time()*1000)}'),
+                name=file_name,
                 ttl_days= 300,
                 expiration_policy="static",
                 mime_type="text/plain"
@@ -162,6 +200,10 @@ def create_rag_index(files: List[Any], index_name: str) -> Optional[Any]:
         return None
     logging.info(f"Начало создания RAG индекса '{index_name}' для {len(files)} файлов...")
     try:
+        if len(files) > 100:
+             logging.error(f"Ошибка: Невозможно создать гибридный индекс с {len(files)} файлами (лимит 100).")
+             return None
+
         op = sdk.search_indexes.create_deferred(
             files,
             index_type=HybridSearchIndexType(
@@ -173,18 +215,19 @@ def create_rag_index(files: List[Any], index_name: str) -> Optional[Any]:
             ),
             name=index_name,
             description="Индекс по описаниям врачей и услуг клиники Med YU Med",
-            ttl_days=1,
+            ttl_days=30,
             expiration_policy="since_last_active"
         )
         logging.info(f"Запущена операция создания индекса: {op.id}. Ожидание завершения...")
-        index = op.wait(timeout=300)
+        index = op.wait(timeout=600)
         logging.info(f"RAG индекс '{index_name}' успешно создан: id={index.id}")
         return index
     except TimeoutError:
          logging.error(f"Ошибка создания RAG индекса '{index_name}': Превышен таймаут ожидания операции.")
          return None
     except Exception as e:
-        logging.error(f"Ошибка создания RAG индекса '{index_name}': {e}", exc_info=True)
+        error_details = getattr(e, 'details', '')
+        logging.error(f"Ошибка создания RAG индекса '{index_name}': {e}. Детали: {error_details}", exc_info=True)
         return None
 
 class FindEmployees(BaseModel):
@@ -202,7 +245,7 @@ class FindEmployees(BaseModel):
             service_name_item = item.get('serviceName', '')
             filial_name_item = item.get('filialName', '')
 
-            emp_match = (not self.employee_name or self.employee_name.lower() in (emp_name_item.lower() if emp_name_item else ''))
+            emp_match = (not self.employee_name or (emp_name_item and self.employee_name.lower() in emp_name_item.lower()))
 
             service_match = False
             if not self.service_name:
@@ -275,7 +318,7 @@ class GetServicePrice(BaseModel):
 
     def process(self, thread) -> str:
         if self.service_name is None:
-            return "Пожалуйста, уточните название услуги, цену на которую вы хотите узнать."
+            return "Пожалуйста, уточните название услуги, цену на которую вы хотите узнать. Например: 'Какая цена на Hydra facial?'"
 
         logging.info(f"[FC Proc] Запрос цены (Услуга: {self.service_name}, Филиал: {self.filial_name})")
         if not global_clinic_data: return "База данных клиники пуста."
@@ -323,12 +366,10 @@ class GetServicePrice(BaseModel):
              filial_search_text = f" в филиале '{self.filial_name}'" if self.filial_name else ""
              return f"Услуга, похожая на '{self.service_name}'{filial_search_text}, не найдена или цена для нее не указана."
 
-        # Если найдено много разных услуг по общему термину
         unique_service_names = {m['service_name'] for m in matches if m.get('service_name')}
-        # Условие стало строже: если запрос короткий ИЛИ не было точного совпадения И найдено много вариантов
-        is_generic_query = len(self.service_name) < 15 or not any(m['exact_match'] for m in matches)
-        if len(unique_service_names) > 3 and is_generic_query:
-             response_parts = [f"По вашему запросу '{self.service_name}' найдено несколько видов услуг. Уточните, пожалуйста, какая именно вас интересует:"]
+        is_ambiguous_query = not any(m['exact_match'] for m in matches)
+        if len(unique_service_names) > 3 and is_ambiguous_query:
+             response_parts = [f"По вашему запросу '{self.service_name}' найдено несколько видов услуг/категорий. Уточните, пожалуйста, какая именно вас интересует:"]
              limit = 5
              for i, name in enumerate(sorted(list(unique_service_names))):
                   if i >= limit:
@@ -337,14 +378,14 @@ class GetServicePrice(BaseModel):
                   response_parts.append(f"- {name}")
              return "\n".join(response_parts)
 
-
         matches.sort(key=lambda x: (not x['exact_match'], x['match_type'] == 'category', x['price']))
         best_match = matches[0]
+
         filial_display_name = self.filial_name if self.filial_name else best_match['filial_name']
         filial_text = f" в филиале {filial_display_name}" if filial_display_name != "Любой" else ""
-        match_type_info = f"(Найдено по {'точному' if best_match['exact_match'] else 'частичному'} совпадению в {'названии услуги' if best_match['match_type'] == 'service' else 'названии категории'})"
 
-        return f"Цена на '{best_match['service_name']}'{filial_text} составляет {best_match['price']} руб. {match_type_info}".strip()
+        return f"Цена на '{best_match['service_name']}'{filial_text} составляет {best_match['price']} руб.".strip()
+
 
 class ListFilials(BaseModel):
      def process(self, thread) -> str:
@@ -366,9 +407,11 @@ class GetEmployeeServices(BaseModel):
         emp_found = False
         found_names = set()
 
+        search_name_lower = self.employee_name.lower()
+
         for item in global_clinic_data:
             emp_name = item.get('employeeFullName')
-            if emp_name and self.employee_name.lower() in emp_name.lower():
+            if emp_name and search_name_lower in emp_name.lower():
                  emp_found = True
                  found_names.add(emp_name)
                  service = item.get('serviceName')
@@ -377,21 +420,24 @@ class GetEmployeeServices(BaseModel):
         if not emp_found:
             return f"Сотрудник, похожий на '{self.employee_name}', не найден."
 
-        exact_match = next((name for name in found_names if name.lower() == self.employee_name.lower()), None)
+        exact_match = next((name for name in found_names if name.lower() == search_name_lower), None)
         emp_display_name = exact_match if exact_match else (sorted(list(found_names))[0] if found_names else self.employee_name)
 
         if not services:
             return f"Для сотрудника '{emp_display_name}' не найдено информации об услугах."
         else:
-            name_clarification = f"(найдено по запросу '{self.employee_name}')" if not exact_match and len(found_names) > 1 else ""
-            if not exact_match and len(found_names) == 1: name_clarification = ""
+            name_clarification = ""
+            if emp_display_name.lower() != search_name_lower:
+                name_clarification = f" (найдено по запросу '{self.employee_name}')"
 
             limit = 15
             sorted_services = sorted(list(services))
             output_services = sorted_services[:limit]
             more_services_info = f"... и еще {len(sorted_services) - limit} услуг." if len(sorted_services) > limit else ""
 
-            return f"Сотрудник {emp_display_name} {name_clarification} выполняет следующие услуги:\n* " + "\n* ".join(output_services) + f"\n{more_services_info}".strip()
+            return (f"Сотрудник {emp_display_name}{name_clarification} выполняет следующие услуги:\n* "
+                   + "\n* ".join(output_services) + f"\n{more_services_info}".strip())
+
 
 class CheckServiceInFilial(BaseModel):
     service_name: str = Field(description="Точное или максимально близкое название услуги")
@@ -401,7 +447,8 @@ class CheckServiceInFilial(BaseModel):
         logging.info(f"[FC Proc] Проверка наличия услуги '{self.service_name}' в филиале '{self.filial_name}'")
 
         if self.filial_name is None:
-            return "Пожалуйста, уточните название филиала, в котором вы хотите проверить наличие услуги."
+            all_filials = ListFilials().process(thread)
+            return f"Пожалуйста, уточните название филиала. {all_filials}"
 
         if not global_clinic_data: return "База данных клиники пуста."
 
@@ -412,41 +459,46 @@ class CheckServiceInFilial(BaseModel):
         service_name_matches_in_filial = set()
 
         all_filials_db_orig = set(item.get('filialName') for item in global_clinic_data if item.get('filialName'))
-        all_filials_db_lower = {f.lower() for f in all_filials_db_orig}
+        all_filials_db_lower_map = {f.lower(): f for f in all_filials_db_orig}
 
-        if self.filial_name.lower() in all_filials_db_lower:
+        req_filial_lower = self.filial_name.lower()
+        if req_filial_lower in all_filials_db_lower_map:
             filial_exists = True
-            exact_filial_name = next((f for f in all_filials_db_orig if f.lower() == self.filial_name.lower()), self.filial_name)
+            exact_filial_name = all_filials_db_lower_map[req_filial_lower]
         else:
              suggestion = f"Возможно, вы имели в виду один из этих: {', '.join(sorted(list(all_filials_db_orig)))}?" if all_filials_db_orig else ""
              return f"Филиал '{self.filial_name}' не найден. {suggestion}".strip()
+
+        search_service_lower = self.service_name.lower()
 
         for item in global_clinic_data:
              s_name = item.get('serviceName')
              f_name = item.get('filialName')
 
              if f_name and f_name.lower() == exact_filial_name.lower():
-                  if s_name and self.service_name.lower() in s_name.lower():
+                  if s_name and search_service_lower in s_name.lower():
                       service_found_in_filial = True
                       service_name_matches_in_filial.add(s_name)
-                      if self.service_name.lower() == s_name.lower():
+                      if search_service_lower == s_name.lower():
                           exact_service_name = s_name
                           break
 
         if service_found_in_filial:
              display_service_name = exact_service_name if exact_service_name else sorted(list(service_name_matches_in_filial))[0]
-             clarification = f" (найдено по запросу '{self.service_name}')" if not exact_service_name else ""
+             clarification = f" (найдено по запросу '{self.service_name}')" if display_service_name.lower() != search_service_lower else ""
              return f"Да, услуга '{display_service_name}'{clarification} доступна в филиале '{exact_filial_name}'."
         else:
              service_name_matches_anywhere = set()
              for item in global_clinic_data:
                   s_name = item.get('serviceName')
-                  if s_name and self.service_name.lower() in s_name.lower():
+                  if s_name and search_service_lower in s_name.lower():
                       service_name_matches_anywhere.add(s_name)
 
              if service_name_matches_anywhere:
                   any_service_name = sorted(list(service_name_matches_anywhere))[0]
-                  return f"Услуга, похожая на '{any_service_name}', не найдена в филиале '{exact_filial_name}', но может быть доступна в других филиалах."
+                  clarification = f" (найдено по запросу '{self.service_name}')" if any_service_name.lower() != search_service_lower else ""
+
+                  return f"Услуга '{any_service_name}'{clarification} не найдена в филиале '{exact_filial_name}', но может быть доступна в других филиалах."
              else:
                   return f"Услуга, похожая на '{self.service_name}', не найдена ни в одном филиале."
 
@@ -457,6 +509,7 @@ class CompareServicePriceInFilials(BaseModel):
     def process(self, thread) -> str:
         logging.info(f"[FC Proc] Сравнение цены услуги '{self.service_name}' в филиалах: {self.filial_names}")
         if not global_clinic_data: return "База данных клиники пуста."
+
         unique_filial_names_lower = set(fn.lower() for fn in self.filial_names)
         if not self.filial_names or len(unique_filial_names_lower) < 2:
              return "Для сравнения нужно указать хотя бы два РАЗНЫХ филиала."
@@ -485,7 +538,9 @@ class CompareServicePriceInFilials(BaseModel):
              existing_filials_str = ', '.join(sorted(list(all_filials_in_db_orig_case.values())))
              return f"Следующие филиалы не найдены: {', '.join(invalid_filials)}. Доступные филиалы: {existing_filials_str}."
         if len(filials_to_compare_orig_case) < 2:
-            return "Недостаточно корректных филиалов для сравнения (нужно минимум два)."
+            return "Недостаточно корректных и уникальных филиалов для сравнения (нужно минимум два)."
+
+        search_service_lower = self.service_name.lower()
 
         for item in global_clinic_data:
             s_name = item.get('serviceName')
@@ -496,9 +551,9 @@ class CompareServicePriceInFilials(BaseModel):
 
             f_name_lower = f_name.lower()
             if f_name_lower in prices:
-                if self.service_name.lower() in s_name.lower():
+                if search_service_lower in s_name.lower():
                      current_status = prices[f_name_lower]['price']
-                     is_new_exact_match = self.service_name.lower() == s_name.lower()
+                     is_new_exact_match = (search_service_lower == s_name.lower())
                      is_current_exact_match = isinstance(current_status, (int, float)) and \
                                               prices[f_name_lower].get('exact_service_match', False)
 
@@ -511,9 +566,11 @@ class CompareServicePriceInFilials(BaseModel):
                                exact_service_name_found = s_name
 
         service_display_name = exact_service_name_found if exact_service_name_found else (sorted(list(service_name_matches))[0] if service_name_matches else self.service_name)
+        clarification = f" (по запросу '{self.service_name}')" if service_display_name.lower() != search_service_lower and service_name_matches else ""
 
-        response_parts = [f"Сравнение цен на услугу '{service_display_name}':"]
+        response_parts = [f"Сравнение цен на услугу '{service_display_name}'{clarification}:"]
         valid_prices = {}
+
         for f_lower, f_orig in filials_to_compare_orig_case.items():
             data = prices.get(f_lower)
             if not data: continue
@@ -526,7 +583,7 @@ class CompareServicePriceInFilials(BaseModel):
                 name_clarification = ""
                 if service_name_in_filial.lower() != service_display_name.lower():
                      name_clarification = f" (для услуги: '{service_name_in_filial}')"
-                elif not exact_service_name_found:
+                elif not exact_service_name_found and service_name_matches:
                      name_clarification = f" (для услуги: '{service_name_in_filial}')"
 
                 response_parts.append(f"- {filial}: {price_info} руб.{name_clarification}")
@@ -546,6 +603,127 @@ class CompareServicePriceInFilials(BaseModel):
              response_parts.append("\nНе удалось найти цены для сравнения в указанных филиалах (возможно, цена не указана).")
 
         return "\n".join(response_parts)
+
+# +++ НОВАЯ ФУНКЦИЯ +++
+class FindServiceLocations(BaseModel):
+    service_name: str = Field(description="Точное или максимально близкое название услуги")
+
+    def process(self, thread) -> str:
+        logging.info(f"[FC Proc] Поиск филиалов для услуги: {self.service_name}")
+        if not global_clinic_data: return "База данных клиники пуста."
+
+        locations = set()
+        service_found = False
+        found_service_names = set()
+        
+        # Нормализуем поисковый запрос: удаляем пробелы в начале и конце
+        search_lower = self.service_name.lower().strip()
+        # Разбиваем поисковый запрос на ключевые слова
+        search_keywords = set([word.strip() for word in search_lower.split() if len(word.strip()) > 2])
+        
+        # Функция для проверки, насколько хорошо название услуги совпадает с поисковым запросом
+        def match_score(service_name):
+            if not service_name:
+                return 0
+                
+            service_lower = service_name.lower()
+            
+            # Прямое вхождение (проверяем сначала)
+            if search_lower in service_lower:
+                return 100  # Высший приоритет
+            if service_lower in search_lower:
+                return 90
+                
+            # Подсчитываем, сколько ключевых слов из запроса содержится в названии услуги
+            service_words = set([word.strip() for word in service_lower.split() if len(word.strip()) > 2])
+            matched_words = search_keywords.intersection(service_words)
+            
+            # Если нашли хотя бы 1 совпадающее слово (и оно не слишком короткое)
+            if matched_words:
+                # Вес совпадения = % совпавших слов от общего количества
+                return 50 + 40 * len(matched_words) / len(search_keywords)
+                
+            # Проверяем вхождение отдельных ключевых слов
+            for keyword in search_keywords:
+                if len(keyword) >= 3 and keyword in service_lower:
+                    return 40  # Нашли хотя бы одно ключевое слово
+                    
+            return 0  # Совпадений не найдено
+            
+        # Список для хранения совпадений [score, service_name, filial_name]
+        matches = []
+        
+        # Соберем все уникальные услуги для возможных рекомендаций
+        all_services = set()
+
+        for item in global_clinic_data:
+            s_name = item.get('serviceName')
+            f_name = item.get('filialName')
+            
+            # Добавляем все услуги для возможных рекомендаций
+            if s_name:
+                all_services.add(s_name)
+            
+            # Пропускаем записи без имени услуги или филиала
+            if not s_name or not f_name:
+                continue
+                
+            # Вычисляем счёт совпадения
+            score = match_score(s_name)
+            
+            # Если нашли подходящее совпадение
+            if score > 30:  # Порог совпадения - настраиваемый параметр
+                service_found = True
+                found_service_names.add(s_name)
+                locations.add(f_name)
+                matches.append([score, s_name, f_name])
+
+        # Если не нашли никаких совпадений, предложим похожие услуги
+        if not service_found:
+            # Найдем услуги, которые могут быть похожи на запрос
+            similar_services = []
+            for service in all_services:
+                score = match_score(service)
+                if score > 20:  # Более низкий порог для рекомендаций
+                    similar_services.append((service, score))
+            
+            # Сортируем по убыванию релевантности и берем топ-5
+            similar_services.sort(key=lambda x: x[1], reverse=True)
+            similar_services = similar_services[:5]
+            
+            # Формируем ответ с рекомендациями
+            if similar_services:
+                suggestion_text = ", ".join([f"'{s[0]}'" for s in similar_services])
+                return f"Услуга, похожая на '{self.service_name}', не найдена в базе данных. Возможно, вы имели в виду одну из этих услуг: {suggestion_text}? Пожалуйста, уточните название."
+            else:
+                return f"Услуга, похожая на '{self.service_name}', не найдена в базе данных."
+
+        # Сортируем совпадения по убыванию счёта
+        matches.sort(reverse=True)
+        
+        # Берём название услуги с наибольшим совпадением
+        if matches:
+            best_match = matches[0][1]
+            display_service_name = best_match
+        else:
+            display_service_name = self.service_name
+
+        clarification = ""
+        if display_service_name.lower() != search_lower:
+            clarification = f" (найдено по запросу '{self.service_name}')"
+            
+        # Если нашли частичное совпадение (не 100% совпадение), добавляем вопрос
+        confirmation_question = ""
+        best_score = matches[0][0] if matches else 0
+        if best_score < 100 and best_score > 50:
+            confirmation_question = f" Это та услуга, которую вы искали?"
+
+        if not locations:
+            return f"Информация о филиалах, предоставляющих услугу '{display_service_name}'{clarification}, отсутствует в базе данных."
+        else:
+            return (f"Услуга '{display_service_name}'{clarification} доступна в следующих филиалах:\n*   "
+                   + "\n*   ".join(sorted(list(locations))) + confirmation_question)
+# +++ КОНЕЦ НОВОЙ ФУНКЦИИ +++
 
 class Agent:
     def __init__(self, model_uri: str, assistant_name: str, instruction=None, search_index=None, tools_models=None):
@@ -578,8 +756,12 @@ class Agent:
 
         if self.tools_models:
             for tool_model in self.tools_models:
-                tools_for_sdk.append(sdk.tools.function(tool_model))
-                logging.info(f"Добавлен инструмент Function Calling: {tool_model.__name__}")
+                 if isinstance(tool_model, type) and issubclass(tool_model, BaseModel):
+                    tools_for_sdk.append(sdk.tools.function(tool_model))
+                    logging.info(f"Добавлен инструмент Function Calling: {tool_model.__name__}")
+                 else:
+                    logging.warning(f"Пропущен невалидный элемент в tools_models: {tool_model}")
+
 
         try:
             logging.info(f"Поиск существующих ассистентов с именем '{self.assistant_name}'...")
@@ -601,7 +783,7 @@ class Agent:
                 name=self.assistant_name,
                 instruction=instruction if instruction else "Ты - полезный ассистент.",
                 tools=tools_for_sdk if tools_for_sdk else None,
-                ttl_days=1,
+                ttl_days=30,
                 expiration_policy="since_last_active"
             )
             self._assistant_for_cleanup = self.assistant
@@ -623,6 +805,7 @@ class Agent:
                  return None
         return self.thread
 
+    # --- ИСПРАВЛЕННЫЙ МЕТОД __call__ (ВОЗВРАЩЕН К ОРИГИНАЛУ) ---
     def __call__(self, message, thread=None):
         if self.assistant is None:
              logging.error("Вызов агента невозможен: ассистент не был инициализирован.")
@@ -653,26 +836,43 @@ class Agent:
                             try:
                                 handler_instance = handler_class(**func_args) if func_args else handler_class()
                             except Exception as pydantic_error:
-                                logging.error(f"[{current_thread.id}/{run.id}] Ошибка валидации аргументов для функции {func_name}: {pydantic_error}", exc_info=False)
-                                tool_results.append({"name": func_name, "content": f"Ошибка: Некорректные параметры для функции {func_name}. {pydantic_error}"})
+                                logging.error(f"[{current_thread.id}/{run.id}] Ошибка валидации/инициализации аргументов для функции {func_name}: {pydantic_error}", exc_info=False)
+                                # ИСПОЛЬЗУЕМ ОРИГИНАЛЬНУЮ СТРУКТУРУ
+                                tool_results.append({
+                                    "name": func_name,
+                                    "content": f"Ошибка: Некорректные параметры для функции {func_name}. {pydantic_error}"
+                                })
                                 continue
 
                             output = handler_instance.process(current_thread)
                             log_output = (str(output)[:200] + '...' if len(str(output)) > 200 else str(output)).replace('\n', ' ')
                             logging.debug(f"[{current_thread.id}/{run.id}] Результат {func_name}: {log_output}")
-                            tool_results.append({"name": func_name, "content": str(output)})
+                            # ИСПОЛЬЗУЕМ ОРИГИНАЛЬНУЮ СТРУКТУРУ
+                            tool_results.append({
+                                "name": func_name,
+                                "content": str(output)
+                            })
                         except Exception as e:
                             logging.error(f"[{current_thread.id}/{run.id}] Ошибка выполнения логики функции {func_name}: {e}", exc_info=True)
-                            tool_results.append({"name": func_name, "content": f"Внутренняя ошибка при обработке запроса функцией {func_name}."})
+                            # ИСПОЛЬЗУЕМ ОРИГИНАЛЬНУЮ СТРУКТУРУ
+                            tool_results.append({
+                                "name": func_name,
+                                "content": f"Внутренняя ошибка при обработке запроса функцией {func_name}."
+                            })
                     else:
                         logging.warning(f"[{current_thread.id}/{run.id}] Не найден обработчик для функции: {func_name}")
-                        tool_results.append({"name": func_name, "content": "Ошибка: неизвестная функция."})
+                        # ИСПОЛЬЗУЕМ ОРИГИНАЛЬНУЮ СТРУКТУРУ
+                        tool_results.append({
+                            "name": func_name,
+                            "content": "Ошибка: неизвестная функция."
+                        })
 
                 if not tool_results:
                      logging.warning(f"[{current_thread.id}/{run.id}] Нет результатов для отправки после обработки tool_calls.")
                      return "Произошла ошибка при обработке запрошенных действий."
 
-                logging.info(f"[{current_thread.id}/{run.id}] Отправка результатов функций...")
+                logging.info(f"[{current_thread.id}/{run.id}] Отправка результатов функций ({len(tool_results)} шт.)...")
+                # ИСПОЛЬЗУЕМ ОРИГИНАЛЬНУЮ СТРУКТУРУ tool_results
                 run.submit_tool_results(tool_results)
                 res = run.wait(timeout=120)
 
@@ -680,12 +880,16 @@ class Agent:
             tool_calls_exist = hasattr(res, 'tool_calls') and res.tool_calls
 
             if not tool_calls_exist and not has_error:
-                final_text = getattr(getattr(res, 'message', None), 'text', None)
-                if final_text is None:
-                     final_text = getattr(res, 'text', "Не удалось получить ответ от ассистента.")
+                final_text = None
+                if hasattr(res, 'message') and hasattr(res.message, 'text'):
+                    final_text = res.message.text
+                elif hasattr(res, 'text'):
+                     final_text = res.text
+                else:
+                     final_text = "Не удалось получить текстовый ответ от ассистента, хотя выполнение завершилось."
+                     logging.warning(f"[{current_thread.id}/{run.id}] Не удалось извлечь текст из финального ответа: {res}")
 
                 logging.info(f"[{current_thread.id}/{run.id}] Ассистент ответил (статус COMPLETED).")
-                logging.info(f"[{current_thread.id}/{run.id}] Извлеченный текст ответа (len={len(final_text)}): '{final_text}'")
                 log_final_text = (final_text[:200] + '...' if len(final_text) > 200 else final_text).replace('\n', ' ')
                 logging.debug(f"[{current_thread.id}/{run.id}] Ассистент: {log_final_text}")
                 return final_text
@@ -707,6 +911,7 @@ class Agent:
             run_id_str = f"/{run.id}" if 'run' in locals() and hasattr(run, 'id') else ""
             logging.error(f"[{current_thread.id}{run_id_str}] Неожиданная ошибка во время обработки запроса: {e}", exc_info=True)
             return "Произошла внутренняя ошибка сервера или сети. Пожалуйста, попробуйте повторить ваш запрос позже."
+    # --- КОНЕЦ ИСПРАВЛЕННОГО МЕТОДА __call__ ---
 
     def add_uploaded_files(self, files: List[Any]):
         if files:
@@ -730,7 +935,7 @@ class Agent:
 
         if self._uploaded_files_for_cleanup:
             logging.info(f"Удаление {len(self._uploaded_files_for_cleanup)} RAG файлов...")
-            unique_file_ids = {f.id for f in self._uploaded_files_for_cleanup}
+            unique_file_ids = {f.id for f in self._uploaded_files_for_cleanup if hasattr(f, 'id')}
             for file_id in tqdm(unique_file_ids, desc="Удаление RAG файлов"):
                  try:
                      file_obj = sdk.files.get(file_id)
@@ -792,7 +997,8 @@ def initialize_clinic_assistant():
             ListFilials,
             GetEmployeeServices,
             CheckServiceInFilial,
-            CompareServicePriceInFilials
+            CompareServicePriceInFilials,
+            FindServiceLocations # <-
         ]
 
         system_prompt = f"""Ты - вежливый, **ОЧЕНЬ ВНИМАТЕЛЬНЫЙ** и информативный ассистент медицинской клиники "Med YU Med".
@@ -801,29 +1007,38 @@ def initialize_clinic_assistant():
 **КЛЮЧЕВЫЕ ПРАВИЛА ВЫБОРА ИНСТРУМЕНТА И РАБОТЫ С КОНТЕКСТОМ:**
 
 1.  **СНАЧАЛА ОПРЕДЕЛИ ТИП ЗАПРОСА:**
-    *   **ОБЩИЙ ВОПРОС / ЗАПРОС ОПИСАНИЯ (Что? Как? Зачем? Посоветуй... Расскажи о...):** Если пользователь спрашивает **общее описание** услуги (что это, как работает, какой эффект), просит **подробности** об опыте/специализации врача, или задает **открытый вопрос** ("что для омоложения?", "какие пилинги бывают?", "посоветуй от морщин"), **ПОИСК ДОП. ИНФОРМАЦИИ:** Ты **должен** использовать предоставленные тебе текстовые материалы (описания услуг и врачей) для поиска релевантной информации. **СИНТЕЗИРУЙ** свой ответ на основе найденных описаний. НЕ пытайся сразу вызывать функции для таких общих вопросов.
-    *   **КОНКРЕТНЫЙ ЗАПРОС (Сколько? Где? Кто? Сравни...):** Если пользователь спрашивает **конкретную цену**, **наличие в филиале**, **список врачей/услуг по критерию**, **сравнение цен**, **ИСПОЛЬЗУЙ Function Calling**.
+    *   **ОБЩИЙ ВОПРОС / ЗАПРОС ОПИСАНИЯ (Что? Как? Зачем? Посоветуй... Расскажи о...):** Если пользователь спрашивает **общее описание** услуги (что это, как работает, какой эффект), просит **подробности** об опыте/специализации врача, или задает **открытый вопрос** ("что для омоложения?", "какие пилинги бывают?", "посоветуй от морщин"), **ПОИСК ДОП. ИНФОРМАЦИИ (RAG):** Ты **должен** использовать предоставленные тебе текстовые материалы (индекс `search_index`) для поиска релевантной информации. **СИНТЕЗИРУЙ** свой ответ на основе найденных описаний. НЕ пытайся сразу вызывать функции для таких общих вопросов. Если в индексе ничего нет, вежливо сообщи об этом.
+    *   **КОНКРЕТНЫЙ ЗАПРОС (Сколько? Где? Кто? Сравни...):** Если пользователь спрашивает **конкретную цену**, **наличие в филиале**, **список врачей/услуг по критерию**, **сравнение цен**, **список филиалов для услуги**, **ИСПОЛЬЗУЙ Function Calling**.
 
 2.  **ИСПОЛЬЗОВАНИЕ ИСТОРИИ:**
-    *   **ПЕРЕД КАЖДЫМ ОТВЕТОМ/ВЫЗОВОМ ФУНКЦИИ:** **ОБЯЗАТЕЛЬНО** проанализируй **ПОСЛЕДНИЕ 3-4 сообщения**. Ищи имена, услуги, филиалы. **ИСПОЛЬЗУЙ ЭТУ ИНФОРМАЦИЮ!**
-    *   **ЗАПОМИНАЙ:** Имя пользователя, обсуждаемые темы (услуги, филиалы). Обращайся по имени. Не задавай вопросы по информации, которая уже есть в недавней истории.
+    *   **ПЕРЕД КАЖДЫМ ОТВЕТОМ/ВЫЗОВОМ ФУНКЦИИ:** **ОБЯЗАТЕЛЬНО** проанализируй **ПОСЛЕДНИЕ 3-4 сообщения**. Ищи имена, услуги, филиалы, упоминания цен или мест. **ИСПОЛЬЗУЙ ЭТУ ИНФОРМАЦИЮ!** Например, если только что обсуждали "Висцеральный массаж", а пользователь спрашивает "где?", используй "Висцеральный массаж" как `service_name`.
+    *   **ЗАПОМИНАЙ:** Имя пользователя (если представился), обсуждаемые темы (услуги, филиалы). Обращайся по имени, если знаешь его. Не задавай вопросы по информации, которая уже есть в недавней истории (в пределах 3-4 сообщений).
 
 3.  **ИНСТРУКЦИИ ПО FUNCTION CALLING (Только для КОНКРЕТНЫХ запросов!):**
-    *   **Уточняй ТОЛЬКО если ОБЯЗАТЕЛЬНОГО параметра ДЕЙСТВИТЕЛЬНО нет в истории!**
-    *   `FindEmployees`: Поиск СПИСКА сотрудников по критериям. **Используй эту функцию также, если пользователь спрашивает "какие услуги есть в филиале X?" (передай `filial_name=X` и не передавай `service_name`).**
-    *   `GetServicePrice`: Цена ОДНОЙ КОНКРЕТНОЙ услуги. **`service_name` ОБЯЗАТЕЛЕН**. Ищи его в истории перед уточнением. **НЕ ВЫЗЫВАЙ для общих категорий типа "процедуры для лица".**
-    *   `ListFilials`: ТОЛЬКО по явному запросу списка филиалов/адресов.
+    *   **Точность Параметров:** Передавай параметры как можно точнее, основываясь на запросе и истории. Используй ПОЛНЫЕ названия услуг или филиалов из истории, если они там есть.
+    *   **Уточняй ТОЛЬКО если ОБЯЗАТЕЛЬНОГО параметра ДЕЙСТВИТЕЛЬНО нет в истории или запросе!** Не уточняй необязательные параметры без необходимости.
+    *   `FindEmployees`: Поиск СПИСКА сотрудников по критериям (имя, услуга, филиал). Используй, если спрашивают "кто делает X?", "какие врачи в филиале Y?", "какие услуги в филиале Z?".
+    *   `GetServicePrice`: Цена ОДНОЙ КОНКРЕТНОЙ услуги. **`service_name` ОБЯЗАТЕЛЕН**. Ищи его в истории перед уточнением. `filial_name` - необязательный. НЕ ВЫЗЫВАЙ для общих категорий типа "процедуры для лица".
+    *   `ListFilials`: ТОЛЬКО по явному запросу списка филиалов/адресов ("какие у вас филиалы?", "где вы находитесь?").
     *   `GetEmployeeServices`: Список услуг ОДНОГО КОНКРЕТНОГО врача. **`employee_name` ОБЯЗАТЕЛЕН**.
-    *   `CheckServiceInFilial`: Наличие ОДНОЙ КОНКРЕТНОЙ услуги в ОДНОМ КОНКРЕТНОМ филиале. **`service_name` и `filial_name` ОБЯЗАТЕЛЬНЫ**. НЕ ВЫЗЫВАЙ без `filial_name`.
-    *   `CompareServicePriceInFilials`: Сравнение цены ОДНОЙ КОНКРЕТНОЙ услуги в НЕСКОЛЬКИХ филиалах. **`service_name` и `filial_names` (>=2) ОБЯЗАТЕЛЬНЫ**.
+    *   `CheckServiceInFilial`: Наличие ОДНОЙ КОНКРЕТНОЙ услуги в ОДНОМ КОНКРЕТНОМ филиале. **`service_name` и `filial_name` ОБЯЗАТЕЛЬНЫ**. Используй, если в запросе или недавней истории есть и услуга, и филиал. Если `filial_name` нет - НЕ ВЫЗЫВАЙ эту функцию, а используй `FindServiceLocations`.
+    *   `FindServiceLocations`: Поиск ВСЕХ филиалов, где доступна ОДНА КОНКРЕТНАЯ услуга. **`service_name` ОБЯЗАТЕЛЕН**. Используй, если пользователь спросил "Где делают услугу X?" БЕЗ указания конкретного филиала.
+    *   `CompareServicePriceInFilials`: Сравнение цены ОДНОЙ КОНКРЕТНОЙ услуги в НЕСКОЛЬКИХ (минимум 2) филиалах. **`service_name` и `filial_names` (список >=2) ОБЯЗАТЕЛЬНЫ**.
+
+4.  **РАБОТА С НЕТОЧНЫМИ НАЗВАНИЯМИ УСЛУГ:**
+    *   **Если функция не нашла услугу** или вернула сообщение "Услуга не найдена", **ПРЕДЛОЖИ ПОЛЬЗОВАТЕЛЮ УТОЧНИТЬ НАЗВАНИЕ** и приведи примеры похожих услуг из клиники.
+    *   **Используй формулировки:** "Возможно, вы имели в виду одну из этих услуг: [примеры]? Пожалуйста, уточните название услуги".
+    *   **При частичном совпадении** (когда функция что-то нашла, но не уверена) - используй найденный результат, но спроси: "Я нашел услугу [название]. Это то, что вы искали?"
+    *   **При запросе общих категорий** (например, "массаж", "лифтинг") - попытайся найти более конкретные варианты через функцию FindServiceLocations и предложи пользователю выбрать из списка.
 
 **Общие правила поведения:**
--   **Точность:** НЕ ПРИДУМЫВАЙ. Используй результаты поиска информации или функции. Сообщай, если не найдено.
--   **Краткость:** Отвечай по существу. Длинные списки из функций сокращай и предлагай уточнить.
--   **Вежливость:** Будь корректным и дружелюбным.
--   **Приветствия/Прощания:** Поздоровайся ОДИН РАЗ. Не прощайся без запроса.
--   **Медицинские советы:** Отклоняй и предлагай консультацию.
--   **Последовательность:** Завершай текущую задачу пользователя.
+-   **Точность:** НЕ ПРИДУМЫВАЙ информацию о ценах, наличии услуг, врачах или филиалах. Используй ТОЛЬКО результаты поиска информации (RAG) или вызова функций. Если информация не найдена, честно сообщи об этом ("К сожалению, я не нашел информацию о...", "Цена на эту услугу не указана в базе").
+-   **Краткость и ясность:** Отвечай по существу запроса. Если функция возвращает длинный список, покажи первые несколько элементов (5-7) и предложи пользователю уточнить запрос, если нужно больше деталей. Например: "Найдены следующие сотрудники: A, B, C... (и еще 5). Уточните запрос, если ищете кого-то конкретного."
+-   **Вежливость:** Будь корректным, дружелюбным и терпеливым.
+-   **Приветствия/Прощания:** Поздоровайся ОДИН РАЗ в начале диалога. Не прощайся сам, если пользователь не завершает разговор.
+-   **Медицинские советы:** НЕ ДАВАЙ медицинских советов, диагнозов или рекомендаций по лечению. Предлагай записаться на консультацию к специалисту клиники. ("Я не могу дать медицинский совет, но могу помочь вам записаться на консультацию к врачу.")
+-   **Последовательность:** Старайся завершить текущую задачу пользователя перед переходом к новой. Если пользователь задал несколько вопросов сразу, отвечай последовательно.
+-   **Интерпретация результатов функций:** Представляй результаты функций в понятной для пользователя форме, а не просто копируй вывод функции. Например, вместо `Да, услуга 'Висцеральный массаж' (найдено по запросу 'висцеральный массаж') доступна в филиале 'Москва-сити'.` скажи `Да, висцеральный массаж можно сделать в филиале "Москва-сити".`
 """
 
         clinic_agent = Agent(
@@ -833,15 +1048,16 @@ def initialize_clinic_assistant():
             search_index=rag_index,
             tools_models=function_models
         )
-        
-        if uploaded_rag_files:
+
+        if not existing_index_found and uploaded_rag_files:
             clinic_agent.add_uploaded_files(uploaded_rag_files)
-        
+
         return clinic_agent, existing_index_found
-        
+
     except Exception as e:
         logging.critical(f"Не удалось инициализировать Агента: {e}", exc_info=True)
         raise
 
 
 __all__ = ['initialize_clinic_assistant', 'Agent']
+
