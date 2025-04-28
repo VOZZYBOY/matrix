@@ -1,19 +1,12 @@
-# --- Веб-сервер и фреймворк ---
-fastapi==0.109.2
-uvicorn[standard]==0.27.1  # [standard] включает uvloop, httptools, websockets для лучшей производительности
-
-# --- Yandex Cloud SDK и его ключевые зависимости ---
-
-protobuf==5.29.4         # Явно указываем из-за частых конфликтов версий
-requests==2.32.3         # Для HTTP-запросов, часто используется SDK
-
-# --- Валидация данных (используется FastAPI и вашими моделями) ---
-pydantic==2.11.2
-
-# --- Утилиты, используемые в коде ---
-tqdm==4.67.1             
-
-# --- Зависимости, которые могут потребоваться для async операций или SDK ---
-aiohttp==3.9.3         
-aiofiles==24.1.0    
-jinja2==3.1.6
+langchain == 0.3.24
+langchain-core == 0.3.56
+langchain-community == 0.3.22
+langchain-gigachat == 0.3.10
+gigachat == 0.1.39.post1
+chromadb == 0.6.3
+pydantic == 2.11.3
+langchain-deepseek == 0.1.3
+langchain-chroma == 0.2.3
+fastapi == 0.109.2
+uvicorn == 0.27.1
+jinja2 == 3.1.6

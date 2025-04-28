@@ -864,24 +864,27 @@ document.addEventListener('DOMContentLoaded', () => {
             });
     }
     
-    // Обновление поля user_id
+    // Обновление поля user_id (единый ключ 'clinicUserId')
     function updateUserIdField() {
-        const userId = localStorage.getItem('user_id') || generateUserId();
-        userIdField.value = userId;
+        // Получаем или создаем user_id
+        let id = localStorage.getItem('clinicUserId') || generateUserId();
+        localStorage.setItem('clinicUserId', id);
+        userId = id;
+        userIdField.value = id;
+        updateUserIdDisplay();
     }
     
-    // Сохранение user_id
+    // Сохранение user_id (единый ключ 'clinicUserId')
     function saveUserId() {
         const newUserId = userIdField.value.trim();
-        
         if (!newUserId) {
             showNotification('ID пользователя не может быть пустым', 'error');
             return;
         }
-        
-        const oldUserId = localStorage.getItem('user_id');
-        localStorage.setItem('user_id', newUserId);
-        
+        const oldUserId = localStorage.getItem('clinicUserId');
+        localStorage.setItem('clinicUserId', newUserId);
+        userId = newUserId;
+        updateUserIdDisplay();
         // Сбросить сессию при изменении ID
         if (oldUserId !== newUserId) {
             fetch('/reset_session', {
@@ -906,12 +909,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     
-    // Сброс user_id
+    // Сброс user_id (единый ключ 'clinicUserId')
     function resetUserId() {
         const newUserId = generateUserId();
-        localStorage.setItem('user_id', newUserId);
-        userIdField.value = newUserId;
-        
+        localStorage.setItem('clinicUserId', newUserId);
+        userId = newUserId;
+        updateUserIdField();
+        updateUserIdDisplay();
         // Сбросить сессию
         fetch('/reset_session', {
             method: 'POST',
