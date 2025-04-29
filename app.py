@@ -17,20 +17,17 @@ from pydantic import BaseModel
 
 
 try:
-    # Импортируем функцию инициализации и управления сессиями
     from matrixai import (
         initialize_assistant,
         clear_session_history,
         get_active_session_count
     )
-    # Импортируем тип агента для type hinting (опционально)
     from langchain_core.runnables import Runnable
 except ImportError as e:
      logging.critical(f"Не удалось импортировать компоненты из matrixai_module.py: {e}", exc_info=True)
      raise SystemExit(f"Критическая ошибка импорта: {e}")
 
 
-# --- Настройка логирования ---
 log_file_path = "api.log"
 logging.basicConfig(
     level=logging.INFO,
@@ -42,10 +39,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("clinic_api_module_based")
 
-# --- Глобальная переменная для хранения инстанса агента ---
 assistant_chain: Optional[Runnable] = None
 
-# --- Модели запроса/ответа FastAPI ---
 class MessageRequest(BaseModel):
     message: str
     user_id: Optional[str] = None
@@ -55,27 +50,19 @@ class MessageResponse(BaseModel):
     response: str
     user_id: str
 
-# --- Lifespan для инициализации/очистки ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global assistant_chain
     logger.info("Запуск FastAPI приложения...")
     try:
         logger.info("Инициализация Ассистента...")
-        # Вызываем функцию инициализации из нашего модуля
-        # Можно передать параметры или оставить значения по умолчанию/env
         assistant_chain = initialize_assistant(
-            # gigachat_credentials="...", # Можно передать явно
-            # json_data_path="...",
-            # chroma_persist_dir="...",
-            # ... другие параметры ...
         )
         logger.info("Ассистент успешно инициализирован.")
     except Exception as e:
         logger.critical(f"Критическая ошибка инициализации ассистента: {e}", exc_info=True)
-        assistant_chain = None # Указываем, что инициализация не удалась
+        assistant_chain = None 
     yield
-    # Очистка при завершении (если нужно)
     logger.info("Завершение работы API.")
 
 
@@ -85,8 +72,6 @@ app = FastAPI(
     version="3.0.0",
     lifespan=lifespan
 )
-
-# --- Middleware, Статика, Шаблоны (без изменений) ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
@@ -94,7 +79,7 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
-# --- Зависимость для получения агента ---
+
 def get_assistant() -> Runnable:
     if assistant_chain is None:
         logger.error("Запрос к API, но ассистент не инициализирован.")
@@ -216,4 +201,4 @@ if __name__ == "__main__":
     app_port = int(os.getenv("APP_PORT", 8001))
     log_level = os.getenv("APP_LOG_LEVEL", "info").lower()
     logger.info(f"Starting FastAPI server via uvicorn on {app_host}:{app_port}")
-    uvicorn.run("app:app", host=app_host, port=app_port, log_level=log_level, reload=True)
+    uvicorn.run("app:app", host=app_host, port=app_port, log_level=log_level, reload=True)  

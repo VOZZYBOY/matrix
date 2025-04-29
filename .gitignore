@@ -1,4 +1,18 @@
-venv/
+# Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+venv/
+ENV/
+
+# Векторные базы и логи
+chroma_db_clinic_giga/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Конфиденциальные данные
+.env
