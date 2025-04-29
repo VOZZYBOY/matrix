@@ -810,3 +810,53 @@ class ListAllCategories(BaseModel):
         more_categories_info = f"... и еще {len(sorted_categories) - limit} категорий." if len(sorted_categories) > limit else ""
 
         return "Доступные категории услуг:\n*   " + "\n*   ".join(output_categories) + f"\n{more_categories_info}".strip()
+    
+class ListEmployeeFilials(BaseModel):
+    """Модель для получения списка филиалов конкретного сотрудника."""
+    employee_name: str = Field(description="Точное или максимально близкое ФИО сотрудника")
+
+    def process(self) -> str:
+        """Возвращает список всех филиалов, где работает сотрудник."""
+        if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
+        logging.info(f"[FC Proc] Запрос филиалов сотрудника: {self.employee_name}")
+
+        found_filials: Set[str] = set()
+        employee_found = False
+        found_employee_names: Set[str] = set()
+        norm_search_name = normalize_text(self.employee_name, keep_spaces=True)
+
+        for item in _internal_clinic_data:
+            emp_name_raw = item.get('employeeFullName')
+            filial_name_raw = item.get('filialName')
+            norm_item_emp = normalize_text(emp_name_raw, keep_spaces=True)
+
+            if norm_item_emp and norm_search_name in norm_item_emp:
+                employee_found = True
+                if emp_name_raw: found_employee_names.add(emp_name_raw)
+                if filial_name_raw:
+                    found_filials.add(filial_name_raw)
+
+        if not employee_found:
+            return f"Сотрудник с именем, похожим на '{self.employee_name}', не найден."
+
+        best_match_name = self.employee_name
+        if found_employee_names:
+            exact_match = next((name for name in found_employee_names if normalize_text(name, keep_spaces=True) == norm_search_name), None)
+            if exact_match:
+                best_match_name = exact_match
+            else:
+                best_match_name = sorted(list(found_employee_names), key=lambda n: normalize_text(n, keep_spaces=True))[0]
+
+        if not found_filials:
+            return f"Для сотрудника '{best_match_name}' не найдено информации о филиалах."
+        else:
+            name_clarification = ""
+            if normalize_text(best_match_name, keep_spaces=True) != norm_search_name:
+                name_clarification = f" (найдено по запросу '{self.employee_name}')"
+
+            sorted_filials = sorted(list(found_filials), key=normalize_text)
+
+            if len(sorted_filials) == 1:
+                 return f"Сотрудник {best_match_name}{name_clarification} работает в филиале: {sorted_filials[0]}."
+            else:
+                 return f"Сотрудник {best_match_name}{name_clarification} работает в следующих филиалах:\n*   " + "\n*   ".join(sorted_filials)
