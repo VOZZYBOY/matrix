@@ -10,10 +10,6 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Yandex Cloud CLI (Keep only if actively used by the application)
-RUN curl -sSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash && \
-    mv /root/yandex-cloud/bin/yc /usr/local/bin/yc
-
 # Verify YC CLI installation (Optional, can be removed)
 RUN yc --version
 
