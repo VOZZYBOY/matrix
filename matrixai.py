@@ -1,8 +1,11 @@
 # matrixai.py
+
 import os
+import json
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from operator import itemgetter
+
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda, RunnableConfig
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, BaseMessage
@@ -74,7 +77,7 @@ try:
         embedding_model=GIGA_EMBEDDING_MODEL,
         embedding_scope=GIGA_SCOPE,
         verify_ssl_certs=False,
-        search_k= 5
+        search_k= 5 
     )
     if isinstance(rag_components, tuple) and len(rag_components) >= 4:
          retriever, embeddings_model_obj, prepared_docs_for_bm25, clinic_data_for_functions = rag_components[:4]
@@ -257,7 +260,7 @@ SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ 
 
 ВЫБОР МЕЖДУ RAG, FUNCTION CALLING, ПАМЯТЬЮ ДИАЛОГА ИЛИ ПРЯМЫМ ОТВЕТОМ:
 - ПАМЯТЬ ДИАЛОГА: Для ответов на вопросы, связанные с предыдущим контекстом (местоимения "он/она/это", короткие вопросы "где?", "цена?", "кто?"), и для вопросов о самом пользователе.
-- RAG (Поиск по базе знаний): Используй ТОЛЬКО для ЗАПРОСОВ ОПИСАНИЯ услуг или врачей ("Что такое X?", "Расскажи про Y", "Подробнее о Z"). Я предоставлю контекст. Синтезируй ответ на его основе..
+- RAG (Поиск по базе знаний): Используй ТОЛЬКО для ЗАПРОСОВ ОПИСАНИЯ услуг или врачей ("Что такое X?", "Расскажи про Y", "Подробнее о Z"). Я предоставлю контекст. Синтезируй ответ на его основе.
 - FUNCTION CALLING (Вызов Инструментов): Используй ТОЛЬКО для запросов КОНКРЕТНЫХ ДАННЫХ: цены, списки врачей/услуг/филиалов, проверка наличия, сравнение цен, ПОЛНЫЙ список филиалов сотрудника. Используй правильный инструмент.
 - ПРЯМОЙ ОТВЕТ: Для приветствий, прощаний, простых уточнений или вопросов не по теме.
 
