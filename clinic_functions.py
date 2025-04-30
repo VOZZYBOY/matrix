@@ -697,8 +697,6 @@ class ListServicesInFilial(BaseModel):
         if not filial_exists:
             suggestion = f"Доступные филиалы: {', '.join(sorted(list(all_filials_db_orig), key=normalize_text))}." if all_filials_db_orig else "Список филиалов пуст."
             return f"Филиал '{self.filial_name}' не найден. {suggestion}".strip()
-
-        # Используем найденное оригинальное имя филиала (или из запроса, если не нашли)
         display_filial_name = original_filial_name or self.filial_name
 
         if not services_in_filial:

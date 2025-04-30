@@ -156,9 +156,7 @@ async def health_check():
         logger.error(f"Ошибка получения кол-ва сессий: {e}")
     return { "status": "ok" if agent_ok else "error", "agent_initialized": agent_ok, "active_sessions_in_memory": active_sessions }
 
-# --- Эндпоинт логов (можно оставить или удалить, если не нужен) ---
 def read_logs(max_lines=100):
-     # ... (ваш код чтения логов) ...
     logs = []
     try:
         with open(log_file_path, 'a+', encoding='utf-8') as log_file:

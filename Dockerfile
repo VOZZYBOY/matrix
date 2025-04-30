@@ -1,8 +1,7 @@
 # Use the official Python image as a base
 FROM python:3.9-slim
 
-# Set environment variable to ensure Python outputs are sent straight to terminal without buffering
-ENV PYTHONUNBUFFERED=1
+
 
 # Update and install system dependencies (curl, ffmpeg for potential media processing, build-essential for packages needing compilation, git for git installs)
 RUN apt-get update && \
@@ -37,11 +36,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
 RUN mkdir -p /app/base
 
 # Copy the application code and necessary files
-COPY app.py matrixai.py clinic_functions.py ./
+COPY app.py matrixai.py clinic_functions.py rag_setup.py ./
 COPY base/cleaned_data.json ./base/
 COPY static ./static/
 COPY templates ./templates/
-
 # Expose the application port
 EXPOSE 8001
 

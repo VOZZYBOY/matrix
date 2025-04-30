@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 
 def preprocess_for_rag_v2(data: List[Dict[str, Any]]) -> List[Document]:
-    # ... (код функции preprocess_for_rag_v
     services_data = {}
     employees_data = {}
     for item in data:
@@ -103,7 +102,7 @@ def initialize_rag(
     embedding_scope: str,
     verify_ssl_certs: bool = False,
     chunk_size: int = 1000,
-    chunk_overlap: int = 100,
+    chunk_overlap: int = 200,
     search_k: int = 5 # Увеличил k по умолчанию для EnsembleRetriever
 ) -> Tuple[Optional[BaseRetriever], Optional[GigaChatEmbeddings], Optional[List[Document]], Optional[List[Dict]]]:
     """
