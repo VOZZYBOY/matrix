@@ -86,11 +86,10 @@ def get_assistant() -> Runnable:
         raise HTTPException(status_code=503, detail="Ассистент не инициализирован.")
     return assistant_chain
 
-# --- Генерация ID пользователя (без изменений) ---
 def generate_user_id() -> str:
     return f"user_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
 
-# --- Основные эндпоинты ---
+
 
 @app.get("/")
 async def read_root(request: Request):
@@ -99,19 +98,18 @@ async def read_root(request: Request):
 @app.post("/ask", response_model=MessageResponse, tags=["assistant"])
 async def ask_assistant(
     request: MessageRequest,
-    agent: Runnable = Depends(get_assistant) # Используем зависимость
+    agent: Runnable = Depends(get_assistant)
 ):
     user_id = request.user_id if request.user_id else generate_user_id()
     reset = request.reset_session
     logger.info(f"Получен запрос от {user_id}: {request.message[:50]}... Reset: {reset}")
 
     if reset:
-        cleared = clear_session_history(user_id) # Вызываем функцию из модуля
+        cleared = clear_session_history(user_id) 
         logger.info(f"Запрос на сброс сессии для {user_id}. Сессия удалена: {cleared}")
 
     try:
         start_time = time.time()
-        # Вызываем цепочку с нужным session_id
         response_data = await agent.ainvoke(
             {"input": request.message},
             config={"configurable": {"session_id": user_id}}
@@ -141,7 +139,7 @@ async def reset_session_endpoint(
         raise HTTPException(status_code=400, detail="'user_id' обязателен.")
 
     logger.info(f"Запрос на сброс сессии для {user_id}")
-    if clear_session_history(user_id): # Вызываем функцию из модуля
+    if clear_session_history(user_id): 
         return {"message": f"Сессия для {user_id} сброшена."}
     else:
         raise HTTPException(status_code=404, detail=f"Сессия для {user_id} не найдена.")
@@ -151,7 +149,7 @@ async def health_check():
     agent_ok = assistant_chain is not None
     active_sessions = -1
     try:
-        active_sessions = get_active_session_count() # Вызываем функцию из модуля
+        active_sessions = get_active_session_count() 
     except Exception as e:
         logger.error(f"Ошибка получения кол-ва сессий: {e}")
     return { "status": "ok" if agent_ok else "error", "agent_initialized": agent_ok, "active_sessions_in_memory": active_sessions }

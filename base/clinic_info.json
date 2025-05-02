@@ -1,0 +1,41 @@
+{
+    "clinic_name": "MED YU MED",
+    "legal_name": "ООО «МЕД-Ю-МЕД»",
+    "slogan": "Высочайший уровень сервиса позволяет каждому нашему пациенту чувствовать себя комфортно во время визита.",
+    "stats": {
+      "branches_count": 3,
+      "specialists_count": "50+",
+      "patient_retention_pct": 87,
+      "avg_employee_tenure_years": 6.3
+    },
+    "approach_summary": "Индивидуальный подход, качественное оборудование, специалисты высокого уровня.",
+    "directions": [
+      "Услуги косметологии",
+      "Интернет-магазин"
+    ],
+    "filials": [
+      {
+        "name": "Москва-сити",
+        "address": "Москва, Пресненская наб., 8, стр. 1, 2 этаж (Город столиц)",
+        "normalized_name": "москвасити"
+      },
+      {
+        "name": "Ходынка",
+        "address": "Москва, ул. Авиаконструктора Сухого, 2, корп. 1 (м. ЦСКА, ЖК Лица)",
+        "normalized_name": "ходынка"
+      },
+      {
+        "name": "Дубай",
+        "address": "Bluewaters Island, Dubai - UAE",
+        "normalized_name": "дубай"
+      }
+    ],
+    "working_hours": "пн-вс: 10.00—22.00",
+    "contact_info": {
+      "phone": "8 800 550-08-96",
+      "email": "ars@med-yu-med.ru"
+    },
+    "license": "Л041-01137-77/01322474 от 29.07.2024",
+    "privacy_policy_url": null,
+    "public_info_url": null
+  }
