@@ -5,15 +5,35 @@ import json
 import logging
 from typing import List, Dict, Any, Optional, Tuple
 from operator import itemgetter
+from functools import partial # <--- Добавляем partial для создания оберток
 
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda, RunnableConfig
 from langchain_core.documents import Document
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, BaseMessage
-from langchain_core.tools import tool
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, BaseMessage, messages_from_dict, messages_to_dict
 from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_deepseek import ChatDeepSeek
-from langchain_community.chat_message_histories import ChatMessageHistory
 from pydantic import BaseModel, Field
+
+# Добавляем импорт chromadb
+import chromadb
+# Добавляем импорты для обертки эмбеддингов
+from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
+
+# Добавляем импорт GigaChatEmbeddings
+from langchain_gigachat.embeddings import GigaChatEmbeddings
+
+# Добавляем импорт менеджера конфигураций
+try:
+    import tenant_config_manager
+except ImportError:
+    logging.error("Не удалось импортировать tenant_config_manager. Дополнения к промпту не будут загружаться.")
+    tenant_config_manager = None
+
+# --- Langchain Community/Integrations ---
+from langchain_chroma import Chroma
+from langchain_community.retrievers import BM25Retriever
+from langchain.retrievers.ensemble import EnsembleRetriever
 
 try:
     import rag_setup
@@ -22,21 +42,25 @@ except ImportError as e:
      exit()
 try:
     import clinic_functions
-    if not hasattr(clinic_functions, 'set_clinic_data') or not callable(clinic_functions.set_clinic_data):
-         logging.critical("Критическая ошибка: Функция 'set_clinic_data' не найдена в 'clinic_functions.py'.")
-         exit()
 except ImportError as e:
     logging.critical(f"Критическая ошибка: Не удалось импортировать 'clinic_functions'. Ошибка: {e}", exc_info=True)
+    exit()
+
+try:
+    import redis_history
+except ImportError as e:
+    logging.critical(f"Критическая ошибка: Не удалось импортировать 'redis_history'. Ошибка: {e}", exc_info=True)
     exit()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s:%(name)s:%(lineno)d - %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- Credentials ---
-GIGACHAT_CREDENTIALS = os.environ.get("GIGACHAT_CREDENTIALS", "OTkyYTgyNGYtMjRlNC00MWYyLTg3M2UtYWRkYWVhM2QxNTM1OjA5YWRkODc0LWRjYWItNDI2OC04ZjdmLWE4ZmEwMDIxMThlYw==")
-if not GIGACHAT_CREDENTIALS:
-    logger.critical("Критическая ошибка: Учетные данные GigaChat не найдены (GIGACHAT_CREDENTIALS).")
-    exit()
+# Ставим плейсхолдер или реальное значение, если переменной нет
+GIGACHAT_CREDENTIALS = "OTkyYTgyNGYtMjRlNC00MWYyLTg3M2UtYWRkYWVhM2QxNTM1OjA5YWRkODc0LWRjYWItNDI2OC04ZjdmLWE4ZmEwMDIxMThlYw==" # <--- Изменено на хардкод
+# if not GIGACHAT_CREDENTIALS: # <--- Закомментировано
+#     logger.critical("Критическая ошибка: Учетные данные GigaChat не найдены (GIGACHAT_CREDENTIALS).")
+#     exit()
 
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "sk-1aae129014ac42e3804329d6d44497ce")
 if not DEEPSEEK_API_KEY:
@@ -48,7 +72,10 @@ JSON_DATA_PATH = os.environ.get("JSON_DATA_PATH", "base/cleaned_data.json")
 CHROMA_PERSIST_DIR = os.environ.get("CHROMA_PERSIST_DIR", "chroma_db_clinic_giga")
 GIGA_EMBEDDING_MODEL = os.environ.get("GIGA_EMBEDDING_MODEL", "EmbeddingsGigaR")
 GIGA_SCOPE = os.environ.get("GIGA_SCOPE", "GIGACHAT_API_PERS")
+GIGA_VERIFY_SSL = os.getenv("GIGA_VERIFY_SSL", "False").lower() == "true"
 DEEPSEEK_CHAT_MODEL = os.environ.get("DEEPSEEK_CHAT_MODEL", "deepseek-chat")
+# Добавляем префикс для имен коллекций ChromaDB
+TENANT_COLLECTION_PREFIX = "tenant_" 
 
 # --- Initialize LLM ---
 try:
@@ -63,36 +90,98 @@ except Exception as e:
     logger.critical(f"Ошибка инициализации модели DeepSeek Chat: {e}", exc_info=True)
     exit()
 
-# --- Initialize RAG & Load Data ---
-retriever = None
-embeddings_model_obj = None
-prepared_docs_for_bm25 = None
-clinic_data_for_functions = None
-try:
-    logger.info("Инициализация RAG системы через rag_setup...")
-    rag_components = rag_setup.initialize_rag(
-        json_data_path=JSON_DATA_PATH,
-        chroma_persist_dir=CHROMA_PERSIST_DIR,
-        embedding_credentials=GIGACHAT_CREDENTIALS,
-        embedding_model=GIGA_EMBEDDING_MODEL,
-        embedding_scope=GIGA_SCOPE,
-        verify_ssl_certs=False,
-        search_k= 5 
-    )
-    if isinstance(rag_components, tuple) and len(rag_components) >= 4:
-         retriever, embeddings_model_obj, prepared_docs_for_bm25, clinic_data_for_functions = rag_components[:4]
-    else:
-         raise RuntimeError(f"Функция rag_setup.initialize_rag вернула неожиданный результат: {rag_components}")
+# --- Глобальные переменные для RAG компонентов (инициализируются ниже) ---
+chroma_client_global: Optional[chromadb.ClientAPI] = None
+embeddings_object_global: Optional[GigaChatEmbeddings] = None
+bm25_retrievers_map_global: Dict[str, BM25Retriever] = {}
+tenant_documents_map_global: Dict[str, List[Document]] = {} # <--- Обновляем тип
+tenant_raw_data_map_global: Dict[str, List[Dict]] = {} # <--- ДОБАВЛЕНО: для сырых данных тенантов
+search_k_global = 5 # Значение по умолчанию или из env
 
-    if retriever is None or clinic_data_for_functions is None:
-         raise RuntimeError("Не удалось инициализировать RAG ретривер или загрузить данные клиники из rag_setup.")
-    logger.info("RAG система успешно инициализирована.")
+def initialize_rag_components():
+    """Инициализирует RAG компоненты и сохраняет их в глобальные переменные."""
+    global chroma_client_global, embeddings_object_global
+    global bm25_retrievers_map_global, tenant_documents_map_global # <--- Добавляем tenant_documents_map
+    global tenant_raw_data_map_global # <--- ДОБАВЛЕНО
+    global search_k_global
 
-    clinic_functions.set_clinic_data(clinic_data_for_functions)
-    logger.info("Данные клиники переданы в модуль функций.")
-except Exception as e:
-    logger.critical(f"Критическая ошибка во время инициализации RAG или передачи данных: {e}", exc_info=True)
-    exit()
+    chunk_size = int(os.getenv("CHUNK_SIZE", 1000))
+    chunk_overlap = int(os.getenv("CHUNK_OVERLAP", 200))
+    search_k_global = int(os.getenv("SEARCH_K", 5))
+    # Получаем путь к базовым данным и директории Chroma
+    data_dir_base = os.getenv("BASE_DATA_DIR", "base") # Директория с base/*.json
+    chroma_persist_dir_global = os.getenv("CHROMA_PERSIST_DIR", "chroma_db_clinic_giga") # Глобальная для Chroma
+
+    # Используем "захардкоженную" переменную GIGACHAT_CREDENTIALS
+    if not GIGACHAT_CREDENTIALS: # Небольшая проверка на всякий случай
+        logger.critical("Внутренняя ошибка: GIGACHAT_CREDENTIALS пуста перед вызовом initialize_rag.")
+        exit()
+
+    logger.info("Запуск инициализации RAG компонентов...")
+    try:
+        # Передаем все необходимые аргументы, включая credentials
+        chroma_client, embeddings, bm25_map, tenant_docs_map, tenant_raw_map = rag_setup.initialize_rag(
+            data_dir=data_dir_base,
+            chroma_persist_dir=chroma_persist_dir_global,
+            embedding_credentials=GIGACHAT_CREDENTIALS, # <--- Передаем захардкоженные credentials
+            embedding_model=GIGA_EMBEDDING_MODEL, # Используем константы
+            embedding_scope=GIGA_SCOPE,          # Используем константы
+            verify_ssl_certs=GIGA_VERIFY_SSL,    # Используем константы
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            search_k=search_k_global # Передаем и search_k
+            # force_recreate_chroma и tenant_config_dir будут по умолчанию
+        )
+
+        if chroma_client and embeddings:
+            chroma_client_global = chroma_client
+            embeddings_object_global = embeddings
+            bm25_retrievers_map_global = bm25_map
+            tenant_documents_map_global = tenant_docs_map # <--- Сохраняем документы
+            tenant_raw_data_map_global = tenant_raw_map # <--- ДОБАВЛЕНО: Сохраняем сырые данные
+            logger.info(f"Инициализация RAG завершена. Загружено:")
+            logger.info(f"  - Chroma клиент: {'Да' if chroma_client_global else 'Нет'}")
+            logger.info(f"  - Embeddings: {'Да' if embeddings_object_global else 'Нет'}")
+            logger.info(f"  - BM25 ретриверы: {len(bm25_retrievers_map_global)} шт.")
+            logger.info(f"  - Карта документов тенантов: {len(tenant_documents_map_global)} тенантов.") # <--- Обновляем лог
+            # Логируем количество сырых данных, если нужно
+            # logger.info(f"  - Загружено сырых базовых записей: {len(all_raw_base_data) if all_raw_base_data else 0} шт.") <-- Закомментировано/Удалено
+            logger.info(f"  - Карта сырых данных тенантов: {len(tenant_raw_data_map_global)} тенантов.") # <--- ДОБАВЛЕНО
+        else:
+            logger.error("Не удалось полностью инициализировать RAG компоненты.")
+            # Решаем, падать или нет
+            exit()
+
+    except Exception as e:
+        logger.critical(f"Критическая ошибка во время инициализации RAG: {e}", exc_info=True)
+        exit()
+
+# Вызываем инициализацию RAG при загрузке модуля
+initialize_rag_components()
+
+# +++ НАЧАЛО ПЕРЕНЕСЕННОГО КОДА +++
+def format_docs(docs: List[Document]) -> str:
+    """Форматирует найденные RAG документы для добавления в промпт."""
+    if not docs:
+        return "Дополнительная информация из базы знаний не найдена."
+    formatted_docs = []
+    for i, doc in enumerate(docs):
+        metadata = doc.metadata or {}
+        source_info = metadata.get('id', 'Неизвестный источник')
+        doc_type = metadata.get('type', 'данные')
+        doc_name = metadata.get('name', '')
+        doc_topic = metadata.get('topic', '') # Добавлено для clinic_info
+
+        display_source = doc_type
+        if doc_topic: display_source += f" ({doc_topic})"
+        if doc_name: display_source += f" - '{doc_name}'"
+        if not doc_topic and not doc_name: display_source = source_info # Фоллбэк
+
+        score = metadata.get('relevance_score', None) # EnsembleRetriever добавляет это поле
+        score_str = f" (Score: {score:.4f})" if score is not None else ""
+        formatted_docs.append(f"Источник {i+1}{score_str} ({display_source}):\n{doc.page_content}")
+    return "\n\n".join(formatted_docs)
+# +++ КОНЕЦ ПЕРЕНЕСЕННОГО КОДА +++
 
 # --- Pydantic model for RAG Query Improvement ---
 class RagQueryThought(BaseModel):
@@ -106,7 +195,6 @@ class FindEmployeesArgs(BaseModel):
     service_name: Optional[str] = Field(default=None, description="Точное или частичное название услуги")
     filial_name: Optional[str] = Field(default=None, description="Точное название филиала")
 
-@tool("find_employees", args_schema=FindEmployeesArgs)
 def find_employees_tool(employee_name: Optional[str] = None, service_name: Optional[str] = None, filial_name: Optional[str] = None) -> str:
     """Ищет сотрудников клиники по ФИО, выполняемой услуге или филиалу."""
     handler = clinic_functions.FindEmployees(employee_name=employee_name, service_name=service_name, filial_name=filial_name)
@@ -116,13 +204,11 @@ class GetServicePriceArgs(BaseModel):
     service_name: str = Field(description="Точное или максимально близкое название услуги (например, 'Soprano Пальцы для женщин')")
     filial_name: Optional[str] = Field(default=None, description="Точное название филиала (например, 'Москва-сити'), если нужно уточнить цену в конкретном месте")
 
-@tool("get_service_price", args_schema=GetServicePriceArgs)
 def get_service_price_tool(service_name: str, filial_name: Optional[str] = None) -> str:
     """Возвращает цену на КОНКРЕТНУЮ услугу клиники."""
     handler = clinic_functions.GetServicePrice(service_name=service_name, filial_name=filial_name)
     return handler.process()
 
-@tool("list_filials")
 def list_filials_tool() -> str:
     """Возвращает список всех доступных филиалов клиники."""
     handler = clinic_functions.ListFilials()
@@ -131,7 +217,6 @@ def list_filials_tool() -> str:
 class GetEmployeeServicesArgs(BaseModel):
     employee_name: str = Field(description="Точное или максимально близкое ФИО сотрудника")
 
-@tool("get_employee_services", args_schema=GetEmployeeServicesArgs)
 def get_employee_services_tool(employee_name: str) -> str:
     """Возвращает список услуг КОНКРЕТНОГО сотрудника."""
     handler = clinic_functions.GetEmployeeServices(employee_name=employee_name)
@@ -141,7 +226,6 @@ class CheckServiceInFilialArgs(BaseModel):
     service_name: str = Field(description="Точное или максимально близкое название услуги")
     filial_name: str = Field(description="Точное название филиала")
 
-@tool("check_service_in_filial", args_schema=CheckServiceInFilialArgs)
 def check_service_in_filial_tool(service_name: str, filial_name: str) -> str:
     """Проверяет, доступна ли КОНКРЕТНАЯ услуга в КОНКРЕТНОМ филиале."""
     handler = clinic_functions.CheckServiceInFilial(service_name=service_name, filial_name=filial_name)
@@ -151,7 +235,6 @@ class CompareServicePriceInFilialsArgs(BaseModel):
     service_name: str = Field(description="Точное или максимально близкое название услуги")
     filial_names: List[str] = Field(min_length=2, description="Список из ДВУХ или БОЛЕЕ названий филиалов")
 
-@tool("compare_service_price_in_filials", args_schema=CompareServicePriceInFilialsArgs)
 def compare_service_price_in_filials_tool(service_name: str, filial_names: List[str]) -> str:
     """Сравнивает цену КОНКРЕТНОЙ услуги в НЕСКОЛЬКИХ филиалах."""
     handler = clinic_functions.CompareServicePriceInFilials(service_name=service_name, filial_names=filial_names)
@@ -160,7 +243,6 @@ def compare_service_price_in_filials_tool(service_name: str, filial_names: List[
 class FindServiceLocationsArgs(BaseModel):
     service_name: str = Field(description="Точное или максимально близкое название услуги")
 
-@tool("find_service_locations", args_schema=FindServiceLocationsArgs)
 def find_service_locations_tool(service_name: str) -> str:
     """Ищет все филиалы, где доступна КОНКРЕТНАЯ услуга."""
     handler = clinic_functions.FindServiceLocations(service_name=service_name)
@@ -170,7 +252,6 @@ class FindSpecialistsByServiceOrCategoryAndFilialArgs(BaseModel):
     query_term: str = Field(description="Название услуги ИЛИ категории")
     filial_name: str = Field(description="Точное название филиала")
 
-@tool("find_specialists_by_service_or_category_and_filial", args_schema=FindSpecialistsByServiceOrCategoryAndFilialArgs)
 def find_specialists_by_service_or_category_and_filial_tool(query_term: str, filial_name: str) -> str:
     """Ищет СПЕЦИАЛИСТОВ по УСЛУГЕ/КАТЕГОРИИ в КОНКРЕТНОМ филиале."""
     handler = clinic_functions.FindSpecialistsByServiceOrCategoryAndFilial(query_term=query_term.lower(), filial_name=filial_name.lower())
@@ -179,7 +260,6 @@ def find_specialists_by_service_or_category_and_filial_tool(query_term: str, fil
 class ListServicesInCategoryArgs(BaseModel):
     category_name: str = Field(description="Точное название категории")
 
-@tool("list_services_in_category", args_schema=ListServicesInCategoryArgs)
 def list_services_in_category_tool(category_name: str) -> str:
     """Возвращает список КОНКРЕТНЫХ услуг в указанной КАТЕГОРИИ."""
     handler = clinic_functions.ListServicesInCategory(category_name=category_name)
@@ -188,7 +268,6 @@ def list_services_in_category_tool(category_name: str) -> str:
 class ListServicesInFilialArgs(BaseModel):
     filial_name: str = Field(description="Точное название филиала")
 
-@tool("list_services_in_filial", args_schema=ListServicesInFilialArgs)
 def list_services_in_filial_tool(filial_name: str) -> str:
     """Возвращает ПОЛНЫЙ список УНИКАЛЬНЫХ услуг в КОНКРЕТНОМ филиале."""
     handler = clinic_functions.ListServicesInFilial(filial_name=filial_name)
@@ -200,13 +279,11 @@ class FindServicesInPriceRangeArgs(BaseModel):
     category_name: Optional[str] = Field(default=None, description="Опционально: категория")
     filial_name: Optional[str] = Field(default=None, description="Опционально: филиал")
 
-@tool("find_services_in_price_range", args_schema=FindServicesInPriceRangeArgs)
 def find_services_in_price_range_tool(min_price: float, max_price: float, category_name: Optional[str] = None, filial_name: Optional[str] = None) -> str:
     """Ищет услуги в ЗАДАННОМ ЦЕНОВОМ ДИАПАЗОНЕ."""
     handler = clinic_functions.FindServicesInPriceRange(min_price=min_price, max_price=max_price, category_name=category_name, filial_name=filial_name)
     return handler.process()
 
-@tool("list_all_categories")
 def list_all_categories_tool() -> str:
     """Возвращает список ВСЕХ категорий услуг."""
     handler = clinic_functions.ListAllCategories()
@@ -215,7 +292,6 @@ def list_all_categories_tool() -> str:
 class ListEmployeeFilialsArgs(BaseModel):
     employee_name: str = Field(description="Точное или близкое ФИО сотрудника")
 
-@tool("list_employee_filials", args_schema=ListEmployeeFilialsArgs)
 def list_employee_filials_tool(employee_name: str) -> str:
     """ОБЯЗАТЕЛЬНО ВЫЗЫВАЙ для получения ПОЛНОГО списка ВСЕХ филиалов КОНКРЕТНОГО сотрудника."""
     logger.info(f"Вызов list_employee_filials_tool для: {employee_name}")
@@ -223,9 +299,24 @@ def list_employee_filials_tool(employee_name: str) -> str:
     return handler.process()
 # ----- КОНЕЦ БЛОКА ИНСТРУМЕНТОВ -----
 
+# --- Создаем список Pydantic классов для аргументов инструментов --- 
+TOOL_CLASSES = [
+    FindEmployeesArgs,
+    GetServicePriceArgs,
+    GetEmployeeServicesArgs,
+    CheckServiceInFilialArgs,
+    CompareServicePriceInFilialsArgs,
+    FindServiceLocationsArgs,
+    FindSpecialistsByServiceOrCategoryAndFilialArgs,
+    ListServicesInCategoryArgs,
+    ListServicesInFilialArgs,
+    FindServicesInPriceRangeArgs,
+    ListEmployeeFilialsArgs,
+]
+logger.info(f"Определено {len(TOOL_CLASSES)} Pydantic классов для аргументов инструментов.")
 
-# --- Tools List ---
-tools = [
+# --- Список функций-инструментов (для динамического создания) --- 
+TOOL_FUNCTIONS = [
     find_employees_tool,
     get_service_price_tool,
     list_filials_tool,
@@ -240,16 +331,12 @@ tools = [
     list_all_categories_tool,
     list_employee_filials_tool,
 ]
-logger.info(f"Загружено {len(tools)} инструментов (функций).")
-
-# --- Bind Tools to LLM ---
-llm_with_tools = chat_model.bind_tools(tools)
-logger.info(f"Инструменты привязаны к модели {DEEPSEEK_CHAT_MODEL}.")
+logger.info(f"Определено {len(TOOL_FUNCTIONS)} функций-инструментов для динамической привязки.")
 
 # --- System Prompt ---
-SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ и информативный ИИ-ассистент медицинской клиники "Med YU Med".
-Твоя главная задача - помогать пользователям, отвечая на их вопросы об услугах, ценах, специалистах и филиалах клиники, И ПОДДЕРЖИВАТЬ ЕСТЕСТВЕННЫЙ ДИАЛОГ.
-ИСПОЛЬЗУЙ RAG ПОИСК ТОЛЬКО ДЛЯ ОПИСАНИЙ УСЛУГ И ВРАЧЕЙ, А НЕ ДЛЯ КОНКРЕТНЫХ ДАННЫХ (ЦЕНЫ, СПИСКИ ВРАЧЕЙ, ФИЛИАЛОВ И Т.Д.). СТАРАЙСЯ ВСЕ РЕШАТЬ ЧЕРЕЗ ВЫЗОВ ФУНКЦИЙ (ИНСТРУМЕНТОВ).
+SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ и информативный ИИ-ассистент.
+Твоя главная задача - помогать пользователям, отвечая на их вопросы об услугах, ценах, специалистах и филиалах , И ПОДДЕРЖИВАТЬ ЕСТЕСТВЕННЫЙ ДИАЛОГ.
+ИСПОЛЬЗУЙ RAG ПОИСК ТОЛЬКО ДЛЯ ОПИСАНИЙ УСЛУГ И СПЕЦИАЛИСТОВ, А НЕ ДЛЯ КОНКРЕТНЫХ ДАННЫХ (ЦЕНЫ, СПИСКИ СОТРУДНИКОВ, ФИЛИАЛОВ И Т.Д.). СТАРАЙСЯ ВСЕ РЕШАТЬ ЧЕРЕЗ ВЫЗОВ ФУНКЦИЙ (ИНСТРУМЕНТОВ).
 
 КЛЮЧЕВЫЕ ПРАВИЛА РАБОТЫ:
 
@@ -271,7 +358,7 @@ SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ 
     - Для вопроса о ЦЕНЕ КОНКРЕТНОЙ услуги -> ОБЯЗАТЕЛЬНО вызывай `get_service_price`.
 - Точность Параметров: Извлекай параметры ТОЧНО из запроса и ИСТОРИИ.
 - Не Выдумывай Параметры: Если обязательного параметра нет, НЕ ВЫЗЫВАЙ функцию, а вежливо попроси уточнить.
-- ОБРАБОТКА НЕУДАЧНЫХ ВЫЗОВОВ: Если инструмент вернул ошибку или 'не найдено', НЕ ПЫТАЙСЯ вызвать его снова с теми же аргументами. Сообщи пользователю или предложи альтернативу.
+- ОБРАБОТКА НЕУДАЧНЫХ ВЫЗОВОВ: Если инструмент вернул ошибку или 'не найдено', НЕ ПЫТАЙСЯ вызвать его с теми же аргументами. Сообщи пользователю или предложи альтернативу.
 - Интерпретация Результатов: Представляй результаты функций в понятной, человеческой форме.
 
 ОБЩИЕ ПРАВИЛА:
@@ -283,178 +370,457 @@ SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ 
 ВАЖНО: Всегда сначала анализируй историю и цель пользователя. Реши, нужен ли ответ из памяти, RAG, вызов функции или простой ответ. Действуй соответственно.
 """
 
-context_chain = (
-    RunnablePassthrough.assign(
-        query_with_instruction=itemgetter("input") | RunnableLambda(rag_setup.add_instruction_to_query)
-    ).assign(
-        docs=itemgetter("query_with_instruction") | retriever
-    ).assign(
-        context=itemgetter("docs") | RunnableLambda(rag_setup.format_docs)
-    )
-    | itemgetter("context")
-)
-logger.info("Цепочка RAG-контекста настроена (с добавлением инструкции).")
+# --- Custom Redis Chat History with Tenant ID ---
 
+class TenantAwareRedisChatMessageHistory(BaseChatMessageHistory):
+    """Хранилище истории сообщений в Redis с учетом tenant_id."""
+    def __init__(self, tenant_id: str, session_id: str):
+        if not tenant_id or not session_id:
+            raise ValueError("Tenant ID и Session ID не могут быть пустыми.")
+        self.tenant_id = tenant_id
+        self.session_id = session_id
+        logger.debug(f"Инициализирован TenantAwareRedisChatMessageHistory для tenant='{self.tenant_id}', session='{self.session_id}'")
 
-# --- Chat History Management ---
-chat_memory = {}
-def get_session_history(session_id: str) -> ChatMessageHistory:
-    if session_id not in chat_memory:
-        chat_memory[session_id] = ChatMessageHistory()
-        logger.info(f"Создана новая история чата для сессии: {session_id}")
-    return chat_memory[session_id]
+    @property
+    def messages(self) -> List[BaseMessage]:  # type: ignore
+        """Получение сообщений из Redis."""
+        logger.debug(f"Запрос истории для tenant='{self.tenant_id}', session='{self.session_id}'")
+        # Получаем список словарей из нашего модуля
+        items = redis_history.get_history(self.tenant_id, self.session_id)
+        # Преобразуем словари обратно в объекты BaseMessage
+        try:
+            messages = messages_from_dict(items)
+            logger.debug(f"Загружено {len(messages)} сообщений из Redis.")
+            return messages
+        except Exception as e:
+             logger.error(f"Ошибка при преобразовании истории из dict в BaseMessage для tenant='{self.tenant_id}', session='{self.session_id}': {e}", exc_info=True)
+             return [] # Возвращаем пустой список в случае ошибки
+
+    def add_message(self, message: BaseMessage) -> None:
+        """Добавление сообщения в Redis."""
+        logger.debug(f"Добавление сообщения для tenant='{self.tenant_id}', session='{self.session_id}': {message.type}")
+        # Преобразуем объект BaseMessage в словарь
+        try:
+             message_dict_list = messages_to_dict([message]) # messages_to_dict ожидает список
+             if not message_dict_list:
+                  raise ValueError("messages_to_dict вернул пустой список")
+             message_dict = message_dict_list[0]
+             # Добавляем сообщение через наш модуль
+             success = redis_history.add_message(self.tenant_id, self.session_id, message_dict)
+             if not success:
+                  logger.error(f"Не удалось добавить сообщение в Redis для tenant='{self.tenant_id}', session='{self.session_id}'")
+        except Exception as e:
+             logger.error(f"Ошибка при преобразовании BaseMessage в dict или добавлении в Redis для tenant='{self.tenant_id}', session='{self.session_id}': {e}", exc_info=True)
+
+    def clear(self) -> None:
+        """Очистка истории в Redis."""
+        logger.info(f"Очистка истории для tenant='{self.tenant_id}', session='{self.session_id}'")
+        redis_history.clear_history(self.tenant_id, self.session_id)
+
+# --- Factory function for creating history instances ---
+def get_tenant_aware_history(composite_session_id: str) -> BaseChatMessageHistory:
+    """
+    Фабричная функция для создания экземпляра истории чата.
+    Принимает составной ID вида 'tenant_id:user_id'.
+    """
+    logger.debug(f"get_tenant_aware_history вызван с composite_session_id: {composite_session_id}")
+    try:
+        # Разделяем составной ID
+        parts = composite_session_id.split(":", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Некорректный формат composite_session_id: {composite_session_id}. Ожидался 'tenant_id:user_id'")
+        tenant_id, user_id = parts # Теперь это user_id
+
+        if not tenant_id or not user_id:
+             raise ValueError("Извлеченные tenant_id или user_id пусты.")
+
+        logger.info(f"Создание/получение истории для tenant_id='{tenant_id}', user_id='{user_id}'")
+        # Используем user_id как session_id для redis_history
+        return redis_history.TenantAwareRedisChatMessageHistory(tenant_id=tenant_id, session_id=user_id)
+    except Exception as e:
+        logger.error(f"Ошибка в get_tenant_aware_history для '{composite_session_id}': {e}", exc_info=True)
+        # Возвращаем заглушку или пробрасываем исключение?
+        # Пока пробрасываем, чтобы FastAPI обработал
+        raise ValueError(f"Не удалось создать историю чата: {e}")
 
 # --- Agent Execution Function ---
+from langchain_core.tools import Tool, StructuredTool
+
 def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
-    session_id = config["configurable"]["session_id"]
-    user_input = input_dict["input"]
-    logger.debug(f"[{session_id}] Вход: {user_input}")
-    effective_rag_query = user_input
+    """
+    Функция, имитирующая выполнение основного агента или цепочки.
+    Принимает словарь с 'input' (вопрос пользователя) и RunnableConfig.
+    Извлекает tenant_id и session_id (user_id) из config.
+    Выполняет RAG-поиск, формирует промпт и вызывает LLM.
+    Динамически создает инструменты для LLM.
+    """
+    question = input_dict.get("input")
+    history_messages: List[BaseMessage] = input_dict.get("history", []) # Получаем историю
+
+    # Извлекаем идентификаторы из конфигурации
+    configurable = config.get("configurable", {})
+    composite_session_id = configurable.get("session_id") # tenant_id:user_id
+    if not composite_session_id:
+        raise ValueError("Отсутствует 'session_id' (composite_session_id) в конфигурации Runnable.")
+
     try:
+        tenant_id, user_id = composite_session_id.split(":", 1)
+        if not tenant_id or not user_id:
+            raise ValueError("tenant_id или user_id пусты после разделения composite_session_id.")
+    except ValueError as e:
+        raise ValueError(f"Ошибка разбора composite_session_id '{composite_session_id}': {e}")
+
+    logger.info(f"run_agent_like_chain для Tenant: {tenant_id}, User: {user_id}, Вопрос: {question[:50]}...")
+
+    # Проверка наличия RAG компонентов для этого тенанта
+    if not chroma_client_global or not embeddings_object_global:
+        logger.error(f"RAG компоненты (Chroma/Embeddings) не инициализированы.")
+        return "Ошибка: Базовые компоненты RAG не готовы."
+
+    # --- Создание Ensemble Retriever для текущего тенанта ---
+    if not tenant_id:
+        logger.error("Tenant ID не найден в config.")
+        return "Ошибка: Не удалось определить тенанта."
+
+    # Получаем компоненты, специфичные для тенанта
+    bm25_retriever = bm25_retrievers_map_global.get(tenant_id)
+    # Прямое формирование имени коллекции
+    collection_name = f"{TENANT_COLLECTION_PREFIX}{tenant_id}"
+    # collection_name = get_collection_name_for_tenant(tenant_id) # <--- Удаляем вызов функции
+
+    if not chroma_client_global or not embeddings_object_global:
+        logger.error("Глобальный Chroma клиент или эмбеддинги не инициализированы.")
+        return "Ошибка: Глобальные компоненты RAG не готовы."
+
+    # Создаем экземпляр обертки для эмбеддингов
+    try:
+        embeddings_wrapper = ChromaGigaEmbeddingsWrapper(embeddings_object_global)
+    except ValueError as e:
+         logger.error(f"Ошибка создания обертки эмбеддингов: {e}")
+         return "Ошибка: Некорректный объект эмбеддингов."
+
+    try:
+        # Используем обертку при получении коллекции
+        chroma_collection = chroma_client_global.get_collection(
+            name=collection_name,
+            embedding_function=embeddings_wrapper # <--- Используем обертку
+        )
+        # Используем обертку при создании объекта Chroma
+        chroma_vectorstore = Chroma(
+            client=chroma_client_global,
+            collection_name=collection_name,
+            embedding_function=embeddings_wrapper, # <--- Используем обертку
+        )
+        chroma_retriever = chroma_vectorstore.as_retriever(search_kwargs={"k": search_k_global})
+        logger.info(f"Chroma ретривер для коллекции '{collection_name}' (tenant: {tenant_id}) получен.")
+    except ValueError as e: # Ловим ValueError от Chroma, если сигнатура все еще не та
+        logger.error(f"Ошибка ChromaDB при получении коллекции или создании ретривера '{collection_name}' для тенанта {tenant_id}: {e}", exc_info=True)
+        # Возвращаем более конкретную ошибку
+        return f"Ошибка: Проблема совместимости с базой знаний ChromaDB для филиала '{tenant_id}'. {e}"
+    except Exception as e:
+        logger.error(f"Не удалось получить Chroma коллекцию или ретривер '{collection_name}' для тенанта {tenant_id}: {e}", exc_info=True)
+        # Можно вернуть ошибку или продолжить без Chroma?
+        # Пока возвращаем ошибку, т.к. RAG важен
+        return f"Ошибка: Не удалось получить доступ к базе знаний для филиала '{tenant_id}'."
+
+    if not bm25_retriever:
+        logger.warning(f"BM25 ретривер для тенанта {tenant_id} не найден. Поиск будет только векторным.")
+        # Если нет BM25, используем только Chroma
+        final_retriever = chroma_retriever
+    else:
+        # Создаем Ensemble Retriever
+        final_retriever = EnsembleRetriever(
+            retrievers=[bm25_retriever, chroma_retriever],
+            weights=[0.5, 0.5]
+        )
+        logger.info(f"Ensemble ретривер (BM25 + Chroma) создан для тенанта {tenant_id}.")
+
+    # --- RAG Поиск --- (можно вынести в отдельную функцию)
+    rag_context = ""
+    effective_rag_query = question # Инициализируем исходным вопросом
+
+    # +++ НАЧАЛО: Перефразирование RAG-запроса +++
+    try:
+        # Создаем модель с Pydantic выходом для генерации запроса
         rag_query_llm = chat_model.with_structured_output(RagQueryThought)
-        current_history = get_session_history(session_id).messages
-        rag_prompt_messages = [
+        
+        # Собираем сообщения для LLM, которая будет генерировать запрос
+        rag_prompt_messages: List[BaseMessage] = [
             SystemMessage(content=(
-                "Твоя задача - проанализировать последний запрос пользователя в контексте предыдущего диалога. "
-                "Определи главную сущность (услуга, врач, филиал, категория), о которой спрашивает пользователь, "
-                "особенно если он использует ссылки на историю (номер пункта, местоимения). "
-                "Затем сформулируй оптимальный, самодостаточный поисковый запрос для векторной базы знаний, "
-                "чтобы найти описание или детали этой сущности. Используй полные названия."
-                "Пример: Если история содержит '1. Услуга А\n2. Услуга Б', а пользователь спрашивает 'расскажи о 2', "
-                "то best_rag_query должен быть 'Описание Услуга Б'."
-                "Если запрос не требует поиска описания (например, 'привет', 'цена Х', 'найди врачей Y', 'какие филиалы?', 'где еще работает Х?'), "
-                "то best_rag_query должен быть пустой строкой или исходным запросом."
-            )),
-            *current_history,
-            HumanMessage(content=user_input)
+                "Твоя задача - проанализировать последний запрос пользователя ('input') в контексте предыдущего диалога ('history'). "
+                "Определи главную сущность (услуга, врач, филиал, категория, общая информация о клинике), о которой спрашивает пользователь, "
+                "особенно если он использует ссылки на историю (номер пункта, местоимения 'он', 'она', 'это', 'они'). "
+                "Затем сформулируй оптимальный, самодостаточный поисковый запрос ('best_rag_query') для векторной базы знаний, "
+                "чтобы найти ОПИСАНИЕ или детали этой сущности. Используй полные названия. "
+                "Пример: Если история содержит '1. Услуга А\\n2. Услуга Б', а пользователь спрашивает 'расскажи о 2', "
+                "то best_rag_query должен быть что-то вроде 'Описание услуги Б'. "
+                "Если запрос не требует поиска описания в базе знаний (например, 'привет', 'какая цена на Х?', 'найди врачей Y в филиале Z', 'какие есть филиалы?', 'где еще работает доктор А?', 'сравни цены на Y в филиалах M и N'), "
+                "то best_rag_query должен быть пустой строкой или просто исходным запросом."
+            ))
         ]
-        rag_thought: RagQueryThought = rag_query_llm.invoke(rag_prompt_messages, config=config)
-        if rag_thought.best_rag_query and rag_thought.best_rag_query.strip().lower() != user_input.lower():
-             effective_rag_query = rag_thought.best_rag_query
-             logger.info(f"[{session_id}] Сгенерирован улучшенный RAG-запрос: '{effective_rag_query}'")
-             logger.debug(f"[{session_id}] Анализ LLM для RAG: {rag_thought.analysis}")
+        # Добавляем историю, если она есть
+        if history_messages:
+             rag_prompt_messages.extend(history_messages)
+        # Добавляем текущий запрос
+        rag_prompt_messages.append(HumanMessage(content=question))
+
+        logger.debug(f"[{tenant_id}:{user_id}] Вызов LLM для генерации RAG-запроса...")
+        # Add a check for the result
+        rag_thought_result = rag_query_llm.invoke(rag_prompt_messages, config=config)
+
+        # Проверяем тип результата перед доступом к атрибутам
+        if isinstance(rag_thought_result, RagQueryThought):
+            rag_thought = rag_thought_result # Assign if it's the correct type
+            # Проверяем, сгенерирован ли полезный запрос
+            if rag_thought.best_rag_query and rag_thought.best_rag_query.strip().lower() != question.strip().lower():
+                 effective_rag_query = rag_thought.best_rag_query
+                 logger.info(f"[{tenant_id}:{user_id}] Сгенерирован улучшенный RAG-запрос: '{effective_rag_query}'")
+                 logger.debug(f"[{tenant_id}:{user_id}] Анализ LLM для RAG: {rag_thought.analysis}")
+            else:
+                 logger.info(f"[{tenant_id}:{user_id}] LLM не сгенерировал специфичный RAG-запрос, используем исходный для RAG: '{question[:50]}...'")
+                 # effective_rag_query остается равным исходному question
         else:
-             logger.info(f"[{session_id}] LLM не сгенерировал специфичный RAG-запрос, используем исходный для RAG.")
-             effective_rag_query = user_input
+            # Log the unexpected result type
+            logger.warning(f"[{tenant_id}:{user_id}] LLM для генерации RAG-запроса вернул неожиданный тип: {type(rag_thought_result)}. Используем исходный запрос.")
+            # effective_rag_query остается равным исходному question
 
     except Exception as e:
-        logger.warning(f"[{session_id}] Не удалось улучшить RAG-запрос: {e}. Используем исходный: '{user_input}'")
-        effective_rag_query = user_input
+        # Логируем именно исключение при вызове LLM или парсинге
+        logger.warning(f"[{tenant_id}:{user_id}] Исключение при улучшении RAG-запроса: {e}. Используем исходный: '{question[:50]}...'", exc_info=True) # Добавляем exc_info
+        # effective_rag_query остается равным исходному question
+    # +++ КОНЕЦ: Перефразирование RAG-запроса +++
 
-    # Step 2: Perform RAG search (with potentially improved query)
+    # Выполняем RAG-поиск с (возможно) улучшенным запросом
     try:
-        # Вызываем context_chain, который теперь внутри себя добавляет инструкцию
-        rag_context = context_chain.invoke({"input": effective_rag_query}, config=config)
-        logger.debug(f"[{session_id}] Получен RAG контекст для запроса '{effective_rag_query}': {rag_context[:200]}...")
+        relevant_docs = final_retriever.invoke(effective_rag_query, config=config)
+        rag_context = format_docs(relevant_docs)
+        logger.info(f"RAG: Найдено {len(relevant_docs)} док-в для запроса: '{effective_rag_query[:50]}...'. Контекст: {len(rag_context)} симв.")
+        # logger.debug(f"RAG Context:\n{rag_context}")
     except Exception as e:
-        logger.error(f"[{session_id}] Ошибка получения RAG контекста: {e}")
-        rag_context = "Ошибка при получении информации из базы знаний."
+        logger.error(f"Ошибка выполнения RAG поиска для тенанта {tenant_id}: {e}", exc_info=True)
+        rag_context = "[Ошибка получения информации из базы знаний]"
 
-    # Step 3: Main LLM loop with tools
-    context_block = f"\n\n[Информация из базы знаний (по запросу '{effective_rag_query}')]:\n{rag_context}\n[/Информация из базы знаний]"
-    current_history_for_main_llm = get_session_history(session_id).messages
-    messages: List[BaseMessage] = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        *current_history_for_main_llm,
-        HumanMessage(content=user_input + context_block)
-    ]
+    # --- Формирование системного промпта с дополнением от тенанта ---
+    system_prompt = SYSTEM_PROMPT
+    prompt_addition = None
+    if tenant_config_manager:
+        settings = tenant_config_manager.load_tenant_settings(tenant_id)
+        prompt_addition = settings.get('prompt_addition')
+        if prompt_addition:
+            system_prompt += f"\n\n[Дополнительные инструкции от администратора филиала {tenant_id}]:\n{prompt_addition}"
+            logger.info(f"Добавлено дополнение к промпту для тенанта {tenant_id}.")
 
-    MAX_TURNS = 5
-    for turn in range(MAX_TURNS):
-        logger.info(f"[{session_id}] Вызов основного LLM (Turn {turn + 1}/{MAX_TURNS}). Сообщений: {len(messages)}")
-        try:
-            ai_response: AIMessage = llm_with_tools.invoke(messages, config=config)
-        except Exception as llm_error:
-            logger.error(f"[{session_id}] Ошибка вызова основного LLM: {llm_error}", exc_info=True)
-            return f"Произошла ошибка при обращении к языковой модели: {llm_error}"
+    # --- Динамическое создание инструментов --- 
+    tenant_tools = []
+    tenant_specific_docs: Optional[List[Document]] = tenant_documents_map_global.get(tenant_id)
+    if not tenant_specific_docs:
+         logger.warning(f"Не найдены загруженные документы для тенанта {tenant_id} в tenant_documents_map_global. Инструменты, требующие данные, не будут созданы или могут работать некорректно.")
+         # return f"Ошибка: Не найдены данные для тенанта {tenant_id}, инструменты не могут быть созданы."
 
-        messages.append(ai_response)
+    logger.info(f"Создание динамических инструментов для тенанта {tenant_id}...")
+    # Словарь для сопоставления функции и ее схемы аргументов
+    tool_func_to_schema_map = {
+        find_employees_tool: FindEmployeesArgs,
+        get_service_price_tool: GetServicePriceArgs,
+        list_filials_tool: None, # Нет аргументов
+        get_employee_services_tool: GetEmployeeServicesArgs,
+        check_service_in_filial_tool: CheckServiceInFilialArgs,
+        compare_service_price_in_filials_tool: CompareServicePriceInFilialsArgs,
+        find_service_locations_tool: FindServiceLocationsArgs,
+        find_specialists_by_service_or_category_and_filial_tool: FindSpecialistsByServiceOrCategoryAndFilialArgs,
+        list_services_in_category_tool: ListServicesInCategoryArgs,
+        list_services_in_filial_tool: ListServicesInFilialArgs,
+        find_services_in_price_range_tool: FindServicesInPriceRangeArgs,
+        list_all_categories_tool: None, # Нет аргументов
+        list_employee_filials_tool: ListEmployeeFilialsArgs,
+    }
 
-        if not ai_response.tool_calls:
-            logger.info(f"[{session_id}] LLM вернул финальный ответ.")
-            return ai_response.content
+    # +++ Новый подход с замыканием +++
+    def create_tool_wrapper(original_tool_func: callable, data_docs: Optional[List[Document]], raw_data: Optional[List[Dict]]):
+        """Создает и возвращает функцию-обертку для инструмента, захватывая оригинальную функцию и документы."""
 
-        logger.info(f"[{session_id}] LLM запросил вызов инструментов: {len(ai_response.tool_calls)}")
-        tool_messages: List[ToolMessage] = []
-        for tool_call in ai_response.tool_calls:
-            tool_name = tool_call.get("name")
-            tool_args = tool_call.get("args", {})
-            tool_id = tool_call.get("id")
-            logger.info(f"[{session_id}] Вызов инструмента '{tool_name}' с аргументами: {tool_args}")
-
-            selected_tool = next((t for t in tools if t.name == tool_name), None)
-
-            if not selected_tool:
-                error_msg = f"Ошибка: LLM запросил неизвестный инструмент '{tool_name}'."
-                logger.error(f"[{session_id}] {error_msg}")
-                tool_messages.append(ToolMessage(content=error_msg, tool_call_id=tool_id))
-                continue
-
+        def actual_wrapper(*args, **kwargs) -> str:
+            """Эта функция будет передана в Tool.from_function."""
+            tool_name = original_tool_func.__name__
+            logger.info(f"Вызов обертки для инструмента {tool_name} с args: {args}, kwargs: {kwargs}")
             try:
-                tool_output = selected_tool.invoke(tool_args, config=config)
-                tool_output_str = str(tool_output)
-                max_tool_output_len = 2000
-                if len(tool_output_str) > max_tool_output_len:
-                    tool_output_truncated = tool_output_str[:max_tool_output_len] + "... (результат обрезан)"
-                    logger.warning(f"[{session_id}] Результат инструмента '{tool_name}' обрезан.")
+                # Логируем и позиционные, и именованные аргументы
+                logger.info(f"Вызов обертки для инструмента {tool_name} с args: {args}, kwargs: {kwargs}")
+                # Находим соответствующий класс-обработчик в clinic_functions
+                handler_class_name = ''.join(word.capitalize() for word in tool_name.replace('_tool', '').split('_'))
+                HandlerClass = getattr(clinic_functions, handler_class_name, None)
+                
+                if not HandlerClass:
+                    logger.error(f"Не найден класс-обработчик '{handler_class_name}' в clinic_functions для функции {tool_name}")
+                    return f"Ошибка: Некорректная конфигурация инструмента {tool_name}."
+                
+                # Создаем экземпляр обработчика, передавая аргументы из kwargs
+                handler_instance = HandlerClass(**kwargs)
+
+                # Проверяем, есть ли метод process и передаем ему данные, если они есть
+                if hasattr(handler_instance, 'process') and callable(getattr(handler_instance, 'process')):
+                    # Всегда пытаемся передать данные, если они есть
+                    if data_docs is not None:
+                         logger.debug(f"Передача {len(data_docs)} документов в {handler_class_name}.process")
+                         return handler_instance.process(
+                             tenant_data_docs=data_docs,
+                             raw_data=raw_data
+                         )
+                    else:
+                         logger.warning(f"Нет данных (data_docs is None) для передачи в {handler_class_name}.process")
+                         return f"Ошибка: Отсутствуют данные тенанта для инструмента {tool_name}."
                 else:
-                    tool_output_truncated = tool_output_str
-                logger.info(f"[{session_id}] Результат '{tool_name}': {tool_output_truncated[:200]}...")
-                tool_messages.append(ToolMessage(content=tool_output_truncated, tool_call_id=tool_id))
+                     logger.error(f"Инструмент {handler_class_name} не имеет метода process.")
+                     return f"Ошибка: Некорректная конфигурация инструмента {handler_class_name}."
+
             except Exception as e:
-                error_msg = f"Ошибка выполнения инструмента '{tool_name}': {type(e).__name__}: {e}"
-                logger.error(f"[{session_id}] {error_msg}", exc_info=True)
-                tool_messages.append(ToolMessage(content=error_msg, tool_call_id=tool_id))
+                logger.error(f"Ошибка выполнения инструмента {tool_name}: {e}", exc_info=True)
+                # Возвращаем более общее сообщение, чтобы не раскрывать детали ошибки LLM
+                return f"При выполнении инструмента {tool_name} произошла ошибка."
+        
+        return actual_wrapper
+    # +++ Конец нового подхода +++
 
-        messages.extend(tool_messages)
+    # Используем список TOOL_FUNCTIONS для итерации
+    for tool_function in TOOL_FUNCTIONS:
+        tool_name = tool_function.__name__
+        tool_description = tool_function.__doc__ or f"Инструмент {tool_name}"
+        args_schema = tool_func_to_schema_map.get(tool_function)
 
-    logger.warning(f"[{session_id}] Достигнут лимит ({MAX_TURNS}) вызовов инструментов.")
-    return "Кажется, обработка вашего запроса заняла слишком много шагов. Попробуйте переформулировать."
+        # +++ Создаем обертку с помощью замыкания +++
+        wrapped_func = create_tool_wrapper(tool_function, tenant_specific_docs, tenant_raw_data_map_global.get(tenant_id, []))
 
-agent_chain = RunnableLambda(run_agent_like_chain, name="AgentLikeChainWithRagPreprocessing")
-chain_with_history = RunnableWithMessageHistory(
-    agent_chain,
-    get_session_history,
+        # Создаем инструмент LangChain
+        langchain_tool = StructuredTool.from_function(
+            func=wrapped_func, # <--- Передаем новую обертку
+            name=tool_name,
+            description=tool_description,
+            args_schema=args_schema
+        )
+        tenant_tools.append(langchain_tool)
+        logger.debug(f"Динамический инструмент '{tool_name}' создан для тенанта {tenant_id}. Schema: {args_schema.__name__ if args_schema else 'None'}")
+
+    # --- Сборка сообщений для LLM --- (история + RAG + промпт)
+    messages_for_llm = []
+    # Добавляем системный промпт
+    messages_for_llm.append(SystemMessage(content=system_prompt))
+    # Добавляем историю чата
+    messages_for_llm.extend(history_messages)
+    # Добавляем текущий вопрос пользователя
+    # И добавляем RAG контекст к вопросу пользователя (или как отдельное сообщение?)
+    # Пока добавляем к вопросу
+    rag_context_block = f"\n\n[Информация из базы знаний (по запросу '{effective_rag_query}')]:\n{rag_context}\n[/Информация из базы знаний]" # <--- Убедимся, что используется effective_rag_query
+    messages_for_llm.append(HumanMessage(content=question + rag_context_block))
+
+    # --- Вызов LLM с инструментами ---
+    # llm = ChatDeepSeek(model="deepseek-chat", temperature=0.1, deepseek_api_key=os.getenv('DEEPSEEK_API_KEY')) # <--- Удаляем создание локального экземпляра
+
+    # Привязываем динамически созданные инструменты к глобальному LLM
+    # llm_with_tools = llm.bind_tools(tenant_tools)
+    llm_with_tools = chat_model.bind_tools(tenant_tools) # <--- Используем глобальный chat_model
+
+    # logger.info(f"Вызов LLM ({llm.model_name}) с {len(tenant_tools)} инструментами для тенанта {tenant_id}...")
+    logger.info(f"Вызов LLM ({chat_model.model_name}) с {len(tenant_tools)} инструментами для тенанта {tenant_id}...") # <--- Используем глобальный chat_model в логе
+    try:
+        # Передаем собранные сообщения
+        ai_response_message: AIMessage = llm_with_tools.invoke(messages_for_llm, config=config)
+
+        # Обработка ответа: проверяем, есть ли вызовы инструментов
+        tool_calls = ai_response_message.tool_calls
+        if tool_calls:
+             logger.info(f"LLM запросила вызов {len(tool_calls)} инструментов: {[tc['name'] for tc in tool_calls]}")
+             # Сюда нужно добавить логику выполнения этих вызовов и возврата результатов LLM
+             # Для простоты пока просто вернем сообщение о вызове
+             tool_outputs = []
+             for tool_call in tool_calls:
+                  tool_name = tool_call["name"]
+                  tool_args = tool_call["args"]
+                  logger.info(f"Обработка вызова инструмента: {tool_name} с аргументами: {tool_args}")
+                  # Находим соответствующий инструмент LangChain
+                  found_tool = next((t for t in tenant_tools if t.name == tool_name), None)
+                  if found_tool:
+                      try:
+                          # Выполняем инструмент. Он ожидает словарь аргументов.
+                          output = found_tool.invoke(tool_args, config=config)
+                          # Check output type? Maybe just convert to string.
+                          output_str = str(output)
+                          tool_outputs.append(ToolMessage(content=output_str, tool_call_id=tool_call["id"]))
+                          logger.info(f"Результат вызова {tool_name}: {output_str[:100]}...")
+                      except Exception as e:
+                           # Revert to a simpler error message, avoiding exception type
+                           error_message = f"Ошибка: Инструмент '{tool_name}' не смог успешно выполнить действие."
+                           logger.error(f"Ошибка выполнения инструмента {tool_name} через invoke: {e}", exc_info=True)
+                           # Append the simpler error message
+                           tool_outputs.append(ToolMessage(content=error_message, tool_call_id=tool_call["id"]))
+                  else:
+                      logger.error(f"Инструмент {tool_name}, запрошенный LLM, не найден среди динамически созданных.")
+                      tool_outputs.append(ToolMessage(content=f"Ошибка: Инструмент {tool_name} не найден.", tool_call_id=tool_call["id"]))
+
+             # Добавляем исходное сообщение AI и результаты инструментов
+             messages_for_llm.append(ai_response_message) # Сообщение AI с запросом инструментов
+             messages_for_llm.extend(tool_outputs) # Результаты выполнения инструментов
+
+             # Повторный вызов LLM с результатами инструментов
+             logger.info("Повторный вызов LLM с результатами инструментов...")
+             final_response_message = llm_with_tools.invoke(messages_for_llm, config=config)
+             final_answer = final_response_message.content
+             logger.info(f"Финальный ответ LLM после инструментов: {final_answer[:100]}...")
+             return final_answer
+        else:
+             # Если вызовов инструментов нет, просто возвращаем ответ LLM
+             logger.info(f"Ответ LLM без вызова инструментов: {ai_response_message.content[:100]}...")
+             return ai_response_message.content
+
+    except Exception as e:
+        logger.error(f"Ошибка при вызове LLM или обработке инструментов для тенанта {tenant_id}: {e}", exc_info=True)
+        return "Произошла ошибка при обработке вашего запроса."
+
+
+# --- Инициализация компонентов при старте --- 
+initialize_rag_components()
+
+
+# --- Создание основного Runnable агента с историей --- 
+# Используем RunnableLambda для обертки нашей функции run_agent_like_chain
+agent_runnable = RunnableLambda(run_agent_like_chain)
+
+agent_with_history = RunnableWithMessageHistory(
+    agent_runnable,
+    get_tenant_aware_history, # Наша фабрика для получения истории
     input_messages_key="input",
-    history_messages_key="chat_history",
+    history_messages_key="history",
 )
-logger.info("Цепочка с историей и RAG препроцессингом настроена.")
 
-# --- API Helper Functions ---
-def initialize_assistant(
-    gigachat_credentials: Optional[str] = None,
-    giga_embedding_model: Optional[str] = None,
-    giga_scope: Optional[str] = None,
-    deepseek_api_key: Optional[str] = None,
-    deepseek_chat_model: Optional[str] = None,
-    json_data_path: Optional[str] = None,
-    chroma_persist_dir: Optional[str] = None
-) -> RunnableWithMessageHistory:
-    global GIGACHAT_CREDENTIALS, JSON_DATA_PATH, CHROMA_PERSIST_DIR
-    global GIGA_EMBEDDING_MODEL, GIGA_SCOPE
-    global DEEPSEEK_API_KEY, DEEPSEEK_CHAT_MODEL
+logger.info("Основной Runnable агент с историей и RAG создан.")
 
-    if gigachat_credentials: GIGACHAT_CREDENTIALS = gigachat_credentials
-    if giga_embedding_model: GIGA_EMBEDDING_MODEL = giga_embedding_model
-    if giga_scope: GIGA_SCOPE = giga_scope
-    if deepseek_api_key: DEEPSEEK_API_KEY = deepseek_api_key
-    if deepseek_chat_model: DEEPSEEK_CHAT_MODEL = deepseek_chat_model
-    if json_data_path: JSON_DATA_PATH = json_data_path
-    if chroma_persist_dir: CHROMA_PERSIST_DIR = chroma_persist_dir
+# --- Дополнительные функции (если нужны) ---
+# def clear_session_history(session_id: str):
+#     # Эта логика теперь внутри get_tenant_aware_history или redis_history
+#     pass
 
-    logger.info("Параметры конфигурации обновлены (если переданы). Возвращаем существующую цепочку.")
-    logger.warning("Примечание: Динамическое обновление моделей/RAG во время работы API не реализовано.")
-    return chain_with_history
+# def get_active_session_count():
+#     # Эта логика, вероятно, должна быть в redis_history
+#     return redis_history.get_active_session_count() if hasattr(redis_history, 'get_active_session_count') else 0
 
-def clear_session_history(session_id: str) -> bool:
-    if session_id in chat_memory:
-        chat_memory[session_id] = ChatMessageHistory()
-        logger.info(f"История сессии {session_id} очищена")
-        return True
-    logger.warning(f"Попытка очистить несуществующую сессию: {session_id}")
-    return False
+# --- Класс-обертка для совместимости эмбеддингов ---
+class ChromaGigaEmbeddingsWrapper(EmbeddingFunction):
+    def __init__(self, gigachat_embeddings: GigaChatEmbeddings):
+        self._gigachat_embeddings = gigachat_embeddings
+        if not hasattr(self._gigachat_embeddings, 'embed_documents'):
+             raise ValueError("Предоставленный объект эмбеддингов не имеет метода 'embed_documents'")
+        # Проверяем наличие embed_query
+        if not hasattr(self._gigachat_embeddings, 'embed_query'):
+             raise ValueError("Предоставленный объект эмбеддингов не имеет метода 'embed_query'")
 
-def get_active_session_count() -> int:
-    count = len(chat_memory)
-    logger.debug(f"Запрошено количество активных сессий: {count}")
-    return count
+    def __call__(self, input: Documents) -> Embeddings:
+        # Вызываем метод embed_documents из объекта GigaChatEmbeddings
+        # LangChain embed_documents ожидает List[str], а Chroma передает Documents (List[str])
+        embeddings = self._gigachat_embeddings.embed_documents(input)
+        # Возвращаем результат в формате, ожидаемом Chroma (List[List[float]])
+        return embeddings
+
+    # Добавляем метод embed_query
+    def embed_query(self, text: str) -> List[float]:
+        """Создает эмбеддинг для одного запроса."""
+        return self._gigachat_embeddings.embed_query(text)
+

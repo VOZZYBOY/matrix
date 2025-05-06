@@ -4,6 +4,7 @@ import os
 import json
 import logging
 import shutil
+import glob
 from typing import List, Dict, Any, Optional, Tuple
 
 # --- LangChain Imports ---
@@ -14,92 +15,24 @@ from langchain_gigachat.embeddings import GigaChatEmbeddings
 from langchain_chroma import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.retrievers import BM25Retriever
-from langchain.retrievers import EnsembleRetriever
+from langchain.retrievers.ensemble import EnsembleRetriever
+import chromadb
+
+# Импортируем менеджер конфигураций тенантов
+try:
+    import tenant_config_manager
+except ImportError:
+    logging.error("[RAG Setup] Не удалось импортировать tenant_config_manager. Информация о клинике из настроек не будет загружена.")
+    tenant_config_manager = None
 
 logger = logging.getLogger(__name__)
 
+# --- Имена коллекций ---
+# Удаляем SHARED_COLLECTION_NAME
+# SHARED_COLLECTION_NAME = "shared_clinic_info"
+TENANT_COLLECTION_PREFIX = "tenant_"
 
-# --- Функция создания документов с общей информацией о клинике ---
-def create_clinic_info_docs() -> List[Document]:
-    """Создает список документов LangChain с общей информацией о клинике."""
-    docs = []
-    try:
-        # Блок 1: Ключевые метрики
-        docs.append(Document(
-            page_content=(
-                "О клинике Med YU Med: Ключевые показатели.\n"
-                "Высочайший уровень сервиса позволяет каждому нашему пациенту чувствовать себя комфортно во время визита.\n"
-                "- Филиалов по всему миру: 3\n"
-                "- Специалистов в команде: 50+\n"
-                "- Пациентов обращаются повторно: 87%\n"
-                "- Средний стаж сотрудника: 6,3 лет"
-            ),
-            metadata={"type": "clinic_info", "topic": "key_metrics", "id": "clinic_info_metrics"}
-        ))
-
-        # Блок 2: Подход клиники
-        docs.append(Document(
-            page_content=(
-                "Подход клиники Med YU Med: Заслуженное доверие пациентов.\n"
-                "1. Индивидуальный подход: Учитываем все пожелания пациента. Перед процедурой врач проведёт подробную консультацию, подберёт процедуру, идеально подходящую под вашу потребность. Результат будет соответствовать вашим ожиданиям.\n"
-                "2. Качественное оборудование: В наших клиниках представлены эффективные и проверенные технологии. Оборудование и препараты, которые мы используем отвечают высоким мировым стандартам.\n"
-                "3. Cпециалисты высокого уровня: Все действующие сотрудники постоянно повышают свою квалификацию у лучших экспертов в сфере косметологии."
-            ),
-            metadata={"type": "clinic_info", "topic": "company_approach", "id": "clinic_info_approach"}
-        ))
-
-        # Блок 3: Направления деятельности
-        docs.append(Document(
-            page_content=(
-                "Направления деятельности Med YU Med:\n"
-                "- Услуги косметологии\n"
-                "- Интернет-магазин"
-            ),
-            metadata={"type": "clinic_info", "topic": "business_directions", "id": "clinic_info_directions"}
-        ))
-
-        # Блок 4: Филиалы и адреса
-        docs.append(Document(
-            page_content=(
-                "Филиалы и адреса клиники Med YU Med:\n"
-                "1. Москва, Пресненская наб., 8, стр. 1, 2 этаж (Башня Город Столиц)\n"
-                "2. Москва, улица Авиаконструктора Сухого, 2, корп. 1 (м. ЦСКА, ЖК Лица)\n"
-                "3. Bluewaters Island, Dubai - UAE"
-            ),
-            metadata={"type": "clinic_info", "topic": "locations", "id": "clinic_info_locations"}
-        ))
-
-        # Блок 5: Контакты и время работы
-        docs.append(Document(
-            page_content=(
-                "Контакты и время работы Med YU Med:\n"
-                "- Телефон для связи: 8 800 550-08-96\n"
-                "- Время работы: пн-вс: 10.00—22.00"
-            ),
-            metadata={"type": "clinic_info", "topic": "contacts", "id": "clinic_info_contacts"}
-        ))
-
-        # Блок 6: Юридическая информация
-        docs.append(Document(
-            page_content=(
-                "Юридическая информация Med YU Med:\n"
-                "- Наименование: ООО «МЕД-Ю-МЕД»\n"
-                "- Медицинская лицензия: Л041-01137-77/01322474 от 29.07.2024\n"
-                "- © Косметологическая клиника MED YU MED. Все права защищены.\n"
-                "- Доступны Политика конфиденциальности и Публичная информация."
-            ),
-            metadata={"type": "clinic_info", "topic": "legal", "id": "clinic_info_legal"}
-        ))
-
-        logger.info(f"Создано {len(docs)} документов с общей информацией о клинике.")
-    except Exception as e:
-        logger.error(f"Ошибка при создании документов clinic_info: {e}", exc_info=True)
-        # Возвращаем пустой список в случае ошибки, чтобы не прерывать остальную инициализацию
-        return []
-    return docs
-
-
-# --- Функция предобработки данных из JSON ---
+# --- Функция предобработки данных из JSON (услуги/сотрудники) ---
 def preprocess_for_rag_v2(data: List[Dict[str, Any]]) -> List[Document]:
     """Готовит документы по услугам и сотрудникам из JSON для RAG."""
     services_data = {}
@@ -149,7 +82,7 @@ def preprocess_for_rag_v2(data: List[Dict[str, Any]]) -> List[Document]:
            not info.get("description") or info["description"].lower() in ('', 'null', 'нет описания'):
             continue
         text_content = f"Услуга: {info['name']}\nКатегория: {info['category']}\nОписание: {info['description']}"
-        metadata = {"id": f"srv_{srv_id}", "type": "service", "name": info['name'], "category": info['category']}
+        metadata = {"id": f"srv_{srv_id}", "type": "service", "name": info['name'], "category": info['category'], "source": "base_json"}
         documents.append(Document(page_content=text_content, metadata=metadata))
 
     # Документы по сотрудникам
@@ -159,12 +92,123 @@ def preprocess_for_rag_v2(data: List[Dict[str, Any]]) -> List[Document]:
             not info.get("description") or info["description"].lower() in ('', 'null', 'нет описания', 'опытный специалист'):
              continue
          text_content = f"Сотрудник: {info['name']}\nОписание: {info['description']}"
-         metadata = {"id": f"emp_{emp_id}", "type": "employee", "name": info['name']}
+         metadata = {"id": f"emp_{emp_id}", "type": "employee", "name": info['name'], "source": "base_json"}
          documents.append(Document(page_content=text_content, metadata=metadata))
 
-    logger.info(f"Подготовлено {len(documents)} док-ов из JSON (услуги: {len(services_data)}, сотрудники: {len(employees_data)}).")
+    logger.info(f"Подготовлено {len(documents)} док-ов из JSON (услуги: {len(services_data)}, сотрудники: {len(employees_data)}), помечены как 'base_json'.")
     return documents
 
+
+# --- Функция загрузки документов одного тенанта из base ---
+def load_tenant_base_data(tenant_id: str, data_path: str) -> Tuple[List[Document], Optional[List[Dict[str, Any]]]]:
+    """Загружает документы услуг/сотрудников одного тенанта из JSON файла в 'base'."""
+    documents = []
+    raw_data = []
+    try:
+        with open(data_path, 'r', encoding='utf-8') as f:
+            raw_data = json.load(f)
+        if not isinstance(raw_data, list): raise ValueError("JSON должен быть списком объектов")
+        if not raw_data: logger.warning(f"Файл данных '{data_path}' пуст.")
+        else: logger.info(f"Загружено {len(raw_data)} записей из {data_path} для тенанта {tenant_id}.")
+
+        documents = preprocess_for_rag_v2(raw_data)
+    except Exception as e:
+        logger.error(f"Ошибка загрузки базовых данных тенанта из {data_path}: {e}", exc_info=True)
+        raw_data = []
+
+    return documents, raw_data
+
+
+# --- Функция конвертации данных clinic_info в документы LangChain ---
+def clinic_info_data_to_docs(clinic_info_data: List[Dict[str, Any]]) -> List[Document]:
+    """Преобразует список словарей clinic_info в список объектов Document."""
+    docs = []
+    for doc_data in clinic_info_data:
+        try:
+            # Дополнительная проверка, хотя она есть в load_tenant_clinic_info
+            if isinstance(doc_data, dict) and \
+               isinstance(doc_data.get("page_content"), str) and \
+               isinstance(doc_data.get("metadata"), dict):
+                # Убедимся, что metadata не None перед передачей
+                metadata = doc_data.get("metadata") or {}
+                docs.append(Document(page_content=doc_data["page_content"], metadata=metadata))
+            else:
+                 logger.warning(f"Пропуск некорректного словаря при конвертации clinic_info: {doc_data}")
+        except Exception as e:
+            logger.error(f"Ошибка конвертации словаря clinic_info в Document: {e}. Данные: {doc_data}", exc_info=True)
+    return docs
+
+
+# --- Функция индексации документов в коллекцию Chroma ---
+def index_documents_to_collection(
+    chroma_client: chromadb.ClientAPI,
+    embeddings_object: GigaChatEmbeddings,
+    collection_name: str,
+    documents: List[Document],
+    chunk_size: int,
+    chunk_overlap: int,
+    force_recreate: bool = False
+):
+    """
+    Индексирует документы в коллекцию Chroma.
+
+    Args:
+        chroma_client: Клиент ChromaDB.
+        embeddings_object: Объект эмбеддингов GigaChat.
+        collection_name: Название коллекции.
+        documents: Список документов для индексации.
+        chunk_size: Размер чанка для сплиттера.
+        chunk_overlap: Перекрытие чанков.
+        force_recreate: Если True, удалит существующую коллекцию и создаст заново.
+    """
+    logger.info(f"Проверка/Индексация коллекции '{collection_name}'...")
+
+    try:
+        # Пытаемся получить существующую коллекцию СНАЧАЛА
+        existing_collection = chroma_client.get_collection(name=collection_name)
+        logger.info(f"Коллекция '{collection_name}' уже существует.")
+
+        # Если force_recreate=True, удаляем ее
+        if force_recreate:
+            logger.warning(f"Флаг force_recreate установлен. Удаление существующей коллекции '{collection_name}'...")
+            chroma_client.delete_collection(collection_name)
+            logger.info(f"Коллекция '{collection_name}' удалена. Будет создана заново.")
+            # Продолжаем выполнение для создания новой коллекции ниже
+        else:
+            # Если удалять не нужно, возвращаем LangChain обертку для существующей коллекции
+            logger.info(f"Используем существующую коллекцию '{collection_name}'. Переиндексация пропускается.")
+            return Chroma(client=chroma_client, collection_name=collection_name, embedding_function=embeddings_object)
+
+    except Exception as e: # Если get_collection бросает исключение (например, коллекции нет)
+        logger.info(f"Коллекция '{collection_name}' не найдена или произошла ошибка при проверке: {e}. Создаем новую.")
+        # Продолжаем выполнение для создания новой коллекции ниже
+        pass # Просто игнорируем ошибку и идем дальше к созданию
+
+    # --- Этот блок теперь выполняется только если коллекция не найдена или удалена ---
+    if not documents:
+        logger.warning(f"Нет документов для создания новой коллекции '{collection_name}'.")
+        return None # Не можем создать пустую коллекцию
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size, chunk_overlap=chunk_overlap, length_function=len,
+    )
+    splits = text_splitter.split_documents(documents)
+    logger.info(f"Документы разделены на {len(splits)} чанков для новой коллекции Chroma.")
+
+    if not splits:
+        logger.warning(f"Нет чанков для индексации в новую коллекцию '{collection_name}'.")
+        return None
+
+    # Вызов from_documents произойдет только при создании НОВОЙ коллекции
+    logger.info(f"Создание новой коллекции '{collection_name}' и индексация документов...")
+    vectorstore = Chroma.from_documents(
+        documents=splits,
+        embedding=embeddings_object,
+        collection_name=collection_name,
+        client=chroma_client,
+    )
+    logger.info(f"Документы успешно проиндексированы в НОВУЮ коллекцию '{collection_name}'.")
+    return vectorstore
 
 
 def add_instruction_to_query(query: str) -> str:
@@ -178,32 +222,10 @@ def add_instruction_to_query(query: str) -> str:
         logger.warning("Попытка добавить инструкцию к пустому RAG-запросу.")
         return ""
 
-def format_docs(docs: List[Document]) -> str:
-    """Форматирует найденные RAG документы для добавления в промпт."""
-    if not docs:
-        return "Дополнительная информация из базы знаний не найдена."
-    formatted_docs = []
-    for i, doc in enumerate(docs):
-        metadata = doc.metadata or {}
-        source_info = metadata.get('id', 'Неизвестный источник')
-        doc_type = metadata.get('type', 'данные')
-        doc_name = metadata.get('name', '')
-        doc_topic = metadata.get('topic', '') # Добавлено для clinic_info
 
-        display_source = doc_type
-        if doc_topic: display_source += f" ({doc_topic})"
-        if doc_name: display_source += f" - '{doc_name}'"
-        if not doc_topic and not doc_name: display_source = source_info # Фоллбэк
-
-        score = metadata.get('relevance_score', None) # EnsembleRetriever добавляет это поле
-        score_str = f" (Score: {score:.4f})" if score is not None else ""
-        formatted_docs.append(f"Источник {i+1}{score_str} ({display_source}):\n{doc.page_content}")
-    return "\n\n".join(formatted_docs)
-
-
-# --- Основная функция инициализации RAG ---
+# --- Основная функция инициализации RAG (Переработана) ---
 def initialize_rag(
-    json_data_path: str,
+    data_dir: str, # Директория с base/*.json
     chroma_persist_dir: str,
     embedding_credentials: str,
     embedding_model: str,
@@ -212,15 +234,22 @@ def initialize_rag(
     chunk_size: int = 1000,
     chunk_overlap: int = 200,
     search_k: int = 5,
-    # Флаг для принудительного пересоздания базы Chroma
     force_recreate_chroma: bool = False
-) -> Tuple[Optional[BaseRetriever], Optional[GigaChatEmbeddings], Optional[List[Document]], Optional[List[Dict]]]:
+) -> Tuple[
+    Optional[chromadb.ClientAPI],
+    Optional[GigaChatEmbeddings],
+    Dict[str, BM25Retriever], # Карта tenant_id -> BM25Retriever
+    Dict[str, List[Document]], # <--- Карта tenant_id -> List[Document] (объединенные)
+    Dict[str, List[Dict]]      # <--- ИЗМЕНЕНО: Карта tenant_id -> List[Dict] (сырые данные)
+]:
     """
-    Инициализирует RAG-систему с гибридным поиском (Chroma + BM25),
-    включая общую информацию о клинике.
+    Инициализирует RAG-систему:
+    - Создает Chroma коллекции и BM25 ретриверы для КАЖДОГО тенанта,
+      объединяя данные из 'base/' и 'tenant_configs/'.
+    - Больше не создает общих компонентов.
 
     Args:
-        json_data_path: Путь к JSON файлу с данными услуг/сотрудников.
+        data_dir: Директория с base/*.json
         chroma_persist_dir: Директория для сохранения/загрузки Chroma базы.
         embedding_credentials: Учетные данные GigaChat для эмбеддингов.
         embedding_model: Название модели эмбеддингов GigaChat.
@@ -228,18 +257,20 @@ def initialize_rag(
         verify_ssl_certs: Проверять ли SSL сертификаты.
         chunk_size: Размер чанка для сплиттера.
         chunk_overlap: Перекрытие чанков.
-        search_k: Количество документов для возврата ретриверами.
-        force_recreate_chroma: Если True, удалит существующую базу Chroma и создаст заново.
+        search_k: Количество документов для возврата ретриверами (используется для BM25).
+        force_recreate_chroma: Если True, удалит все существующие коллекции Chroma и создаст заново.
 
     Returns:
-        Tuple: (ensemble_retriever, embeddings_object, all_prepared_documents, clinic_data)
-               Или (None, None, None, None) в случае критической ошибки эмбеддингов.
+        Tuple: (chroma_client, embeddings_object, bm25_retrievers_map, tenant_documents_map, tenant_raw_data_map)
+               Или (None, None, {}, {}, {}) в случае критической ошибки.
     """
     embeddings_object = None
-    ensemble_retriever = None
-    all_prepared_documents = [] 
-    clinic_data = None
+    chroma_client = None
+    bm25_retrievers_map: Dict[str, BM25Retriever] = {}
+    tenant_documents_map: Dict[str, List[Document]] = {} # <--- Инициализируем словарь для документов
+    tenant_raw_data_map: Dict[str, List[Dict]] = {} # <--- ИЗМЕНЕНО: Словарь для сырых данных по тенантам
 
+    # --- Инициализация эмбеддингов и Chroma клиента ---
     try:
         embeddings_object = GigaChatEmbeddings(
             credentials=embedding_credentials, model=embedding_model,
@@ -248,115 +279,98 @@ def initialize_rag(
         logger.info(f"Эмбеддинги GigaChat ({embedding_model}) инициализированы.")
     except Exception as e:
         logger.critical(f"Критическая ошибка инициализации эмбеддингов: {e}", exc_info=True)
-        return None, None, None, None
+        return None, None, {}, {}, {} # <-- ИЗМЕНЕНО: возвращаем пустой словарь
 
     try:
-        base_dir = os.path.dirname(json_data_path)
-        if base_dir and not os.path.exists(base_dir):
-            os.makedirs(base_dir, exist_ok=True)
-            logger.info(f"Создана директория '{base_dir}'.")
-        if not os.path.exists(json_data_path):
-            with open(json_data_path, 'w', encoding='utf-8') as f: json.dump([], f)
-            logger.warning(f"Файл '{json_data_path}' не найден, создан пустой файл.")
+        chroma_client = chromadb.PersistentClient(path=chroma_persist_dir)
+        logger.info(f"Клиент ChromaDB инициализирован. Данные в: {chroma_persist_dir}")
 
-        with open(json_data_path, 'r', encoding='utf-8') as f:
-            clinic_data = json.load(f)
-        if not isinstance(clinic_data, list): raise ValueError("JSON должен быть списком объектов")
-        if not clinic_data: logger.warning(f"Файл данных '{json_data_path}' пуст.")
-        else: logger.info(f"Загружено {len(clinic_data)} записей из {json_data_path}.")
+        # --- Обработка force_recreate (удаляем только коллекции тенантов) ---
+        if force_recreate_chroma:
+            logger.warning("Флаг force_recreate_chroma установлен. Попытка удаления всех коллекций тенантов...")
+            # Получаем список существующих коллекций, чтобы не зависеть от файлов
+            try:
+                existing_collections = chroma_client.list_collections()
+                for collection in existing_collections:
+                    if collection.name.startswith(TENANT_COLLECTION_PREFIX):
+                        try:
+                            chroma_client.delete_collection(collection.name)
+                            logger.info(f"Коллекция тенанта '{collection.name}' удалена.")
+                        except Exception as del_e:
+                            logger.error(f"Ошибка удаления коллекции '{collection.name}': {del_e}")
+            except Exception as list_e:
+                 logger.error(f"Не удалось получить список коллекций для удаления: {list_e}")
+
     except Exception as e:
-        logger.error(f"Ошибка загрузки данных клиники из {json_data_path}: {e}", exc_info=True)
-        clinic_data = []
+        logger.critical(f"Критическая ошибка инициализации ChromaDB клиента: {e}", exc_info=True)
+        return None, embeddings_object, {}, {}, {} # <-- ИЗМЕНЕНО: возвращаем пустой словарь
 
-  
-    if clinic_data:
-        try: all_prepared_documents.extend(preprocess_for_rag_v2(clinic_data))
-        except Exception as e: logger.error(f"Ошибка предобработки данных из JSON: {e}", exc_info=True)
-    try: all_prepared_documents.extend(create_clinic_info_docs())
-    except Exception as e: logger.error(f"Ошибка создания общих док-ов о клинике: {e}", exc_info=True)
+    # --- Сканирование и индексация данных тенантов ---
+    tenant_files = glob.glob(os.path.join(data_dir, "*.json"))
+    if not tenant_files:
+        logger.warning(f"Не найдено JSON файлов тенантов в директории: {data_dir}")
+        # Если файлов нет, возвращаем инициализированные клиент и эмбеддинги
+        return chroma_client, embeddings_object, {}, {}, {} # <-- ИЗМЕНЕНО: возвращаем пустой словарь
+    else:
+        logger.info(f"Найдено {len(tenant_files)} файлов тенантов для обработки.")
 
-    if not all_prepared_documents:
-        logger.error("Нет документов для создания RAG системы. Проверьте JSON файл и функцию create_clinic_info_docs.")
-        ensemble_retriever = RunnableLambda(lambda query, **kwargs: [], name="EmptyRetriever").with_types(output_type=List[Document])
-        logger.warning("Создан ретривер-пустышка из-за отсутствия документов.")
-        return ensemble_retriever, embeddings_object, all_prepared_documents, clinic_data
+    for tenant_file_path in tenant_files:
+        base_name = os.path.basename(tenant_file_path)
+        tenant_id, _ = os.path.splitext(base_name)
+        if not tenant_id:
+            logger.warning(f"Не удалось извлечь tenant_id из имени файла: {base_name}. Пропуск файла.")
+            continue
 
-    logger.info(f"Всего подготовлено {len(all_prepared_documents)} документов для RAG.")
+        collection_name = f"{TENANT_COLLECTION_PREFIX}{tenant_id}"
+        logger.info(f"--- Обработка тенанта: {tenant_id} (Коллекция: {collection_name}) ---")
 
-    vectorstore = None
-    chroma_retriever = None
-    if force_recreate_chroma and os.path.exists(chroma_persist_dir):
-        logger.warning(f"Принудительное удаление существующей базы Chroma в '{chroma_persist_dir}'...")
-        try: shutil.rmtree(chroma_persist_dir)
-        except OSError as rm_err: logger.error(f"Не удалось удалить '{chroma_persist_dir}': {rm_err}")
+        # 1. Загружаем базовые данные (услуги/сотрудники) из base/
+        base_docs, tenant_raw_data = load_tenant_base_data(tenant_id, tenant_file_path)
+        if tenant_raw_data:
+            # all_raw_base_data.extend(tenant_raw_data) # Сохраняем сырые данные <-- УДАЛЕНО
+            tenant_raw_data_map[tenant_id] = tenant_raw_data # <-- ДОБАВЛЕНО: Сохраняем сырые данные в карту
 
-    if os.path.exists(chroma_persist_dir):
+        # 2. Загружаем специфичную информацию о клинике из tenant_configs/
+        clinic_info_docs = []
+        if tenant_config_manager:
+            clinic_info_data = tenant_config_manager.load_tenant_clinic_info(tenant_id)
+            clinic_info_docs = clinic_info_data_to_docs(clinic_info_data)
+        else:
+            logger.warning(f"tenant_config_manager не импортирован, clinic_info для тенанта {tenant_id} не будет загружена.")
+
+        # 3. Объединяем документы
+        all_tenant_docs = base_docs + clinic_info_docs
+
+        if not all_tenant_docs:
+            logger.warning(f"Нет документов для индексации для тенанта {tenant_id}. Пропуск индексации.")
+            continue
+
+        logger.info(f"Всего {len(all_tenant_docs)} документов для индексации для тенанта {tenant_id} (Base: {len(base_docs)}, ClinicInfo: {len(clinic_info_docs)}).")
+
+        # +++ Сохраняем объединенные документы для этого тенанта +++
+        tenant_documents_map[tenant_id] = all_tenant_docs
+
+        # 4. Индексируем объединенные документы в Chroma
+        index_documents_to_collection(
+            chroma_client=chroma_client,
+            embeddings_object=embeddings_object,
+            collection_name=collection_name,
+            documents=all_tenant_docs,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            # force_recreate обрабатывается выше для всех коллекций тенантов
+            force_recreate=False
+        )
+
+        # 5. Создаем BM25 ретривер для тенанта на объединенных данных
         try:
-            logger.info(f"Загрузка Chroma из '{chroma_persist_dir}'...")
-            vectorstore = Chroma(persist_directory=chroma_persist_dir, embedding_function=embeddings_object)
-            logger.info("База Chroma загружена.")
+            tenant_bm25 = BM25Retriever.from_documents(all_tenant_docs, k=search_k)
+            bm25_retrievers_map[tenant_id] = tenant_bm25
+            logger.info(f"Создан BM25 ретривер для тенанта '{tenant_id}' (k={search_k}) на {len(all_tenant_docs)} док-х.")
         except Exception as e:
-            logger.warning(f"Не удалось загрузить Chroma: {e}. База будет создана заново.", exc_info=True)
-            try: shutil.rmtree(chroma_persist_dir)
-            except OSError as rm_err: logger.error(f"Не удалось удалить '{chroma_persist_dir}': {rm_err}")
-            vectorstore = None 
+            logger.error(f"Ошибка создания BM25 ретривера для тенанта '{tenant_id}': {e}", exc_info=True)
 
-    if vectorstore is None:
-        logger.info(f"Создание новой базы Chroma в '{chroma_persist_dir}'...")
-        try:
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=chunk_size, chunk_overlap=chunk_overlap, length_function=len,
-            )
-            docs_for_chroma = text_splitter.split_documents(all_prepared_documents)
-            logger.info(f"Документы разделены на {len(docs_for_chroma)} чанков для Chroma.")
-            vectorstore = Chroma.from_documents(
-                documents=docs_for_chroma,
-                embedding=embeddings_object,
-                persist_directory=chroma_persist_dir
-            )
-            logger.info("Новая база Chroma создана и сохранена.")
-        except Exception as e:
-            logger.error(f"Ошибка создания базы Chroma: {e}", exc_info=True)
-            vectorstore = None
-
-    if vectorstore:
-        try:
-            chroma_retriever = vectorstore.as_retriever(search_kwargs={"k": search_k})
-            logger.info(f"Chroma ретривер настроен (k={search_k}).")
-        except Exception as e:
-             logger.error(f"Ошибка создания Chroma ретривера: {e}", exc_info=True)
-
-    bm25_retriever = None
-    try:
-        bm25_retriever = BM25Retriever.from_documents(
-            all_prepared_documents,
-            k=search_k
-            )
-        logger.info(f"BM25 ретривер настроен (k={search_k}).")
-    except Exception as e:
-        logger.error(f"Ошибка создания BM25 ретривера: {e}", exc_info=True)
-
-    retrievers_list = []
-    if chroma_retriever: retrievers_list.append(chroma_retriever)
-    if bm25_retriever: retrievers_list.append(bm25_retriever)
-
-    if not retrievers_list:
-         logger.error("Не удалось создать ни Chroma, ни BM25 ретривер.")
-         ensemble_retriever = RunnableLambda(lambda query, **kwargs: [], name="EmptyRetriever").with_types(output_type=List[Document])
-         logger.warning("Создан ретривер-пустышка.")
-    elif len(retrievers_list) == 2:
-         try:
-              ensemble_retriever = EnsembleRetriever(
-                  retrievers=retrievers_list,
-                  weights=[0.4, 0.6] 
-              )
-              logger.info("EnsembleRetriever (гибридный поиск Chroma + BM25) настроен.")
-         except Exception as e:
-              logger.error(f"Ошибка создания EnsembleRetriever: {e}. Используем только первый.", exc_info=True)
-              ensemble_retriever = retrievers_list[0]
-              logger.warning(f"Используется только {type(ensemble_retriever).__name__}")
-    else: 
-         ensemble_retriever = retrievers_list[0]
-         logger.warning(f"Доступен только один ретривер: {type(ensemble_retriever).__name__}. Гибридный поиск не используется.")
-
-    return ensemble_retriever, embeddings_object, all_prepared_documents, clinic_data
+    logger.info(f"=== Инициализация RAG завершена. Обработано тенантов: {len(bm25_retrievers_map)} ===")
+    # Возвращаем карту BM25 ретриверов и карту документов тенантов
+    # return chroma_client, embeddings_object, bm25_retrievers_map, tenant_documents_map, all_raw_base_data <-- УДАЛЕНО
+    return chroma_client, embeddings_object, bm25_retrievers_map, tenant_documents_map, tenant_raw_data_map # <-- ИЗМЕНЕНО

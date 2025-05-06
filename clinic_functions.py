@@ -2,20 +2,13 @@
 
 import logging
 import re
+import json # Добавляем для разбора JSON в документах
 from typing import Optional, List, Dict, Any, Set
-from pydantic import BaseModel, Field
+# Используем pydantic_v1, как и в matrixai для инструментов
+from langchain_core.pydantic_v1 import BaseModel, Field
+from langchain_core.documents import Document # Импортируем Document
 
-# --- Глобальное хранилище данных ---
-_internal_clinic_data: List[Dict[str, Any]] = []
-
-def set_clinic_data(data: List[Dict[str, Any]]):
-    """
-    Устанавливает данные клиники для использования функциями в этом модуле.
-    Вызывается один раз при инициализации основного скрипта.
-    """
-    global _internal_clinic_data
-    _internal_clinic_data = data
-    logging.info(f"[Funcs] Данные клиники ({len(_internal_clinic_data)} записей) установлены для функций.")
+logger = logging.getLogger(__name__) # Добавляем инициализацию логгера
 
 # --- Функция нормализации ---
 def normalize_text(text: Optional[str], keep_spaces: bool = False) -> str:
@@ -41,18 +34,21 @@ def normalize_text(text: Optional[str], keep_spaces: bool = False) -> str:
     return normalized
 
 # --- Вспомогательная функция для получения оригинального названия филиала ---
-def get_original_filial_name(normalized_name: str) -> Optional[str]:
-    """Находит оригинальное название филиала по его нормализованному имени."""
-    if not normalized_name or not _internal_clinic_data: return None
+# Теперь принимает данные как аргумент
+def get_original_filial_name(normalized_name: str, tenant_data: List[Dict[str, Any]]) -> Optional[str]:
+    """Находит оригинальное название филиала по его нормализованному имени в данных тенанта."""
+    if not normalized_name or not tenant_data: return None
     # Оптимизация: создаем карту нормализованных имен один раз, если она нужна часто
     # Но для редких вызовов можно итерировать
-    for item in _internal_clinic_data:
+    for item in tenant_data:
         original_name = item.get("filialName")
         if original_name and normalize_text(original_name) == normalized_name:
             return original_name
-    return None # Или можно вернуть normalized_name.capitalize() как фоллбэк
+    # Возвращаем исходное нормализованное имя, если точного не найдено, чтобы избежать None в ответах
+    # Можно добавить .capitalize() для лучшего вида
+    return normalized_name
 
-# --- Определения Классов Функций (с использованием normalize_text) ---
+# --- Определения Классов Функций (теперь методы process принимают raw_data) ---
 
 class FindEmployees(BaseModel):
     """Модель для поиска сотрудников по различным критериям."""
@@ -60,16 +56,18 @@ class FindEmployees(BaseModel):
     service_name: Optional[str] = Field(default=None, description="Точное или частичное название услуги")
     filial_name: Optional[str] = Field(default=None, description="Точное название филиала")
 
-    def process(self) -> str:
-        if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
-        logging.info(f"[FC Proc] Поиск сотрудников (Имя: {self.employee_name}, Услуга: {self.service_name}, Филиал: {self.filial_name})")
+    def process(self, tenant_data_docs: Optional[List[Document]] = None, raw_data: Optional[List[Dict]] = None) -> str:
+        """Выполняет поиск по списку сырых данных тенанта."""
+        tenant_data = raw_data # Используем сырые данные
+        if not tenant_data: return "Ошибка: Не удалось получить структурированные данные тенанта для поиска сотрудников."
+        logging.info(f"[FC Proc] Поиск сотрудников (Имя: {self.employee_name}, Услуга: {self.service_name}, Филиал: {self.filial_name}) по {len(tenant_data)} записям.")
 
         norm_emp_name = normalize_text(self.employee_name, keep_spaces=True)
         norm_service_name = normalize_text(self.service_name, keep_spaces=True)
         norm_filial_name = normalize_text(self.filial_name)
 
         filtered_data = []
-        for item in _internal_clinic_data:
+        for item in tenant_data: # Работаем напрямую с raw_data
             item_emp_name_raw = item.get('employeeFullName')
             item_service_name_raw = item.get('serviceName')
             item_filial_name_raw = item.get('filialName')
@@ -144,7 +142,8 @@ class FindEmployees(BaseModel):
                 count += 1
 
         if found_count == 0:
-             return "Сотрудники найдены по части критериев, но ни один не соответствует всем условиям."
+             # Это условие может быть достигнуто, если фильтры сработали уже после группировки
+             return "Сотрудники найдены по части критериев, но ни один не соответствует всем условиям одновременно."
 
         final_response = ["Найдены следующие сотрудники:"] + response_parts
         if found_count > limit:
@@ -158,15 +157,17 @@ class GetServicePrice(BaseModel):
     service_name: str = Field(description="Точное или максимально близкое название услуги")
     filial_name: Optional[str] = Field(default=None, description="Точное название филиала")
 
-    def process(self) -> str:
-        if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
-        logging.info(f"[FC Proc] Запрос цены (Услуга: {self.service_name}, Филиал: {self.filial_name})")
+    def process(self, tenant_data_docs: Optional[List[Document]] = None, raw_data: Optional[List[Dict]] = None) -> str:
+        """Выполняет поиск по списку сырых данных тенанта."""
+        tenant_data = raw_data # Используем сырые данные
+        if not tenant_data: return "Ошибка: Не удалось получить структурированные данные тенанта для поиска цен."
+        logging.info(f"[FC Proc] Запрос цены (Услуга: {self.service_name}, Филиал: {self.filial_name}) по {len(tenant_data)} записям.")
 
         matches = []
         norm_search_term = normalize_text(self.service_name, keep_spaces=True)
         norm_filial_name = normalize_text(self.filial_name)
 
-        for item in _internal_clinic_data:
+        for item in tenant_data: # Работаем напрямую с raw_data
             s_name_raw = item.get('serviceName')
             cat_name_raw = item.get('categoryName')
             f_name_raw = item.get('filialName')
@@ -210,111 +211,110 @@ class GetServicePrice(BaseModel):
                 })
 
         if not matches:
-             original_filial_req_name = get_original_filial_name(norm_filial_name) or self.filial_name
-             filial_search_text = f" в филиале '{original_filial_req_name}'" if self.filial_name else ""
-             return f"Цена на услугу, похожую на '{self.service_name}'{filial_search_text}, не найдена."
+            filial_str = f" в филиале '{self.filial_name}'" if self.filial_name else ""
+            return f"Услуга или категория, содержащая '{self.service_name}'{filial_str}, не найдена или для нее не указана цена."
 
-        matches.sort(key=lambda x: (not x['exact_match'], x['match_type'] == 'category', x['price']))
+        # Сортировка: сначала точные совпадения, потом по цене
+        matches.sort(key=lambda x: (not x['exact_match'], x['price']))
 
-        # Проверка на неоднозначность
-        unique_display_names = {m['display_name'] for m in matches if not m['exact_match']}
-        if len(unique_display_names) > 3 and not matches[0]['exact_match']:
-             response_parts = [f"По запросу '{self.service_name}' найдено несколько похожих услуг/категорий. Уточните, пожалуйста:"]
-             limit = 5
-             shown_names = set()
-             for match in matches:
-                 if match['display_name'] not in shown_names and len(shown_names) < limit:
-                     price_str = f"{match['price']:.0f} руб."
-                     filial_info = f" (в '{match['filial_name']}')" if match['filial_name'] != "Любой" else ""
-                     response_parts.append(f"- {match['display_name']}{filial_info}: {price_str}")
-                     shown_names.add(match['display_name'])
-                 if len(shown_names) >= limit: break
-             response_parts.append("...")
+        # Выводим результаты
+        limit = 5
+        response_parts = []
+        found_count = len(matches)
+
+        if found_count == 1:
+             match = matches[0]
+             filial_context = f" в филиале {match['filial_name']}" if match['filial_name'] != "Любой" else ""
+             return f"Цена на услугу '{match['display_name']}'{filial_context} составляет {match['price']:.0f} руб."
+        else:
+             response_parts.append(f"Найдено несколько услуг/категорий, содержащих '{self.service_name}':")
+             for i, match in enumerate(matches):
+                  if i >= limit: break
+                  filial_context = f" ({match['filial_name']})" if match['filial_name'] != "Любой" else ""
+                  response_parts.append(f"- {match['display_name']}{filial_context}: {match['price']:.0f} руб.")
+
+             if found_count > limit:
+                 response_parts.append(f"\n... (и еще {found_count - limit} услуг/категорий. Пожалуйста, уточните название услуги.)")
+
              return "\n".join(response_parts)
-
-        best_match = matches[0]
-        original_filial_req_name = get_original_filial_name(norm_filial_name) or self.filial_name
-        filial_display = original_filial_req_name if self.filial_name else best_match['filial_name']
-
-        filial_text = f" в филиале {filial_display}" if filial_display != "Любой" else ""
-        price_text = f"{best_match['price']:.0f} руб."
-        clarification = ""
-        if not best_match['exact_match'] and best_match['display_name']:
-             clarification = f" (найдено для '{best_match['display_name']}')"
-
-        return f"Цена на '{self.service_name}'{clarification}{filial_text} составляет {price_text}".strip()
 
 
 class ListFilials(BaseModel):
-    """Модель для получения списка филиалов."""
+    """Модель для получения списка всех филиалов."""
     # Нет аргументов
 
-    def process(self) -> str:
-        if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
-        logging.info("[FC Proc] Запрос списка филиалов")
+    def process(self, tenant_data_docs: Optional[List[Document]] = None, raw_data: Optional[List[Dict]] = None) -> str:
+        """Извлекает уникальные филиалы из сырых данных тенанта."""
+        tenant_data = raw_data # Используем сырые данные
+        if not tenant_data:
+            return "Ошибка: Не удалось получить структурированные данные тенанта для получения списка филиалов."
+        logging.info(f"[FC Proc] Запрос списка филиалов по {len(tenant_data)} записям.")
 
-        # Собираем оригинальные имена филиалов
-        filials: Set[str] = set(filter(None, (item.get('filialName') for item in _internal_clinic_data)))
+        filials: Set[str] = set()
+        for item in tenant_data: # Работаем напрямую с raw_data
+            f_name = item.get("filialName")
+            if f_name and isinstance(f_name, str) and f_name.strip():
+                filials.add(f_name.strip())
 
         if not filials:
-            return "Информация о филиалах не найдена."
-        # Сортируем оригинальные имена по их нормализованным версиям
-        return "Доступные филиалы клиники:\n*   " + "\n*   ".join(sorted(list(filials), key=normalize_text))
+            return "Список филиалов пуст или не найден в данных."
+
+        # Сортируем для консистентного вывода
+        sorted_filials = sorted(list(filials), key=normalize_text)
+
+        return "Доступны следующие филиалы:\n- " + "\n- ".join(sorted_filials)
 
 
 class GetEmployeeServices(BaseModel):
     """Модель для получения списка услуг конкретного сотрудника."""
     employee_name: str = Field(description="Точное или максимально близкое ФИО сотрудника")
 
-    def process(self) -> str:
-        if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
-        logging.info(f"[FC Proc] Запрос услуг сотрудника: {self.employee_name}")
+    def process(self, tenant_data_docs: Optional[List[Document]] = None, raw_data: Optional[List[Dict]] = None) -> str:
+        """Выполняет поиск по списку сырых данных тенанта."""
+        tenant_data = raw_data # Используем сырые данные
+        if not tenant_data: return "Ошибка: Не удалось получить структурированные данные тенанта для поиска услуг сотрудника."
+        logging.info(f"[FC Proc] Запрос услуг сотрудника '{self.employee_name}' по {len(tenant_data)} записям.")
 
-        services: Set[str] = set() # Оригинальные имена услуг
-        emp_found = False
-        found_names: Set[str] = set() # Оригинальные имена сотрудников
-        norm_search_name = normalize_text(self.employee_name, keep_spaces=True)
+        norm_emp_name_search = normalize_text(self.employee_name, keep_spaces=True)
+        services: Set[str] = set()
+        found_employee_name: Optional[str] = None
 
-        for item in _internal_clinic_data:
-            emp_name_raw = item.get('employeeFullName')
-            norm_item_emp = normalize_text(emp_name_raw, keep_spaces=True)
+        for item in tenant_data: # Работаем напрямую с raw_data
+            e_name_raw = item.get('employeeFullName')
+            s_name_raw = item.get('serviceName')
 
-            if norm_item_emp and norm_search_name in norm_item_emp:
-                 emp_found = True
-                 found_names.add(emp_name_raw)
-                 service_raw = item.get('serviceName')
-                 if service_raw: services.add(service_raw)
+            if not e_name_raw or not s_name_raw: continue
 
-        if not emp_found:
-            return f"Сотрудник с именем, похожим на '{self.employee_name}', не найден."
+            norm_item_e_name = normalize_text(e_name_raw, keep_spaces=True)
 
-        # Определяем наиболее точное оригинальное имя для ответа
-        best_match_name = self.employee_name
-        if found_names:
-            # Ищем точное совпадение после нормализации
-            exact_match = next((name for name in found_names if normalize_text(name, keep_spaces=True) == norm_search_name), None)
-            if exact_match:
-                best_match_name = exact_match
-            else:
-                # Если точного нет, берем первое из отсортированного списка найденных
-                best_match_name = sorted(list(found_names), key=lambda n: normalize_text(n, keep_spaces=True))[0]
+            # Ищем совпадение по имени сотрудника (частичное или полное)
+            if norm_emp_name_search in norm_item_e_name:
+                # Если нашли первое совпадение, запоминаем оригинальное имя
+                if found_employee_name is None:
+                     found_employee_name = e_name_raw
+                # Если нашли другое имя, которое тоже подходит - неоднозначность
+                elif normalize_text(found_employee_name, keep_spaces=True) != norm_item_e_name:
+                     logger.warning(f"Найдено несколько сотрудников, подходящих под '{self.employee_name}': '{found_employee_name}' и '{e_name_raw}'. Запрос неоднозначен.")
+                     return f"Найдено несколько сотрудников, подходящих под имя '{self.employee_name}'. Пожалуйста, уточните ФИО."
 
+                # Добавляем услугу, если имя сотрудника совпало
+                services.add(s_name_raw)
 
+        if not found_employee_name:
+            return f"Сотрудник с именем, содержащим '{self.employee_name}', не найден."
         if not services:
-            return f"Для сотрудника '{best_match_name}' не найдено информации об услугах."
-        else:
-            name_clarification = ""
-            if normalize_text(best_match_name, keep_spaces=True) != norm_search_name:
-                name_clarification = f" (найдено по запросу '{self.employee_name}')"
+            return f"Для сотрудника '{found_employee_name}' не найдено услуг в базе данных."
 
-            limit = 15
-            # Сортируем оригинальные имена услуг
-            sorted_services = sorted(list(services), key=lambda s: normalize_text(s, keep_spaces=True))
-            output_services = sorted_services[:limit]
-            more_services_info = f"... и еще {len(sorted_services) - limit} услуг." if len(sorted_services) > limit else ""
+        # Сортируем услуги по нормализованному имени
+        sorted_services = sorted(list(services), key=lambda s: normalize_text(s, keep_spaces=True))
+        limit = 15
+        response_parts = [f"Сотрудник '{found_employee_name}' выполняет следующие услуги:"]
+        response_parts.extend([f"- {s}" for s in sorted_services[:limit]])
 
-            return (f"Сотрудник {best_match_name}{name_clarification} выполняет следующие услуги:\n* "
-                   + "\n* ".join(output_services) + f"\n{more_services_info}".strip())
+        if len(services) > limit:
+            response_parts.append(f"\n... (и еще {len(services) - limit} услуг)")
+
+        return "\n".join(response_parts)
 
 
 class CheckServiceInFilial(BaseModel):
@@ -322,196 +322,214 @@ class CheckServiceInFilial(BaseModel):
     service_name: str = Field(description="Точное или максимально близкое название услуги")
     filial_name: str = Field(description="Точное название филиала")
 
-    def process(self) -> str:
-        if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
-        logging.info(f"[FC Proc] Проверка услуги '{self.service_name}' в филиале '{self.filial_name}'")
+    def process(self, tenant_data_docs: Optional[List[Document]] = None, raw_data: Optional[List[Dict]] = None) -> str:
+        """Выполняет поиск по списку сырых данных тенанта."""
+        tenant_data = raw_data # Используем сырые данные
+        if not tenant_data: return "Ошибка: Не удалось получить структурированные данные тенанта для проверки услуги."
+        logging.info(f"[FC Proc] Проверка услуги '{self.service_name}' в филиале '{self.filial_name}' по {len(tenant_data)} записям.")
 
-        norm_service_name = normalize_text(self.service_name, keep_spaces=True)
-        norm_filial_name = normalize_text(self.filial_name)
+        norm_service_search = normalize_text(self.service_name, keep_spaces=True)
+        norm_filial_search = normalize_text(self.filial_name)
 
-        filial_exists = False
+        service_found = False
         service_found_in_filial = False
-        found_service_name_raw = None
-        original_filial_name = None
-        all_filials_db_orig = set()
+        found_service_name: Optional[str] = None
+        found_filial_name: Optional[str] = None # Для корректного отображения имени филиала
+        found_in_other_filials: Set[str] = set()
 
-        for item in _internal_clinic_data:
-             item_f_name_raw = item.get('filialName')
-             if not item_f_name_raw: continue
-             all_filials_db_orig.add(item_f_name_raw)
-             norm_item_f = normalize_text(item_f_name_raw)
-             if norm_item_f == norm_filial_name:
-                  filial_exists = True
-                  if original_filial_name is None: original_filial_name = item_f_name_raw
-
-                  item_s_name_raw = item.get('serviceName')
-                  norm_item_s = normalize_text(item_s_name_raw, keep_spaces=True)
-
-                  if norm_item_s and norm_service_name in norm_item_s:
-                       service_found_in_filial = True
-                       found_service_name_raw = item_s_name_raw
-                       break # Нашли услугу в нужном филиале, выходим
-
+        # Проверка существования филиала
+        filial_exists = False
+        for item in tenant_data:
+            f_name_raw = item.get('filialName')
+            if f_name_raw and normalize_text(f_name_raw) == norm_filial_search:
+                 filial_exists = True
+                 found_filial_name = f_name_raw # Запоминаем оригинальное имя
+                 break
         if not filial_exists:
-             suggestion = f"Доступные филиалы: {', '.join(sorted(list(all_filials_db_orig), key=normalize_text))}." if all_filials_db_orig else "Список филиалов пуст."
-             return f"Филиал '{self.filial_name}' не найден. {suggestion}".strip()
+             return f"Филиал '{self.filial_name}' не найден."
 
-        # Если филиал существует, но услуга в нем не найдена
-        if not service_found_in_filial:
-             # Проверяем, есть ли услуга вообще где-либо
-             service_name_matches_anywhere = False
-             any_service_name_raw = None
-             for item in _internal_clinic_data:
-                  item_s_name_raw = item.get('serviceName')
-                  norm_item_s = normalize_text(item_s_name_raw, keep_spaces=True)
-                  if norm_item_s and norm_service_name in norm_item_s:
-                      service_name_matches_anywhere = True
-                      any_service_name_raw = item_s_name_raw
-                      break
+        # Поиск услуги
+        for item in tenant_data: # Работаем напрямую с raw_data
+            s_name_raw = item.get('serviceName')
+            f_name_raw = item.get('filialName')
 
-             if service_name_matches_anywhere:
-                  clarification = ""
-                  if any_service_name_raw and normalize_text(any_service_name_raw, keep_spaces=True) != norm_service_name:
-                     clarification = f" (например: '{any_service_name_raw}')"
-                  return f"Услуга, похожая на '{self.service_name}'{clarification}, не найдена в филиале '{original_filial_name}', но может быть доступна в других."
-             else:
-                  return f"Услуга, похожая на '{self.service_name}', не найдена ни в одном из филиалов."
+            if not s_name_raw or not f_name_raw: continue
 
-        # Если услуга найдена в филиале
-        clarification = ""
-        if found_service_name_raw and normalize_text(found_service_name_raw, keep_spaces=True) != norm_service_name:
-             clarification = f" (найдено: '{found_service_name_raw}')"
-        return f"Да, услуга '{self.service_name}'{clarification} доступна в филиале '{original_filial_name}'."
+            norm_item_s_name = normalize_text(s_name_raw, keep_spaces=True)
+            norm_item_f_name = normalize_text(f_name_raw)
+
+            # Ищем совпадение услуги (частичное)
+            if norm_service_search in norm_item_s_name:
+                 service_found = True
+                 # Запоминаем каноничное имя
+                 if found_service_name is None:
+                      found_service_name = s_name_raw
+                 # Проверка на неоднозначность
+                 elif normalize_text(found_service_name, keep_spaces=True) != norm_item_s_name:
+                      # Игнорируем, если уже нашли точное
+                       if normalize_text(self.service_name, keep_spaces=True) == normalize_text(found_service_name, keep_spaces=True):
+                            continue
+                       else:
+                           logger.warning(f"Найдено несколько услуг, подходящих под '{self.service_name}'. Запрос неоднозначен.")
+                           return f"Найдено несколько услуг, содержащих '{self.service_name}'. Пожалуйста, уточните название услуги."
+
+                 # Добавляем оригинальное имя филиала в сет
+                 filials.add(f_name_raw)
+
+            # Проверяем совпадение филиала
+            if norm_item_f_name == norm_filial_search:
+                service_found_in_filial = True
+                found_filial_name = f_name_raw # Запоминаем оригинальное имя найденного филиала
+                # Если нашли в нужном филиале, дальше можно не искать для этой записи
+                # Но нужно продолжить итерацию по другим записям, чтобы найти другие филиалы
+            else:
+                # Если услуга найдена, но в другом филиале, запоминаем его
+                found_in_other_filials.add(f_name_raw) # Добавляем оригинальное имя
+
+        if not service_found:
+             return f"Услуга, содержащая '{self.service_name}', не найдена ни в одном филиале."
+
+        if not found_service_name: found_service_name = self.service_name # Фоллбэк
+
+        if not found_filial_name: # Если искали в конкретном филиале, но не нашли
+            found_filial_name = self.filial_name # Используем имя из запроса
+
+        if service_found_in_filial:
+             return f"Да, услуга '{found_service_name}' доступна в филиале '{found_filial_name}'."
+        else:
+             response = f"Услуга '{found_service_name}' не найдена в филиале '{found_filial_name}'."
+             if found_in_other_filials:
+                  sorted_others = sorted(list(found_in_other_filials), key=normalize_text)
+                  limit = 3
+                  response += "\nНо она доступна в других филиалах: " + ", ".join(sorted_others[:limit])
+                  if len(sorted_others) > limit:
+                       response += f" и еще в {len(sorted_others) - limit}."
+             return response
 
 
 class CompareServicePriceInFilials(BaseModel):
     """Модель для сравнения цен на услугу в нескольких филиалах."""
     service_name: str = Field(description="Точное или максимально близкое название услуги")
-    filial_names: List[str] = Field(min_length=2, description="Список из ДВУХ или БОЛЕЕ филиалов")
+    filial_names: List[str] = Field(min_length=2, description="Список из ДВУХ или БОЛЕЕ названий филиалов")
 
-    def process(self) -> str:
-        if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
-        logging.info(f"[FC Proc] Сравнение цены услуги '{self.service_name}' в филиалах: {self.filial_names}")
+    def process(self, tenant_data_docs: Optional[List[Document]] = None, raw_data: Optional[List[Dict]] = None) -> str:
+        """Выполняет поиск по списку сырых данных тенанта."""
+        tenant_data = raw_data # Используем сырые данные
+        if not tenant_data: return "Ошибка: Не удалось получить структурированные данные тенанта для сравнения цен."
+        logging.info(f"[FC Proc] Сравнение цен на '{self.service_name}' в филиалах: {self.filial_names} по {len(tenant_data)} записям.")
 
-        norm_service_name = normalize_text(self.service_name, keep_spaces=True)
+        norm_service_search = normalize_text(self.service_name, keep_spaces=True)
+        norm_filial_names_search = {normalize_text(f) for f in self.filial_names}
 
-        # Собираем карту нормализованных имен филиалов из базы к оригинальным
-        all_filials_db_norm_map: Dict[str, str] = {}
-        for item in _internal_clinic_data:
+        results: Dict[str, Dict[str, Any]] = {} # {norm_filial_name: {'original_filial_name': ..., 'price': ..., 'found_service_name': ...}}
+        found_service_name_canonical: Optional[str] = None # Для консистентности названия услуги в ответе
+
+        # Проверка существования филиалов и сбор оригинальных имен
+        original_filial_names_map: Dict[str, str] = {} # norm -> original
+        all_norm_filials_in_db: Set[str] = set()
+        for item in tenant_data:
             f_name_raw = item.get('filialName')
             if f_name_raw:
-                norm_f = normalize_text(f_name_raw)
-                if norm_f not in all_filials_db_norm_map:
-                     all_filials_db_norm_map[norm_f] = f_name_raw
+                 norm_f = normalize_text(f_name_raw)
+                 all_norm_filials_in_db.add(norm_f)
+                 if norm_f not in original_filial_names_map:
+                     original_filial_names_map[norm_f] = f_name_raw
 
-        # Валидируем запрошенные филиалы
-        valid_filials_to_compare: Dict[str, str] = {} # norm_name -> original_name из запроса
-        invalid_filials_req = []
-        unique_requested_norm = set()
-
-        for filial_req_raw in self.filial_names:
-            norm_filial_req = normalize_text(filial_req_raw)
-            if not norm_filial_req or norm_filial_req in unique_requested_norm: continue
-            unique_requested_norm.add(norm_filial_req)
-
-            if norm_filial_req in all_filials_db_norm_map:
-                valid_filials_to_compare[norm_filial_req] = filial_req_raw
+        not_found_filials = []
+        valid_norm_filial_names_search = set()
+        for norm_f_search in norm_filial_names_search:
+            if norm_f_search in all_norm_filials_in_db:
+                valid_norm_filial_names_search.add(norm_f_search)
             else:
-                invalid_filials_req.append(filial_req_raw)
+                # Ищем оригинальное имя для сообщения об ошибке
+                original_missing_name = next((name for name in self.filial_names if normalize_text(name) == norm_f_search), norm_f_search)
+                not_found_filials.append(original_missing_name)
 
-        if invalid_filials_req:
-             existing_filials_str = ', '.join(sorted(all_filials_db_norm_map.values(), key=normalize_text))
-             return f"Филиалы не найдены: {', '.join(invalid_filials_req)}. Доступные: {existing_filials_str}."
-        if len(valid_filials_to_compare) < 2:
-            return "Нужно минимум два корректных и уникальных филиала для сравнения."
+        if not_found_filials:
+            return f"Следующие филиалы не найдены: {', '.join(not_found_filials)}. Пожалуйста, проверьте названия."
+        if len(valid_norm_filial_names_search) < 2:
+             return "Нужно указать как минимум два существующих филиала для сравнения."
 
-        # Ищем цены
-        prices: Dict[str, Dict] = {
-            norm_f: {'req_name': req_name, 'db_name': all_filials_db_norm_map.get(norm_f), 'price': None, 'service_name': None, 'exact_match': False}
-            for norm_f, req_name in valid_filials_to_compare.items()
-        }
-        service_name_matches: Set[str] = set() # Оригинальные имена найденных услуг
-        exact_service_name_found_raw = None
-
-        for item in _internal_clinic_data:
+        # Поиск цен в валидных филиалах
+        service_found_at_least_once = False
+        for item in tenant_data: # Работаем напрямую с raw_data
             s_name_raw = item.get('serviceName')
             f_name_raw = item.get('filialName')
             price_raw = item.get('price')
 
             if not s_name_raw or not f_name_raw or price_raw is None or price_raw == '': continue
 
+            norm_item_s_name = normalize_text(s_name_raw, keep_spaces=True)
             norm_item_f_name = normalize_text(f_name_raw)
-            if norm_item_f_name in prices:
-                norm_item_s_name = normalize_text(s_name_raw, keep_spaces=True)
-                is_exact_match = (norm_service_name == norm_item_s_name)
-                is_partial_match = (norm_service_name in norm_item_s_name)
 
-                if is_exact_match or is_partial_match:
-                    try: price = float(str(price_raw).replace(' ', '').replace(',', '.'))
-                    except (ValueError, TypeError): continue
+            # Ищем услугу (частичное совпадение) и филиал (точное совпадение из списка)
+            if norm_service_search in norm_item_s_name and norm_item_f_name in valid_norm_filial_names_search:
+                service_found_at_least_once = True
 
-                    current_data = prices[norm_item_f_name]
-                    current_best_price = current_data['price']
-                    current_is_exact = current_data['exact_match']
-                    should_update = False
-                    if current_best_price is None: should_update = True
-                    elif is_exact_match and not current_is_exact: should_update = True
-                    elif is_exact_match and current_is_exact and price < current_best_price: should_update = True
-                    elif not is_exact_match and not current_is_exact and price < current_best_price: should_update = True
+                # Если нашли первое совпадение услуги, запоминаем каноничное имя
+                if found_service_name_canonical is None:
+                    found_service_name_canonical = s_name_raw
+                # Проверка на неоднозначность названия услуги
+                elif normalize_text(found_service_name_canonical, keep_spaces=True) != norm_item_s_name:
+                    # Если ранее нашли точное совпадение, игнорируем это
+                     if normalize_text(self.service_name, keep_spaces=True) == normalize_text(found_service_name_canonical, keep_spaces=True):
+                          continue
+                     else:
+                         logger.warning(f"Найдено несколько услуг, подходящих под '{self.service_name}'. Запрос неоднозначен.")
+                         return f"Найдено несколько услуг, содержащих '{self.service_name}'. Пожалуйста, уточните название услуги."
 
-                    if should_update:
-                        current_data['price'] = price
-                        current_data['service_name'] = s_name_raw # Оригинальное имя услуги
-                        current_data['exact_match'] = is_exact_match
-                        service_name_matches.add(s_name_raw)
-                        if is_exact_match and not exact_service_name_found_raw:
-                             exact_service_name_found_raw = s_name_raw
+                try: price = float(str(price_raw).replace(' ', '').replace(',', '.'))
+                except (ValueError, TypeError): continue
+
+                # Записываем или обновляем цену, если найдена более точная услуга
+                # Или если это первая цена для данного филиала
+                current_result = results.get(norm_item_f_name)
+                is_exact_match = (normalize_text(self.service_name, keep_spaces=True) == norm_item_s_name)
+                should_update = False
+                if not current_result:
+                    should_update = True
+                elif is_exact_match and not current_result.get('exact_match'): # Новое - точное, старое - нет
+                     should_update = True
+                elif is_exact_match == current_result.get('exact_match') and price < current_result.get('price', float('inf')): # Такой же тип совпадения, но цена ниже? (маловероятно для одной услуги)
+                    # Можно добавить логирование, если цена разная для той же услуги в том же филиале
+                    should_update = True # Берем минимальную, если вдруг дубликаты
+
+                if should_update:
+                    results[norm_item_f_name] = {
+                        'original_filial_name': original_filial_names_map.get(norm_item_f_name, f_name_raw),
+                        'price': price,
+                        'found_service_name': s_name_raw, # Запоминаем имя найденной услуги
+                        'exact_match': is_exact_match
+                    }
+
+        if not service_found_at_least_once:
+            filial_list_str = ", ".join(original_filial_names_map.get(norm_f, norm_f) for norm_f in valid_norm_filial_names_search)
+            return f"Услуга, содержащая '{self.service_name}', не найдена ни в одном из указанных филиалов: {filial_list_str}."
+
+        if not found_service_name_canonical: # На всякий случай
+             found_service_name_canonical = self.service_name
 
         # Формируем ответ
-        service_display_name_raw = self.service_name # По умолчанию используем имя из запроса
-        if service_name_matches:
-             if exact_service_name_found_raw:
-                  service_display_name_raw = exact_service_name_found_raw
-             else:
-                  # Берем самое похожее из найденных (сортируем по нормализованному)
-                  service_display_name_raw = sorted(list(service_name_matches), key=lambda s: normalize_text(s, keep_spaces=True))[0]
+        response_parts = [f"Сравнение цен на услугу '{found_service_name_canonical}':"]
+        found_prices_count = 0
+        for norm_f_search in valid_norm_filial_names_search:
+            result = results.get(norm_f_search)
+            original_filial_name = original_filial_names_map.get(norm_f_search, norm_f_search)
+            if result:
+                price_str = f"{result['price']:.0f} руб."
+                # Если найденное имя услуги отличается от канонического, указываем это
+                service_name_note = ""
+                if normalize_text(result['found_service_name'], keep_spaces=True) != normalize_text(found_service_name_canonical, keep_spaces=True):
+                    service_name_note = f" (для услуги '{result['found_service_name']}')"
 
-        clarification = ""
-        if service_name_matches and normalize_text(service_display_name_raw, keep_spaces=True) != norm_service_name:
-             clarification = f" (по запросу '{self.service_name}')"
-
-        response_parts = [f"Сравнение цен на услугу '{service_display_name_raw}'{clarification}:"]
-        valid_prices_found: Dict[str, float] = {} # original_req_name -> price
-
-        # Сортируем филиалы по нормализованному имени для вывода
-        sorted_filial_norms = sorted(prices.keys())
-
-        for norm_f in sorted_filial_norms:
-            data = prices[norm_f]
-            original_req_name = data['req_name']
-            price_value = data['price']
-            found_service_name_raw = data['service_name']
-
-            if price_value is not None:
-                name_clarification = ""
-                if found_service_name_raw and normalize_text(found_service_name_raw, keep_spaces=True) != normalize_text(service_display_name_raw, keep_spaces=True):
-                     name_clarification = f" (для: '{found_service_name_raw}')"
-                response_parts.append(f"- {original_req_name}: {price_value:.0f} руб.{name_clarification}")
-                valid_prices_found[original_req_name] = price_value
+                response_parts.append(f"- {original_filial_name}: {price_str}{service_name_note}")
+                found_prices_count += 1
             else:
-                response_parts.append(f"- {original_req_name}: Цена не найдена.")
+                response_parts.append(f"- {original_filial_name}: Цена не найдена или услуга недоступна.")
 
-        if not service_name_matches:
-             response_parts = [f"Услуга, похожая на '{self.service_name}', не найдена ни в одном из указанных филиалов."]
-        elif len(valid_prices_found) >= 2:
-             min_price = min(valid_prices_found.values())
-             cheapest_filials = sorted([f for f, p in valid_prices_found.items() if p == min_price], key=normalize_text)
-             response_parts.append(f"\nСамая низкая цена ({min_price:.0f} руб.) в: {', '.join(cheapest_filials)}.")
-        elif len(valid_prices_found) == 1:
-             response_parts.append("\nНедостаточно данных для сравнения (цена найдена только в одном филиале).")
-        else: # Услуга найдена, но цен нет
-             response_parts.append("\nНе удалось найти цены для сравнения в указанных филиалах.")
-
+        if found_prices_count == 0:
+             # Это может произойти, если услуга найдена, но цена не указана нигде
+             return f"Услуга '{found_service_name_canonical}' найдена, но цена для нее не указана ни в одном из запрошенных филиалов."
 
         return "\n".join(response_parts)
 
@@ -520,59 +538,53 @@ class FindServiceLocations(BaseModel):
     """Модель для поиска филиалов, где доступна услуга."""
     service_name: str = Field(description="Точное или максимально близкое название услуги")
 
-    def process(self) -> str:
-        if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
-        logging.info(f"[FC Proc] Поиск филиалов для услуги: {self.service_name}")
+    def process(self, tenant_data_docs: Optional[List[Document]] = None, raw_data: Optional[List[Dict]] = None) -> str:
+        """Выполняет поиск по списку сырых данных тенанта."""
+        tenant_data = raw_data # Используем сырые данные
+        if not tenant_data: return "Ошибка: Не удалось получить структурированные данные тенанта для поиска филиалов."
+        logging.info(f"[FC Proc] Поиск филиалов для услуги '{self.service_name}' по {len(tenant_data)} записям.")
 
-        locations: Dict[str, str] = {} # norm_filial -> original_filial_name
-        service_found = False
-        found_service_names_raw: Set[str] = set()
-        norm_search_service = normalize_text(self.service_name, keep_spaces=True).strip()
+        norm_service_search = normalize_text(self.service_name, keep_spaces=True)
+        filials: Set[str] = set()
+        found_service_name: Optional[str] = None
+        service_found_at_least_once = False
 
-        best_match_name_raw = None
-        min_len_diff = float('inf')
-        found_exact_match = False
-
-        for item in _internal_clinic_data:
+        for item in tenant_data: # Работаем напрямую с raw_data
             s_name_raw = item.get('serviceName')
             f_name_raw = item.get('filialName')
+
             if not s_name_raw or not f_name_raw: continue
 
             norm_item_s_name = normalize_text(s_name_raw, keep_spaces=True)
-            if norm_search_service in norm_item_s_name:
-                service_found = True
-                found_service_names_raw.add(s_name_raw)
-                norm_item_f_name = normalize_text(f_name_raw)
-                if norm_item_f_name not in locations:
-                     locations[norm_item_f_name] = f_name_raw
 
-                # Определение лучшего имени услуги для вывода
-                is_exact_match = (norm_search_service == norm_item_s_name)
-                if is_exact_match and not found_exact_match: # Первое точное совпадение
-                    found_exact_match = True
-                    best_match_name_raw = s_name_raw
-                    min_len_diff = 0 
-                elif not found_exact_match: 
-                    len_diff = abs(len(norm_item_s_name) - len(norm_search_service))
-                    if len_diff < min_len_diff: 
-                        min_len_diff = len_diff
-                        best_match_name_raw = s_name_raw
+            # Ищем совпадение услуги (частичное)
+            if norm_service_search in norm_item_s_name:
+                 service_found_at_least_once = True
+                 # Запоминаем каноничное имя
+                 if found_service_name is None:
+                      found_service_name = s_name_raw
+                 # Проверка на неоднозначность
+                 elif normalize_text(found_service_name, keep_spaces=True) != norm_item_s_name:
+                      # Игнорируем, если уже нашли точное
+                       if normalize_text(self.service_name, keep_spaces=True) == normalize_text(found_service_name, keep_spaces=True):
+                            continue
+                       else:
+                           logger.warning(f"Найдено несколько услуг, подходящих под '{self.service_name}'. Запрос неоднозначен.")
+                           return f"Найдено несколько услуг, содержащих '{self.service_name}'. Пожалуйста, уточните название услуги."
 
+                 # Добавляем оригинальное имя филиала в сет
+                 filials.add(f_name_raw)
 
-        if not service_found:
-            return f"Услуга, похожая на '{self.service_name}', не найдена ни в одном филиале."
+        if not service_found_at_least_once:
+            return f"Услуга, содержащая '{self.service_name}', не найдена ни в одном филиале."
 
-        display_service_name_raw = best_match_name_raw if best_match_name_raw else self.service_name
-        clarification = ""
-        if normalize_text(display_service_name_raw, keep_spaces=True) != norm_search_service:
-            clarification = f" (найдено для '{display_service_name_raw}')"
+        if not found_service_name: found_service_name = self.service_name # Фоллбэк
 
-        if not locations:
-            return f"Услуга '{display_service_name_raw}'{clarification} найдена, но информация о филиалах отсутствует."
-        else:
-            sorted_original_filials = sorted(locations.values(), key=normalize_text)
-            return (f"Услуга '{display_service_name_raw}'{clarification} доступна в филиалах:\n*   "
-                   + "\n*   ".join(sorted_original_filials))
+        if not filials:
+            return f"Услуга '{found_service_name}' найдена, но не указано, в каких филиалах она доступна."
+
+        sorted_filials = sorted(list(filials), key=normalize_text)
+        return f"Услуга '{found_service_name}' доступна в следующих филиалах:\n- " + "\n- ".join(sorted_filials)
 
 
 class FindSpecialistsByServiceOrCategoryAndFilial(BaseModel):
@@ -580,281 +592,431 @@ class FindSpecialistsByServiceOrCategoryAndFilial(BaseModel):
     query_term: str = Field(description="Название услуги ИЛИ категории")
     filial_name: str = Field(description="Точное название филиала")
 
-    def process(self) -> str:
-        if not self.query_term or not self.filial_name: return "Ошибка: Укажите услугу/категорию и филиал."
-        if not _internal_clinic_data: return "Ошибка: Данные клиники не загружены."
-        logging.info(f"[FC Proc] Поиск специалистов (Запрос: '{self.query_term}', Филиал: '{self.filial_name}')")
+    def process(self, tenant_data_docs: Optional[List[Document]] = None, raw_data: Optional[List[Dict]] = None) -> str:
+        """Выполняет поиск по списку сырых данных тенанта."""
+        tenant_data = raw_data # Используем сырые данные
+        if not tenant_data: return "Ошибка: Не удалось получить структурированные данные тенанта для поиска специалистов."
+        logging.info(f"[FC Proc] Поиск специалистов по '{self.query_term}' в филиале '{self.filial_name}' по {len(tenant_data)} записям.")
 
-        matching_employees: Dict[str, str] = {} # emp_id -> original_emp_name
         norm_query = normalize_text(self.query_term, keep_spaces=True)
         norm_filial = normalize_text(self.filial_name)
-        original_filial_display_name = self.filial_name
 
-        for item in _internal_clinic_data:
-            item_filial_raw = item.get("filialName")
-            emp_id = item.get("employeeId")
-            emp_name_raw = item.get("employeeFullName")
-            if not emp_id or not emp_name_raw: continue
+        specialists: Set[str] = set()
+        found_filial_name: Optional[str] = None
+        service_or_category_found = False
 
-            norm_item_filial = normalize_text(item_filial_raw)
-            if norm_item_filial == norm_filial:
-                if item_filial_raw: original_filial_display_name = item_filial_raw 
+        # Проверка существования филиала
+        filial_exists = False
+        for item in tenant_data:
+            f_name_raw = item.get('filialName')
+            if f_name_raw and normalize_text(f_name_raw) == norm_filial:
+                 filial_exists = True
+                 found_filial_name = f_name_raw # Запоминаем оригинальное имя
+                 break
+        if not filial_exists:
+             return f"Филиал '{self.filial_name}' не найден."
 
-                item_service_raw = item.get("serviceName")
-                item_category_raw = item.get("categoryName")
-                norm_item_service = normalize_text(item_service_raw, keep_spaces=True)
-                norm_item_category = normalize_text(item_category_raw, keep_spaces=True)
+        # Поиск специалистов
+        for item in tenant_data: # Работаем напрямую с raw_data
+            e_name_raw = item.get('employeeFullName')
+            s_name_raw = item.get('serviceName')
+            cat_name_raw = item.get('categoryName')
+            f_name_raw = item.get('filialName')
 
-                if (norm_item_service and norm_query in norm_item_service) or \
-                   (norm_item_category and norm_query in norm_item_category):
-                    if emp_id not in matching_employees:
-                         matching_employees[emp_id] = emp_name_raw
+            if not e_name_raw or not f_name_raw: continue
 
-        if not matching_employees:
-            return f"В филиале '{original_filial_display_name}' не найдено специалистов для '{self.query_term}'."
-        else:
-            employee_list = ", ".join(sorted(matching_employees.values(), key=lambda n: normalize_text(n, keep_spaces=True)))
-            return f"В филиале '{original_filial_display_name}' для '{self.query_term}' найдены: {employee_list}."
+            norm_item_f = normalize_text(f_name_raw)
+            # Фильтруем по филиалу
+            if norm_item_f != norm_filial: continue
+
+            norm_item_s = normalize_text(s_name_raw, keep_spaces=True)
+            norm_item_cat = normalize_text(cat_name_raw, keep_spaces=True)
+
+            # Ищем совпадение по услуге или категории
+            if (norm_item_s and norm_query in norm_item_s) or \
+               (norm_item_cat and norm_query in norm_item_cat):
+                service_or_category_found = True
+                specialists.add(e_name_raw)
+
+        if not service_or_category_found:
+            return f"Услуга или категория, содержащая '{self.query_term}', не найдена в филиале '{found_filial_name}'."
+        if not specialists:
+             # Это может случиться, если услуга есть, но сотрудник не привязан
+             return f"Услуга/категория '{self.query_term}' найдена в филиале '{found_filial_name}', но специалисты для нее не указаны."
+
+        sorted_specialists = sorted(list(specialists), key=lambda s: normalize_text(s, keep_spaces=True))
+        limit = 10
+        response_parts = [f"В филиале '{found_filial_name}' по запросу '{self.query_term}' найдены специалисты:"]
+        response_parts.extend([f"- {s}" for s in sorted_specialists[:limit]])
+
+        if len(specialists) > limit:
+             response_parts.append(f"\n... (и еще {len(specialists) - limit})")
+
+        return "\n".join(response_parts)
 
 
 class ListServicesInCategory(BaseModel):
     """Модель для получения списка услуг в конкретной категории."""
     category_name: str = Field(description="Точное название категории")
 
-    def process(self) -> str:
-        if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
-        logging.info(f"[FC Proc] Запрос услуг в категории: {self.category_name}")
+    def process(self, tenant_data_docs: Optional[List[Document]] = None, raw_data: Optional[List[Dict]] = None) -> str:
+        """Выполняет поиск по списку сырых данных тенанта."""
+        tenant_data = raw_data # Используем сырые данные
+        if not tenant_data: return "Ошибка: Не удалось получить структурированные данные тенанта для поиска услуг."
+        logging.info(f"[FC Proc] Запрос услуг в категории '{self.category_name}' по {len(tenant_data)} записям.")
 
-        services_in_category: Set[str] = set() 
+        norm_cat_search = normalize_text(self.category_name, keep_spaces=True)
+        services: Dict[str, str] = {} # norm_service_name -> original_service_name
+        found_category_name: Optional[str] = None
         category_found = False
-        exact_category_name_raw = None
-        norm_search_category = normalize_text(self.category_name, keep_spaces=True)
-        found_category_names_raw = set()
 
-        for item in _internal_clinic_data:
+        for item in tenant_data: # Работаем напрямую с raw_data
+            s_name_raw = item.get('serviceName')
             cat_name_raw = item.get('categoryName')
-            srv_name_raw = item.get('serviceName')
 
-            if cat_name_raw:
-                norm_item_cat = normalize_text(cat_name_raw, keep_spaces=True)
-                if norm_search_category in norm_item_cat:
-                    category_found = True
-                    found_category_names_raw.add(cat_name_raw)
-                    # Ищем наиболее точное совпадение для имени категории
-                    if exact_category_name_raw is None or norm_search_category == norm_item_cat:
-                        exact_category_name_raw = cat_name_raw
+            if not s_name_raw or not cat_name_raw: continue
 
-                    if srv_name_raw: services_in_category.add(srv_name_raw)
+            norm_item_cat = normalize_text(cat_name_raw, keep_spaces=True)
+
+            # Ищем совпадение категории (частичное)
+            if norm_cat_search in norm_item_cat:
+                category_found = True
+                 # Запоминаем каноничное имя
+                if found_category_name is None:
+                     found_category_name = cat_name_raw
+                 # Проверка на неоднозначность
+                elif normalize_text(found_category_name, keep_spaces=True) != norm_item_cat:
+                     # Игнорируем, если уже нашли точное
+                      if normalize_text(self.category_name, keep_spaces=True) == normalize_text(found_category_name, keep_spaces=True):
+                           continue
+                      else:
+                          logger.warning(f"Найдено несколько категорий, подходящих под '{self.category_name}'. Запрос неоднозначен.")
+                          return f"Найдено несколько категорий, содержащих '{self.category_name}'. Пожалуйста, уточните название категории."
+
+                # Добавляем услугу в словарь (ключ - нормализованное имя, значение - оригинальное)
+                norm_item_s = normalize_text(s_name_raw, keep_spaces=True)
+                if norm_item_s not in services:
+                     services[norm_item_s] = s_name_raw
 
         if not category_found:
-            return f"Категория, похожая на '{self.category_name}', не найдена."
+            return f"Категория, содержащая '{self.category_name}', не найдена."
 
-        # Используем найденное точное имя или самое похожее, или из запроса
-        display_category_name = exact_category_name_raw or \
-                                (sorted(list(found_category_names_raw), key=lambda c: normalize_text(c, keep_spaces=True))[0] if found_category_names_raw else self.category_name)
+        if not found_category_name: found_category_name = self.category_name # Фоллбэк
 
-        if not services_in_category:
-            return f"В категории '{display_category_name}' не найдено конкретных услуг."
-        else:
-            clarification = ""
-            if normalize_text(display_category_name, keep_spaces=True) != norm_search_category:
-                clarification = f" (найдено по запросу '{self.category_name}')"
+        if not services:
+            return f"В категории '{found_category_name}' не найдено услуг."
 
-            limit = 20
-            sorted_services = sorted(list(services_in_category), key=lambda s: normalize_text(s, keep_spaces=True))
-            output_services = sorted_services[:limit]
-            more_services_info = f"... и еще {len(sorted_services) - limit} услуг." if len(sorted_services) > limit else ""
-            return (f"В категорию '{display_category_name}'{clarification} входят услуги:\n* "
-                   + "\n* ".join(output_services) + f"\n{more_services_info}".strip())
+        # Сортируем по оригинальному имени услуги
+        sorted_service_names = sorted(services.values(), key=lambda s: normalize_text(s, keep_spaces=True))
+        limit = 15
+        response_parts = [f"В категории '{found_category_name}' доступны следующие услуги:"]
+        response_parts.extend([f"- {s}" for s in sorted_service_names[:limit]])
+
+        if len(services) > limit:
+            response_parts.append(f"\n... (и еще {len(services) - limit} услуг)")
+
+        return "\n".join(response_parts)
 
 
 class ListServicesInFilial(BaseModel):
     """Модель для получения списка всех услуг в конкретном филиале."""
     filial_name: str = Field(description="Точное название филиала")
 
-    def process(self) -> str:
-        if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
-        logging.info(f"[FC Proc] Запрос всех услуг в филиале: {self.filial_name}")
+    def process(self, tenant_data_docs: Optional[List[Document]] = None, raw_data: Optional[List[Dict]] = None) -> str:
+        """Выполняет поиск по списку сырых данных тенанта."""
+        tenant_data = raw_data # Используем сырые данные
+        if not tenant_data: return "Ошибка: Не удалось получить структурированные данные тенанта для поиска услуг."
+        logging.info(f"[FC Proc] Запрос услуг в филиале '{self.filial_name}' по {len(tenant_data)} записям.")
 
-        services_in_filial: Set[str] = set() # original service names
-        norm_search_filial = normalize_text(self.filial_name)
-        original_filial_name = None
-        all_filials_db_orig = set()
-        filial_exists = False
+        norm_filial_search = normalize_text(self.filial_name)
+        services: Dict[str, str] = {} # norm_service_name -> original_service_name
+        categories: Dict[str, Set[str]] = {} # norm_category_name -> set of norm_service_names
+        found_filial_name: Optional[str] = None
+        filial_found = False
 
-        for item in _internal_clinic_data:
-             item_f_name_raw = item.get('filialName')
-             if not item_f_name_raw: continue
-             all_filials_db_orig.add(item_f_name_raw)
-             norm_item_f = normalize_text(item_f_name_raw)
-             if norm_item_f == norm_search_filial:
-                  filial_exists = True
-                  if original_filial_name is None: original_filial_name = item_f_name_raw
+        for item in tenant_data: # Работаем напрямую с raw_data
+            s_name_raw = item.get('serviceName')
+            cat_name_raw = item.get('categoryName')
+            f_name_raw = item.get('filialName')
 
-                  srv_name_raw = item.get('serviceName')
-                  if srv_name_raw: services_in_filial.add(srv_name_raw)
+            if not s_name_raw or not f_name_raw: continue
 
-        if not filial_exists:
-            suggestion = f"Доступные филиалы: {', '.join(sorted(list(all_filials_db_orig), key=normalize_text))}." if all_filials_db_orig else "Список филиалов пуст."
-            return f"Филиал '{self.filial_name}' не найден. {suggestion}".strip()
-        display_filial_name = original_filial_name or self.filial_name
+            norm_item_f = normalize_text(f_name_raw)
 
-        if not services_in_filial:
-            return f"В филиале '{display_filial_name}' не найдено информации об услугах."
-        else:
-            limit = 25
-            sorted_services = sorted(list(services_in_filial), key=lambda s: normalize_text(s, keep_spaces=True))
-            output_services = sorted_services[:limit]
-            more_services_info = f"... и еще {len(sorted_services) - limit} услуг." if len(sorted_services) > limit else ""
-            return (f"В филиале '{display_filial_name}' доступны услуги:\n* "
-                   + "\n* ".join(output_services) + f"\n{more_services_info}".strip())
+            # Ищем совпадение филиала (точное)
+            if norm_item_f == norm_filial_search:
+                filial_found = True
+                 # Запоминаем каноничное имя
+                if found_filial_name is None:
+                     found_filial_name = f_name_raw
+                 # Проверка на неоднозначность (маловероятно, но все же)
+                elif normalize_text(found_filial_name) != norm_item_f:
+                     logger.warning(f"Найдено несколько филиалов, подходящих под '{self.filial_name}'. Используется первое: '{found_filial_name}'")
+                     # Продолжаем использовать первое найденное имя
+
+                # Добавляем услугу и категорию
+                norm_item_s = normalize_text(s_name_raw, keep_spaces=True)
+                if norm_item_s not in services:
+                    services[norm_item_s] = s_name_raw
+
+                if cat_name_raw:
+                    norm_item_cat = normalize_text(cat_name_raw, keep_spaces=True)
+                    if norm_item_cat not in categories:
+                         categories[norm_item_cat] = set()
+                    categories[norm_item_cat].add(norm_item_s)
+
+        if not filial_found:
+            return f"Филиал '{self.filial_name}' не найден."
+
+        if not found_filial_name: found_filial_name = self.filial_name # Фоллбэк
+
+        if not services:
+            return f"В филиале '{found_filial_name}' не найдено услуг."
+
+        # Сортируем категории, а потом услуги внутри них
+        sorted_category_names = sorted(categories.keys(), key=lambda c: normalize_text(c, keep_spaces=True)) # Сортируем по нормализованному имени категории
+
+        response_parts = [f"В филиале '{found_filial_name}' доступны следующие услуги:"]
+        limit = 20 # Общий лимит на вывод услуг
+        count = 0
+
+        # Сначала выводим услуги по категориям
+        for norm_cat in sorted_category_names:
+             original_cat_name = next((c for c_raw in tenant_data if normalize_text(c_raw.get('categoryName'), keep_spaces=True) == norm_cat for c in [c_raw.get('categoryName')]), norm_cat) # Находим оригинальное имя категории
+             response_parts.append(f"\n**{original_cat_name}:**")
+             service_names_in_cat = sorted([services[norm_s] for norm_s in categories[norm_cat]], key=lambda s: normalize_text(s, keep_spaces=True)) # Оригинальные имена, сортированные
+             for service_name in service_names_in_cat:
+                  if count < limit:
+                      response_parts.append(f"- {service_name}")
+                      count += 1
+                  else:
+                      break
+             if count >= limit: break
+
+        # Если лимит не достигнут, выводим услуги без категорий (если такие есть)
+        if count < limit:
+             services_without_category = []
+             for norm_s, original_s in services.items():
+                 in_category = False
+                 for cat_services in categories.values():
+                      if norm_s in cat_services:
+                           in_category = True
+                           break
+                 if not in_category:
+                      services_without_category.append(original_s)
+
+             if services_without_category:
+                  response_parts.append(f"\n**Другие услуги:**")
+                  sorted_others = sorted(services_without_category, key=lambda s: normalize_text(s, keep_spaces=True))
+                  for service_name in sorted_others:
+                      if count < limit:
+                          response_parts.append(f"- {service_name}")
+                          count += 1
+                      else:
+                          break
+
+        if len(services) > count:
+             response_parts.append(f"\n... (и еще {len(services) - count} услуг)")
+
+        return "\n".join(response_parts)
 
 
 class FindServicesInPriceRange(BaseModel):
     """Модель для поиска услуг в заданном ценовом диапазоне."""
     min_price: float = Field(description="Минимальная цена")
     max_price: float = Field(description="Максимальная цена")
-    category_name: Optional[str] = Field(default=None, description="Опционально: категория")
-    filial_name: Optional[str] = Field(default=None, description="Опционально: филиал")
+    category_name: Optional[str] = Field(default=None, description="Опционально: категория для фильтрации")
+    filial_name: Optional[str] = Field(default=None, description="Опционально: филиал для фильтрации")
 
-    def process(self) -> str:
-        if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
-        logging.info(f"[FC Proc] Поиск услуг по цене ({self.min_price}-{self.max_price}), Кат: {self.category_name}, Фил: {self.filial_name}")
+    def process(self, tenant_data_docs: Optional[List[Document]] = None, raw_data: Optional[List[Dict]] = None) -> str:
+        """Выполняет поиск по списку сырых данных тенанта."""
+        tenant_data = raw_data # Используем сырые данные
+        if not tenant_data: return "Ошибка: Не удалось получить структурированные данные тенанта для поиска услуг."
+        logging.info(f"[FC Proc] Поиск услуг в диапазоне {self.min_price}-{self.max_price} (Кат: {self.category_name}, Фил: {self.filial_name}) по {len(tenant_data)} записям.")
 
-        if self.min_price > self.max_price: return "Ошибка: Минимальная цена больше максимальной."
+        if self.min_price > self.max_price:
+             return "Ошибка: Минимальная цена не может быть больше максимальной."
 
-        matching_services: Dict[str, Dict] = {} # service_id -> {name_raw, price, filial_raw, category_raw}
-        norm_category_name = normalize_text(self.category_name, keep_spaces=True)
-        norm_filial_name = normalize_text(self.filial_name)
+        norm_cat_filter = normalize_text(self.category_name, keep_spaces=True) if self.category_name else None
+        norm_filial_filter = normalize_text(self.filial_name) if self.filial_name else None
 
-        # Получаем оригинальные имена для сообщения "не найдено"
-        original_category_name_display = self.category_name
-        if norm_category_name:
-             found_cat_name = next((item.get("categoryName") for item in _internal_clinic_data if normalize_text(item.get("categoryName"), keep_spaces=True) == norm_category_name), None)
-             if found_cat_name: original_category_name_display = found_cat_name
-        original_filial_name_display = self.filial_name
-        if norm_filial_name:
-             found_filial_name = get_original_filial_name(norm_filial_name)
-             if found_filial_name: original_filial_name_display = found_filial_name
+        matches: Dict[str, Dict[str, Any]] = {} # norm_service_name -> {'original': ..., 'price': ..., 'category': ..., 'filials': set()}
 
-        for item in _internal_clinic_data:
-            price_raw = item.get('price')
-            srv_id = item.get('serviceId')
-            srv_name_raw = item.get('serviceName')
+        # Предварительно проверим существование филиала, если он указан
+        original_filial_filter_name = None
+        if norm_filial_filter:
+             filial_exists = False
+             for item in tenant_data:
+                  f_name_raw = item.get("filialName")
+                  if f_name_raw and normalize_text(f_name_raw) == norm_filial_filter:
+                      filial_exists = True
+                      original_filial_filter_name = f_name_raw
+                      break
+             if not filial_exists:
+                  return f"Филиал '{self.filial_name}' не найден."
+        else:
+            original_filial_filter_name = "Любой"
+
+
+        # Предварительно проверим существование категории, если она указана
+        original_category_filter_name = None
+        if norm_cat_filter:
+             category_exists = False
+             for item in tenant_data:
+                  cat_name_raw = item.get("categoryName")
+                  if cat_name_raw and norm_cat_filter in normalize_text(cat_name_raw, keep_spaces=True):
+                       category_exists = True
+                       original_category_filter_name = cat_name_raw # Берем первое совпавшее имя
+                       break
+             if not category_exists:
+                  return f"Категория, содержащая '{self.category_name}', не найдена."
+        else:
+             original_category_filter_name = "Любая"
+
+        # Основной цикл фильтрации
+        for item in tenant_data: # Работаем напрямую с raw_data
+            s_name_raw = item.get('serviceName')
             cat_name_raw = item.get('categoryName')
             f_name_raw = item.get('filialName')
+            price_raw = item.get('price')
 
-            if not srv_id or not srv_name_raw or price_raw is None or price_raw == '': continue
+            if not s_name_raw or price_raw is None or price_raw == '': continue
+
+            # Фильтр по категории
+            if norm_cat_filter:
+                norm_item_cat = normalize_text(cat_name_raw, keep_spaces=True) if cat_name_raw else ""
+                if norm_cat_filter not in norm_item_cat:
+                     continue
+
+            # Фильтр по филиалу
+            if norm_filial_filter:
+                 norm_item_f = normalize_text(f_name_raw) if f_name_raw else ""
+                 if norm_item_f != norm_filial_filter:
+                      continue
+
+            # Фильтр по цене
             try: price = float(str(price_raw).replace(' ', '').replace(',', '.'))
             except (ValueError, TypeError): continue
-            if not (self.min_price <= price <= self.max_price): continue
+            if not (self.min_price <= price <= self.max_price):
+                 continue
 
-            norm_item_cat = normalize_text(cat_name_raw, keep_spaces=True)
-            norm_item_filial = normalize_text(f_name_raw)
+            # Если все фильтры пройдены, добавляем или обновляем услугу
+            norm_item_s = normalize_text(s_name_raw, keep_spaces=True)
+            if norm_item_s not in matches:
+                matches[norm_item_s] = {
+                    'original': s_name_raw,
+                    'price': price, # Записываем цену, если она одна на услугу
+                    'category': cat_name_raw if cat_name_raw else "Без категории", # Оригинальное имя категории
+                    'filials': set()
+                }
+            # Добавляем филиал, если он есть (используем оригинальное имя)
+            if f_name_raw:
+                 matches[norm_item_s]['filials'].add(f_name_raw)
+            # Если цена для услуги уже есть и отличается - это странно, логируем
+            elif 'price' in matches[norm_item_s] and matches[norm_item_s]['price'] != price:
+                 logger.warning(f"Обнаружена разная цена ({matches[norm_item_s]['price']} vs {price}) для одной услуги '{s_name_raw}' без указания филиала.")
+                 # Можно выбрать минимальную или оставить первую
+                 matches[norm_item_s]['price'] = min(matches[norm_item_s]['price'], price)
 
-            if norm_category_name and (not norm_item_cat or norm_category_name not in norm_item_cat): continue
-            if norm_filial_name and norm_item_filial != norm_filial_name: continue
 
-            if srv_id not in matching_services or price < matching_services[srv_id]['price']:
-                 matching_services[srv_id] = {
-                     'name_raw': srv_name_raw,
-                     'price': price,
-                     'filial_raw': f_name_raw if f_name_raw else "Не указан",
-                     'category_raw': cat_name_raw if cat_name_raw else "Без категории"
-                 }
+        if not matches:
+             cat_str = f" в категории '{original_category_filter_name}'" if self.category_name else ""
+             filial_str = f" в филиале '{original_filial_filter_name}'" if self.filial_name else ""
+             return f"Услуги в ценовом диапазоне от {self.min_price:.0f} до {self.max_price:.0f} руб.{cat_str}{filial_str} не найдены."
 
-        if not matching_services:
-            filters_str = []
-            if self.category_name: filters_str.append(f"в категории '{original_category_name_display}'")
-            if self.filial_name: filters_str.append(f"в филиале '{original_filial_name_display}'")
-            filter_desc = " ".join(filters_str)
-            return f"Услуги от {self.min_price:.0f} до {self.max_price:.0f} руб. {filter_desc} не найдены.".strip()
-        else:
-            response_parts = [f"Услуги по цене от {self.min_price:.0f} до {self.max_price:.0f} руб.:"]
-            limit = 15
-            count = 0
-            sorted_services = sorted(matching_services.values(), key=lambda x: x['price'])
+        # Сортируем результаты по цене, затем по имени
+        sorted_matches = sorted(matches.values(), key=lambda x: (x['price'], normalize_text(x['original'], keep_spaces=True)))
 
-            for service in sorted_services:
-                if count < limit:
-                    filial_info = f" (Филиал: {service['filial_raw']})" if not self.filial_name and service['filial_raw'] != "Не указан" else ""
-                    cat_info = f" (Категория: {service['category_raw']})" if not self.category_name and service['category_raw'] != "Без категории" else ""
-                    response_parts.append(f"- {service['name_raw']}: {service['price']:.0f} руб.{filial_info}{cat_info}")
-                    count += 1
-                else:
-                     response_parts.append(f"\n... (и еще {len(sorted_services) - limit} услуг(и))")
-                     break
-            return "\n".join(response_parts)
+        limit = 15
+        response_parts = [f"Найдены услуги от {self.min_price:.0f} до {self.max_price:.0f} руб.:"]
+        if self.category_name: response_parts[0] += f" (Категория: '{original_category_filter_name}')"
+        if self.filial_name: response_parts[0] += f" (Филиал: '{original_filial_filter_name}')"
+
+        for i, match in enumerate(sorted_matches):
+             if i >= limit: break
+             filials_str = f" ({', '.join(sorted(list(match['filials']), key=normalize_text))})" if match['filials'] else ""
+             # Если филиал был задан в фильтре, не выводим его снова
+             if norm_filial_filter: filials_str = ""
+             response_parts.append(f"- {match['original']}: {match['price']:.0f} руб.{filials_str}")
+
+        if len(matches) > limit:
+             response_parts.append(f"\n... (и еще {len(matches) - limit} услуг)")
+
+        return "\n".join(response_parts)
 
 
 class ListAllCategories(BaseModel):
     """Модель для получения списка всех категорий услуг."""
+    # Нет аргументов
 
-    def process(self) -> str:
-        if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
-        logging.info("[FC Proc] Запрос списка всех категорий")
+    def process(self, tenant_data_docs: Optional[List[Document]] = None, raw_data: Optional[List[Dict]] = None) -> str:
+        """Извлекает уникальные категории из сырых данных тенанта."""
+        tenant_data = raw_data # Используем сырые данные
+        if not tenant_data: return "Ошибка: Не удалось получить структурированные данные тенанта для поиска категорий."
+        logging.info(f"[FC Proc] Запрос списка всех категорий по {len(tenant_data)} записям.")
 
-        categories: Set[str] = set() # Original category names
-        for item in _internal_clinic_data:
-            cat_name_raw = item.get('categoryName')
-            if cat_name_raw: categories.add(cat_name_raw)
+        categories: Set[str] = set()
+        for item in tenant_data: # Работаем напрямую с raw_data
+            cat_name = item.get("categoryName")
+            if cat_name and isinstance(cat_name, str) and cat_name.strip():
+                categories.add(cat_name.strip())
 
         if not categories:
-            return "Информация о категориях услуг не найдена."
+            return "Список категорий услуг пуст или не найден в данных."
 
-        limit = 30
+        # Сортируем для консистентного вывода
         sorted_categories = sorted(list(categories), key=lambda c: normalize_text(c, keep_spaces=True))
-        output_categories = sorted_categories[:limit]
-        more_categories_info = f"... и еще {len(sorted_categories) - limit} категорий." if len(sorted_categories) > limit else ""
+        limit = 30
+        response_parts = ["Доступны следующие категории услуг:"]
+        response_parts.extend([f"- {c}" for c in sorted_categories[:limit]])
 
-        return "Доступные категории услуг:\n*   " + "\n*   ".join(output_categories) + f"\n{more_categories_info}".strip()
-    
+        if len(categories) > limit:
+             response_parts.append(f"\n... (и еще {len(categories) - limit})")
+
+        return "\n".join(response_parts)
+
+
 class ListEmployeeFilials(BaseModel):
     """Модель для получения списка филиалов конкретного сотрудника."""
     employee_name: str = Field(description="Точное или максимально близкое ФИО сотрудника")
 
-    def process(self) -> str:
-        """Возвращает список всех филиалов, где работает сотрудник."""
-        if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
-        logging.info(f"[FC Proc] Запрос филиалов сотрудника: {self.employee_name}")
+    def process(self, tenant_data_docs: Optional[List[Document]] = None, raw_data: Optional[List[Dict]] = None) -> str:
+        """Выполняет поиск по списку сырых данных тенанта."""
+        tenant_data = raw_data # Используем сырые данные
+        if not tenant_data: return "Ошибка: Не удалось получить структурированные данные тенанта для поиска филиалов сотрудника."
+        logging.info(f"[FC Proc] Запрос филиалов сотрудника '{self.employee_name}' по {len(tenant_data)} записям.")
 
-        found_filials: Set[str] = set()
-        employee_found = False
-        found_employee_names: Set[str] = set()
-        norm_search_name = normalize_text(self.employee_name, keep_spaces=True)
+        norm_emp_name_search = normalize_text(self.employee_name, keep_spaces=True)
+        filials: Set[str] = set()
+        found_employee_name: Optional[str] = None
 
-        for item in _internal_clinic_data:
-            emp_name_raw = item.get('employeeFullName')
-            filial_name_raw = item.get('filialName')
-            norm_item_emp = normalize_text(emp_name_raw, keep_spaces=True)
+        for item in tenant_data: # Работаем напрямую с raw_data
+            e_name_raw = item.get('employeeFullName')
+            f_name_raw = item.get('filialName')
 
-            if norm_item_emp and norm_search_name in norm_item_emp:
-                employee_found = True
-                if emp_name_raw: found_employee_names.add(emp_name_raw)
-                if filial_name_raw:
-                    found_filials.add(filial_name_raw)
+            if not e_name_raw or not f_name_raw: continue
 
-        if not employee_found:
-            return f"Сотрудник с именем, похожим на '{self.employee_name}', не найден."
+            norm_item_e_name = normalize_text(e_name_raw, keep_spaces=True)
 
-        best_match_name = self.employee_name
-        if found_employee_names:
-            exact_match = next((name for name in found_employee_names if normalize_text(name, keep_spaces=True) == norm_search_name), None)
-            if exact_match:
-                best_match_name = exact_match
-            else:
-                best_match_name = sorted(list(found_employee_names), key=lambda n: normalize_text(n, keep_spaces=True))[0]
+            # Ищем совпадение по имени сотрудника (частичное или полное)
+            if norm_emp_name_search in norm_item_e_name:
+                # Если нашли первое совпадение, запоминаем оригинальное имя
+                if found_employee_name is None:
+                     found_employee_name = e_name_raw
+                # Если нашли другое имя, которое тоже подходит - неоднозначность
+                elif normalize_text(found_employee_name, keep_spaces=True) != norm_item_e_name:
+                     logger.warning(f"Найдено несколько сотрудников, подходящих под '{self.employee_name}': '{found_employee_name}' и '{e_name_raw}'. Запрос неоднозначен.")
+                     return f"Найдено несколько сотрудников, подходящих под имя '{self.employee_name}'. Пожалуйста, уточните ФИО."
 
-        if not found_filials:
-            return f"Для сотрудника '{best_match_name}' не найдено информации о филиалах."
-        else:
-            name_clarification = ""
-            if normalize_text(best_match_name, keep_spaces=True) != norm_search_name:
-                name_clarification = f" (найдено по запросу '{self.employee_name}')"
+                # Добавляем филиал, если имя сотрудника совпало
+                filials.add(f_name_raw)
 
-            sorted_filials = sorted(list(found_filials), key=normalize_text)
+        if not found_employee_name:
+            return f"Сотрудник с именем, содержащим '{self.employee_name}', не найден."
+        if not filials:
+            return f"Для сотрудника '{found_employee_name}' не найдено филиалов в базе данных."
 
-            if len(sorted_filials) == 1:
-                 return f"Сотрудник {best_match_name}{name_clarification} работает в филиале: {sorted_filials[0]}."
-            else:
-                 return f"Сотрудник {best_match_name}{name_clarification} работает в следующих филиалах:\n*   " + "\n*   ".join(sorted_filials)
+        # Сортируем филиалы по нормализованному имени
+        sorted_filials = sorted(list(filials), key=normalize_text)
+
+        return f"Сотрудник '{found_employee_name}' работает в следующих филиалах:\n- " + "\n- ".join(sorted_filials)

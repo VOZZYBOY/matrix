@@ -3,230 +3,387 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Med YU Med - Ассистент медицинской клиники</title>
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap">
-    <link rel="stylesheet" href="/static/css/style.css">
+    <title>Панель управления настройками тенантов</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { padding: 20px; }
+        .form-label { font-weight: bold; }
+        textarea { font-family: monospace; }
+        .last-modified { font-size: 0.8em; color: grey; margin-top: -10px; margin-bottom: 10px; }
+        .status-message { margin-top: 15px; }
+        /* Стили для чата */
+        #chatArea {
+            height: 400px; 
+            overflow-y: scroll; 
+            border: 1px solid #ccc; 
+            padding: 10px; 
+            margin-bottom: 10px; 
+            background-color: #f8f9fa;
+        }
+    </style>
 </head>
 <body>
-    <header class="header">
-        <div class="container">
-            <div class="header-content">
-                <div class="logo">
-                    <a href="/">Med YU <span>Med</span> <small>(MVP)</small></a>
-                    <span class="control-panel-label">Control Panel</span>
-                </div>
-                <nav class="nav-menu">
-                    <a href="#developer-section">Для разработчиков</a>
-                </nav>
-                <div class="header-buttons">
-                    <div class="btn-wrapper">
-                        <div class="dev-label">в разработке</div>
-                        <a href="#" class="btn btn-primary">Записаться</a>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </header>
+    <div class="container">
+        <h1>Настройки тенантов и Тестовый Чат</h1>
 
-    <main class="main-content">
-        <section class="hero">
-            <div class="container">
-                <div class="hero-content">
-                    <h1>Виртуальный ассистент <span>Med YU Med</span></h1>
-                    <p>Задайте вопрос о наших услугах, врачах, ценах или филиалах. Виртуальный ассистент на базе AI поможет вам получить всю необходимую информацию.</p>
-                </div>
-            </div>
-        </section>
-
-        <section class="chat-section">
-            <div class="container">
-                <div class="chat-layout">
-                    <div class="chat-container">
-                        <div class="chat-header">
-                            <button id="reset-button" class="reset-btn">Сбросить</button>
-                            <h2>Чат с ассистентом клиники</h2>
-                        </div>
-                        <div id="messages-container" class="chat-messages">
-                            <div class="typing-indicator">
-                                <span></span>
-                                <span></span>
-                                <span></span>
-                            </div>
-                        </div>
-                        <div class="chat-input">
-                            <input type="text" id="message-input" placeholder="Введите ваше сообщение...">
-                            <button id="send-button" type="button">Отправить</button>
-                        </div>
-                    </div>
-                    
-                    <div class="system-info-panel">
-                        <div class="system-info-card">
-                            <h3>Состояние системы</h3>
-                            <div class="info-row">
-                                <div class="info-label">Статус ассистента:</div>
-                                <div id="assistant-status" class="info-value">
-                                    <span class="status-indicator loading"></span>
-                                    Загрузка...
-                                </div>
-                            </div>
-                            <div class="info-row">
-                                <div class="info-label">Активные сессии:</div>
-                                <div id="active-sessions" class="info-value">...</div>
-                            </div>
-                            <div class="info-row">
-                                <div class="info-label">User ID:</div>
-                                <div id="user-id-display" class="info-value">
-                                    <span id="current-user-id">...</span>
-                                    <button id="edit-user-id-btn" class="btn-icon">✏️</button>
-                                </div>
-                            </div>
-                            <div id="user-id-editor" class="info-row" style="display: none;">
-                                <div class="info-label">Новый ID:</div>
-                                <div class="info-value id-editor">
-                                    <input type="text" id="user-id-input" placeholder="Введите ID пользователя">
-                                    <button id="save-user-id-btn" class="btn-outline-small">Сохранить</button>
-                                    <button id="cancel-user-id-btn" class="btn-outline-small">Отмена</button>
-                                </div>
-                            </div>
-                            <div class="info-update">
-                                Последнее обновление: <span id="last-update-time">-</span>
-                            </div>
-                        </div>
-                        
-                        <div class="system-info-card prompt-selector">
-                            <h3>Выбор промта</h3>
-                            <p class="prompt-description">Выберите тип промта для ассистента:</p>
-                            <div class="prompt-buttons">
-                                <button class="prompt-btn active" data-prompt="default">Стандартный</button>
-                                <button class="prompt-btn prompt-btn-custom" data-prompt="custom">Индивидуальный</button>
-                            </div>
-                            
-                            <div class="prompt-warning">
-                                <div class="warning-icon">⚠️</div>
-                                <p>Промт должен содержать четкие инструкции о роли и задачах ассистента. 
-                                <a href="https://platform.openai.com/docs/guides/prompt-engineering" target="_blank">Руководство по Prompt Engineering</a></p>
-                            </div>
-                            
-                            <div class="prompt-details">
-                                <div class="prompt-preview">
-                                    <h4>Текущий промт: <span id="current-prompt-title">Стандартный</span></h4>
-                                    <div id="prompt-text" class="prompt-text"></div>
-                                    <div class="btn-wrapper">
-                                        <div class="dev-label">в разработке</div>
-                                        <button id="edit-prompt-btn" class="btn-outline-small">Редактировать</button>
-                                    </div>
-                                </div>
-                                
-                                <div class="prompt-editor" style="display: none;">
-                                    <h4>Редактирование промта</h4>
-                                    <textarea id="prompt-editor" rows="10"></textarea>
-                                    <div class="editor-buttons">
-                                        <button id="save-prompt-btn" class="btn-primary-small">Сохранить</button>
-                                        <button id="cancel-edit-btn" class="btn-outline-small">Отмена</button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <section class="developer-section" id="developer-section">
-            <div class="container">
-                <h2>Для разработчиков</h2>
-                <div class="developer-content">
-                    <div class="markdown-content">
-                        <h1>Документация виртуального ассистента Med YU Med</h1>
-                        
-                        <h2>Обзор</h2>
-                        <p>Виртуальный ассистент Med YU Med - это AI-помощник на базе Yandex GPT, использующий технологию RAG (Retrieval-Augmented Generation) для поиска релевантной информации о врачах, услугах и ценах клиники.</p>
-                        
-                        <h2>Архитектура ассистента</h2>
-                        <p>Ассистент построен на базе следующих ключевых компонентов:</p>
-                        <ul>
-                            <li><strong>YandexGPT API</strong> - для общения ассистента с пользователями</li>
-                            <li><strong>RAG-индекс</strong> - векторная база знаний о врачах и услугах клиники</li>
-                            <li><strong>Function Calling</strong> - набор функций для выполнения конкретных задач</li>
-                        </ul>
-                        
-                        <h3>Управление промтами</h3>
-                        <p>Ассистент поддерживает два типа промтов:</p>
-                        <ul>
-                            <li><strong>Стандартный промт</strong> - базовая инструкция для ассистента, включающая описание задач, ограничений и способов работы с инструментами</li>
-                            <li><strong>Индивидуальный промт</strong> - настраиваемый пользователем промт для специфических сценариев использования</li>
-                        </ul>
-                        <p>Обратите внимание: из-за ограничений Yandex Cloud API, промт не меняется в самом ассистенте, а добавляется к каждому сообщению пользователя, что может быть менее эффективно.</p>
-                        
-                        <h3>Function Calling API</h3>
-                        <p>Ассистент использует следующие функции для обработки конкретных запросов:</p>
-                        <ul>
-                            <li><code>FindEmployees</code> - поиск сотрудников по имени, услуге или филиалу</li>
-                            <li><code>GetServicePrice</code> - получение цены услуги в конкретном филиале</li>
-                            <li><code>ListFilials</code> - получение списка всех филиалов клиники</li>
-                            <li><code>GetEmployeeServices</code> - получение списка услуг конкретного врача</li>
-                            <li><code>CheckServiceInFilial</code> - проверка наличия услуги в конкретном филиале</li>
-                            <li><code>CompareServicePriceInFilials</code> - сравнение цен на услугу в разных филиалах</li>
-                        </ul>
-                        
-                        <h3>RAG система</h3>
-                        <p>Система использует векторный поиск для извлечения релевантной информации из:</p>
-                        <ul>
-                            <li>Описаний врачей и их квалификации</li>
-                            <li>Описаний услуг и методик</li>
-                        </ul>
-                        <p>Ограничение: Yandex Cloud API позволяет использовать максимум 100 файлов для RAG.</p>
-                        
-                        <h2>Потоки работы</h2>
-                        <p>Для каждого типа промта создается отдельный поток (thread) в Yandex Cloud, что позволяет сохранять разные контексты диалогов. При переключении между типами промтов меняется и используемый поток.</p>
-                        
-                        <h2>Решение проблем</h2>
-                        <h3>Работа с потоками</h3>
-                        <p>Основная проблема при работе - возможная ситуация с удаленными потоками. Если поток был удален, но ссылка на него осталась в приложении, это приводит к ошибкам. Реализована проверка существования потока перед использованием.</p>
-                        
-                        <h3>Ограничения RAG</h3>
-                        <p>Yandex Cloud ограничивает количество файлов до 100, что может быть недостаточно для больших баз знаний. Решение: объединение меньших чанков в более крупные и ограничение общего количества файлов до 90.</p>
-                        
-                        <h2>API Endpoints</h2>
-                        <p>Основной сервер предоставляет следующие API:</p>
-                        <ul>
-                            <li><code>POST /ask</code> - отправка запроса ассистенту</li>
-                            <li><code>POST /reset_session</code> - сброс сессии пользователя</li>
-                            <li><code>GET /health</code> - проверка состояния системы</li>
-                        </ul>
-                        
-                        <h2>Дополнительная информация</h2>
-                        <p>Полная документация и исходный код доступны в репозитории проекта. При разработке своих решений на базе этого ассистента учитывайте ограничения Yandex Cloud API и особенности работы с потоками.</p>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <div class="user-id-section">
-            <h3>ID пользователя</h3>
-            <div class="user-id-controls">
-                <input type="text" id="user-id-field" placeholder="ID пользователя">
-                <button id="save-user-id-btn" class="btn">Сохранить</button>
-                <button id="reset-user-id-btn" class="btn">Сбросить</button>
-            </div>
+        <div class="mb-3">
+            <label for="tenantIdInput" class="form-label">ID Тенанта:</label>
+            <input type="text" class="form-control" id="tenantIdInput" placeholder="Введите ID тенанта (например, my_clinic)">
+            <button type="button" class="btn btn-secondary btn-sm mt-2" id="loadSettingsButton">Загрузить/Проверить настройки</button>
         </div>
 
-        <div class="logs-panel">
-            <h3>Системные логи</h3>
-            <div class="logs-control">
-                <button id="refresh-logs-btn" class="btn">Обновить</button>
+        <div id="settingsForm">
+            <div class="mb-3">
+                <label for="promptAddition" class="form-label">Дополнение к системному промпту:</label>
+                <div class="last-modified" id="promptAdditionLastModified"></div>
+                <textarea class="form-control" id="promptAddition" rows="6"></textarea>
             </div>
-            <div id="logs-container" class="logs-container"></div>
+
+            <!-- Новые поля для информации о клинике -->
+            <div class="mb-3">
+                <label for="clinicInfoAbout" class="form-label">О клинике (общая информация):</label>
+                 <div class="last-modified" id="clinicInfoAboutLastModified"></div>
+                <textarea class="form-control" id="clinicInfoAbout" rows="4"></textarea>
+            </div>
+            <div class="mb-3">
+                <label for="clinicInfoHours" class="form-label">Часы работы:</label>
+                <textarea class="form-control" id="clinicInfoHours" rows="3"></textarea>
+            </div>
+            <div class="mb-3">
+                <label for="clinicInfoContacts" class="form-label">Контактная информация (адрес, телефон и т.п.):</label>
+                <textarea class="form-control" id="clinicInfoContacts" rows="3"></textarea>
+            </div>
+            <!-- Конец новых полей -->
+
+            <button type="button" class="btn btn-primary" id="saveButton">Сохранить настройки</button>
+            <div id="statusMessage" class="status-message"></div>
         </div>
 
-    </main>
+        <hr class="my-4"> <!-- Разделитель -->
 
-    <footer class="footer">
-        <div class="container">
-            <p>© 2023 Med YU Med. Все права защищены. <a href="#">Политика конфиденциальности</a></p>
+        <!-- +++ Секция чата +++ -->
+        <h2>Чат для тестирования</h2>
+        <div id="chatArea">
+            <!-- Сообщения будут добавляться сюда -->
         </div>
-    </footer>
+        <div class="input-group mb-3">
+            <input type="text" class="form-control" placeholder="Введите сообщение..." id="chatInput" aria-label="Сообщение">
+            <button class="btn btn-success" type="button" id="sendChatButton">Отправить</button>
+            <button class="btn btn-warning" type="button" id="resetChatButton">Сбросить диалог</button>
+        </div>
+        <div id="chatStatus" class="status-message"></div>
+        <!-- +++ Конец секции чата +++ -->
 
-    <script src="/static/js/script.js"></script>
+    </div>
+
+    <script>
+        // --- Переменные для настроек ---
+        const tenantIdInput = document.getElementById('tenantIdInput');
+        const loadSettingsButton = document.getElementById('loadSettingsButton');
+        const settingsForm = document.getElementById('settingsForm');
+        const promptAdditionTextarea = document.getElementById('promptAddition');
+        const clinicInfoAboutTextarea = document.getElementById('clinicInfoAbout');
+        const clinicInfoHoursTextarea = document.getElementById('clinicInfoHours');
+        const clinicInfoContactsTextarea = document.getElementById('clinicInfoContacts');
+        const saveButton = document.getElementById('saveButton');
+        const statusMessage = document.getElementById('statusMessage');
+        const promptAdditionLastModified = document.getElementById('promptAdditionLastModified');
+        const clinicInfoLastModified = document.getElementById('clinicInfoAboutLastModified');
+
+        // --- Переменные для чата ---
+        const chatArea = document.getElementById('chatArea');
+        const chatInput = document.getElementById('chatInput');
+        const sendChatButton = document.getElementById('sendChatButton');
+        const resetChatButton = document.getElementById('resetChatButton');
+        const chatStatus = document.getElementById('chatStatus');
+        let chatUserId = `admin_user_${Math.random().toString(36).substring(7)}`; // Простой ID для сессии чата
+
+        // --- Функции для настроек ---
+
+        // Загрузка настроек для введенного тенанта
+        async function loadTenantSettings() {
+            const tenantId = tenantIdInput.value.trim();
+            if (!tenantId) {
+                 showStatus('Введите ID тенанта', 'warning');
+                 return;
+            }
+            statusMessage.textContent = 'Загрузка настроек...';
+            chatArea.innerHTML = '';
+            showChatStatus('');
+
+            // Сбрасываем новые поля перед загрузкой
+            promptAdditionTextarea.value = '';
+            clinicInfoAboutTextarea.value = '';
+            clinicInfoHoursTextarea.value = '';
+            clinicInfoContactsTextarea.value = '';
+            promptAdditionLastModified.textContent = '';
+            clinicInfoLastModified.textContent = '';
+
+            try {
+                const response = await fetch(`/tenant_settings/${tenantId}`);
+                 if (response.status === 404) {
+                    promptAdditionTextarea.value = '';
+                    clinicInfoAboutTextarea.value = '';
+                    clinicInfoHoursTextarea.value = '';
+                    clinicInfoContactsTextarea.value = '';
+                    promptAdditionLastModified.textContent = 'Настройки не найдены (будут созданы при сохранении)';
+                    clinicInfoLastModified.textContent = '';
+                    showStatus('Настройки для этого тенанта еще не созданы.', 'info');
+                    return;
+                }
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                const settings = await response.json();
+
+                promptAdditionTextarea.value = settings.prompt_addition || '';
+
+                // Разбираем clinic_info_docs и заполняем новые поля
+                const clinicDocs = settings.clinic_info_docs || [];
+                clinicDocs.forEach(doc => {
+                    if (doc.metadata && doc.page_content) {
+                        switch (doc.metadata.topic) {
+                            case 'О клинике':
+                                clinicInfoAboutTextarea.value = doc.page_content;
+                                break;
+                            case 'Часы работы':
+                                clinicInfoHoursTextarea.value = doc.page_content;
+                                break;
+                            case 'Контакты':
+                                clinicInfoContactsTextarea.value = doc.page_content;
+                                break;
+                            // Можно добавить другие case по необходимости
+                        }
+                    }
+                });
+
+                promptAdditionLastModified.textContent = settings.last_modified_general
+                    ? `Посл. изм. (общие): ${new Date(settings.last_modified_general).toLocaleString()}`
+                    : 'Общие настройки не изменялись';
+                 clinicInfoLastModified.textContent = settings.last_modified_clinic_info
+                    ? `Посл. изм. (инфо): ${new Date(settings.last_modified_clinic_info).toLocaleString()}`
+                     : 'Информация о клинике не изменялась';
+
+                statusMessage.textContent = 'Настройки загружены.';
+                statusMessage.className = `status-message alert alert-info`;
+            } catch (error) {
+                console.error(`Ошибка загрузки настроек для ${tenantId}:`, error);
+                promptAdditionTextarea.value = '';
+                clinicInfoAboutTextarea.value = '';
+                clinicInfoHoursTextarea.value = '';
+                clinicInfoContactsTextarea.value = '';
+                promptAdditionLastModified.textContent = 'Ошибка загрузки';
+                clinicInfoLastModified.textContent = '';
+                showStatus(`Ошибка загрузки настроек для ${tenantId}`, 'danger');
+            }
+        }
+
+        // Сохранение настроек
+        async function saveTenantSettings() {
+            const tenantId = tenantIdInput.value.trim();
+            if (!tenantId) {
+                 showStatus('Ошибка: Введите ID тенанта перед сохранением!', 'danger');
+                 return;
+            }
+
+            // Собираем clinic_info_docs из новых полей
+            const clinicInfoDocsArray = [];
+            const aboutText = clinicInfoAboutTextarea.value.trim();
+            const hoursText = clinicInfoHoursTextarea.value.trim();
+            const contactsText = clinicInfoContactsTextarea.value.trim();
+
+            if (aboutText) {
+                clinicInfoDocsArray.push({
+                    page_content: aboutText,
+                    metadata: { source: "tenant_config", type: "general_info", topic: "О клинике" }
+                });
+            }
+            if (hoursText) {
+                clinicInfoDocsArray.push({
+                    page_content: hoursText,
+                    metadata: { source: "tenant_config", type: "schedule", topic: "Часы работы" }
+                });
+            }
+            if (contactsText) {
+                clinicInfoDocsArray.push({
+                    page_content: contactsText,
+                    metadata: { source: "tenant_config", type: "contacts", topic: "Контакты" }
+                });
+            }
+
+            const settingsToSave = {
+                prompt_addition: promptAdditionTextarea.value,
+                clinic_info_docs: clinicInfoDocsArray
+            };
+
+            showStatus('Сохранение...', 'info');
+
+            try {
+                const response = await fetch(`/tenant_settings`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        tenant_id: tenantId,
+                        settings: settingsToSave
+                    }),
+                });
+
+                const result = await response.json();
+                if (!response.ok) {
+                     throw new Error(result.detail || `HTTP error! status: ${response.status}`);
+                }
+                showStatus(result.message || 'Настройки успешно сохранены!', 'success');
+                loadTenantSettings();
+            } catch (error) {
+                console.error(`Ошибка сохранения настроек для ${tenantId}:`, error);
+                showStatus(`Ошибка сохранения: ${error.message}`, 'danger');
+            }
+        }
+
+        // Отображение статуса настроек
+        function showStatus(message, type = 'info') {
+            statusMessage.textContent = message;
+            statusMessage.className = `status-message alert alert-${type}`;
+        }
+
+        // --- Функции для чата ---
+
+        // Добавление сообщения в область чата
+        function addChatMessage(sender, message) {
+            const messageElement = document.createElement('div');
+            messageElement.classList.add('mb-2');
+            messageElement.style.wordWrap = 'break-word'; // Перенос длинных слов
+
+            const strong = document.createElement('strong');
+            strong.textContent = sender + ": ";
+            messageElement.appendChild(strong);
+            
+            message = message.replace(/\n/g, '<br>');
+            const span = document.createElement('span');
+            span.innerHTML = message;
+            messageElement.appendChild(span);
+            chatArea.appendChild(messageElement);
+            chatArea.scrollTop = chatArea.scrollHeight;
+        }
+
+        // Отправка сообщения ассистенту
+        async function sendChatMessage() {
+            const message = chatInput.value.trim();
+            const tenantId = tenantIdInput.value.trim();
+
+            if (!message) return;
+            if (!tenantId) {
+                showChatStatus('Ошибка: Сначала введите ID тенанта!', 'danger');
+                return;
+            }
+
+            addChatMessage('Вы', message);
+            chatInput.value = '';
+            showChatStatus('Ассистент думает...', 'info');
+            sendChatButton.disabled = true;
+            resetChatButton.disabled = true;
+            chatInput.disabled = true;
+
+            try {
+                const response = await fetch('/ask', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        message: message,
+                        tenant_id: tenantId,
+                        user_id: chatUserId,
+                        reset_session: false
+                    }),
+                });
+
+                const result = await response.json();
+                if (!response.ok) {
+                    throw new Error(result.detail || `HTTP error! status: ${response.status}`);
+                }
+                addChatMessage('Ассистент', result.response);
+                showChatStatus('');
+
+            } catch (error) {
+                console.error('Ошибка отправки сообщения:', error);
+                addChatMessage('Ошибка', error.message);
+                showChatStatus(`Ошибка: ${error.message}`, 'danger');
+            } finally {
+                sendChatButton.disabled = false;
+                resetChatButton.disabled = false;
+                chatInput.disabled = false;
+                chatInput.focus(); // Вернуть фокус в поле ввода
+            }
+        }
+
+         // Сброс диалога
+        async function resetChat() {
+            const tenantId = tenantIdInput.value.trim();
+            if (!tenantId) {
+                showChatStatus('Ошибка: Сначала введите ID тенанта!', 'danger');
+                return;
+            }
+
+            showChatStatus('Сброс диалога...', 'warning');
+            chatArea.innerHTML = '';
+            sendChatButton.disabled = true;
+            resetChatButton.disabled = true;
+
+             try {
+                const response = await fetch('/ask', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        message: "(сброс сессии)",
+                        tenant_id: tenantId,
+                        user_id: chatUserId,
+                        reset_session: true
+                    }),
+                });
+                 const result = await response.json();
+                 if (!response.ok) {
+                    throw new Error(result.detail || `HTTP error! status: ${response.status}`);
+                }
+                showChatStatus('Диалог сброшен.', 'success');
+            } catch (error) {
+                console.error('Ошибка сброса диалога:', error);
+                showChatStatus(`Ошибка сброса: ${error.message}`, 'danger');
+            } finally {
+                 sendChatButton.disabled = false;
+                 resetChatButton.disabled = false;
+            }
+        }
+
+         // Отображение статуса чата
+        function showChatStatus(message, type = 'info') {
+            if (!message) {
+                 chatStatus.textContent = '';
+                 chatStatus.className = 'status-message';
+                 return;
+            }
+            chatStatus.textContent = message;
+            chatStatus.className = `status-message alert alert-${type}`;
+        }
+
+        // --- Инициализация ---
+        loadSettingsButton.addEventListener('click', loadTenantSettings);
+
+        saveButton.addEventListener('click', saveTenantSettings);
+
+        sendChatButton.addEventListener('click', sendChatMessage);
+        chatInput.addEventListener('keypress', function(event) {
+            if (event.key === 'Enter') {
+                sendChatMessage();
+            }
+        });
+        resetChatButton.addEventListener('click', resetChat);
+
+    </script>
+     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html> 
