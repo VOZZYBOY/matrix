@@ -1,42 +1,30 @@
-version: '3.8' # Версия синтаксиса Docker Compose
+
 
 services:
-  # Сервис вашего FastAPI приложения
   app:
     build:
-      context: . # Использовать Dockerfile из текущей директории
+      context: .
       dockerfile: Dockerfile
     ports:
-      - "8001:8001" # Пробросить порт 8001 контейнера на порт 8001 хоста
+      - "8001:8001" 
     environment:
-      # Переменные окружения для вашего приложения
-      - REDIS_HOST=redis # <--- Указываем имя сервиса Redis
+
+      - REDIS_HOST=redis 
       - REDIS_PORT=6379
       - APP_HOST=0.0.0.0
-      - APP_PORT=8001 # Внутренний порт приложения в контейнере
-      - GIGACHAT_CREDENTIALS=${GIGACHAT_CREDENTIALS} # Пример передачи секрета
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}       # Пример передачи секрета
-      # - CHROMA_DB_PATH=/app/chroma_db_clinic_giga # Если путь к Chroma нужен как env var
-      # Добавьте другие переменные окружения, если они нужны вашему приложению
+      - APP_PORT=8001 
     volumes:
-      # Монтируем директорию с базовыми данными внутрь контейнера
       - ./base:/app/base
-      # Монтируем конфиги тенантов (опционально, для разработки/управления снаружи)
       - ./tenant_configs:/app/tenant_configs
-      # Монтируем файл логов для удобства просмотра
       - ./api.log:/app/api.log
-      # - ./chroma_db_clinic_giga:/app/chroma_db_clinic_giga # НЕ монтируем Chroma DB в сам контейнер app, это должно быть внешне
     depends_on:
-      - redis # Запускать только после того, как запустится сервис redis
-    restart: unless-stopped # Перезапускать контейнер, если он остановился (кроме ручной остановки)
-
-  # Сервис Redis
+      - redis 
+    restart: unless-stopped 
   redis:
-    image: redis:alpine # Используем официальный легковесный образ Redis
+    image: redis:alpine 
     volumes:
-      - redis_data:/data # Монтируем именованный том для сохранения данных Redis
+      - redis_data:/data
     restart: unless-stopped
 
 volumes:
-  # Объявляем именованный том для данных Redis
   redis_data: 
