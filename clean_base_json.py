@@ -2,19 +2,13 @@ import json
 import os
 import logging
 
-# Настройка логирования
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Слова-маркеры для удаления (без учета регистра)
 GARBAGE_MARKERS = ["test", "arrr","тест","Ожидание"]
 
-# Путь к основному файлу данных (ВАЖНО: убедитесь, что это правильный путь)
-# Используем абсолютный путь для надежности при запуске из разных мест
-# (хотя в данном случае скрипт будет лежать рядом)
-FILE_PATH = "/home/erik/matrixai/base/medyumed.2023-04-24.json" 
-# Если нужно, можно создать бэкап автоматически
-# BACKUP_FILE_PATH = "/home/erik/matrixai/base/medyumed.2023-04-24.json.backup"
 
+FILE_PATH = "/home/erik/matrixai/base/medyumed.2023-04-24.json" 
 
 def contains_garbage(item: dict, markers: list) -> bool:
     """
