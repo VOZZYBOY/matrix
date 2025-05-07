@@ -33,11 +33,10 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir --upgrade --quiet pydantic
 
 # Make sure the base directory exists (if cleaned_data.json needs it)
-RUN mkdir -p /app/base
 
 # Copy the application code and necessary files
-COPY app.py matrixai.py clinic_functions.py rag_setup.py ./
-COPY base/cleaned_data.json ./base/
+COPY app.py matrixai.py clinic_functions.py rag_setup.py redis_history.py tenant_config_manager.py ./
+COPY base/ ./base/
 COPY static ./static/
 COPY templates ./templates/
 # Expose the application port
