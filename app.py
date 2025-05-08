@@ -23,10 +23,11 @@ except ImportError as e:
     logging.critical(f"Не удалось импортировать tenant_config_manager: {e}", exc_info=True)
     tenant_config_manager = None
 try:
-    from redis_history import clear_history as redis_clear_history
+    from redis_history import clear_history as redis_clear_history, get_history as redis_get_history
 except ImportError as e:
     logging.critical(f"Не удалось импортировать redis_history: {e}", exc_info=True)
     redis_clear_history = None
+    redis_get_history = None
 
 try:
     from matrixai import agent_with_history
@@ -48,15 +49,10 @@ logger = logging.getLogger("clinic_api_module_based")
 
 agent: Optional[Runnable] = None
 
-# Словарь для хранения активных RAG компонентов для разных тенантов
-# (Сейчас не используется, т.к. компоненты глобальные в matrixai.py)
-# rag_components_cache = {}
-
-# --- Модели данных Pydantic ---
 class AskRequest(BaseModel):
-    user_id: str # Обязательный ID пользователя (для логирования и потенциально для истории)
+    user_id: str
     message: str
-    session_id: Optional[str] = None # Сессия для истории диалога
+    session_id: Optional[str] = None 
     tenant_id: Optional[str] = None 
     reset_session: bool = False
     stream: bool = False 
@@ -157,8 +153,10 @@ async def ask_assistant(
         if redis_clear_history:
             cleared = redis_clear_history(tenant_id=tenant_id, user_id=target_user_id)
             logger.info(f"Запрос на сброс сессии для tenant '{tenant_id}', user '{target_user_id}'. Сессия удалена: {cleared}")
+            return MessageResponse(response="История чата была очищена.", user_id=target_user_id)
         else:
              logger.error(f"Функция redis_clear_history не доступна для tenant '{tenant_id}', user '{target_user_id}'")
+             return MessageResponse(response="Запрос на сброс сессии получен, но функция очистки истории в Redis недоступна. Сообщение не было обработано.", user_id=target_user_id)
 
     try:
         start_time = time.time()
@@ -317,6 +315,27 @@ def read_logs(max_lines=100):
 async def get_logs(request: Request, max_lines: int = 100):
     logs_data = read_logs(max_lines)
     return JSONResponse(content={"logs": logs_data})
+
+@app.get("/history/{tenant_id}/{user_id}", tags=["history"], response_model=List[Dict[str, Any]])
+async def get_user_chat_history(tenant_id: str, user_id: str, limit: Optional[int] = 50):
+    """
+    Получает историю чата для указанного tenant_id и user_id.
+    По умолчанию возвращает последние 50 сообщений.
+    """
+    logger.info(f"Запрос истории чата для tenant: '{tenant_id}', user: '{user_id}', limit: {limit}")
+    if not redis_get_history:
+        logger.error("Функция redis_get_history не доступна.")
+        raise HTTPException(status_code=503, detail="Функциональность истории чата недоступна.")
+
+    try:
+        history_data = redis_get_history(tenant_id=tenant_id, user_id=user_id, limit=limit if limit is not None else 50) # Убедимся что limit не None
+        return history_data 
+    except ValueError as ve: 
+        logger.error(f"Ошибка формирования ключа для истории: {ve}")
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Непредвиденная ошибка при получении истории для tenant: '{tenant_id}', user: '{user_id}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при получении истории чата.")
 
 if __name__ == "__main__":
     app_host = os.getenv("APP_HOST", "0.0.0.0")

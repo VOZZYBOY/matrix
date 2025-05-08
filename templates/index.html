@@ -20,6 +20,34 @@
             margin-bottom: 10px; 
             background-color: #f8f9fa;
         }
+        /* Стили для истории */
+        #historyDisplayArea {
+            max-height: 400px; 
+            overflow-y: auto; 
+            border: 1px solid #ddd; 
+            padding: 10px; 
+            background-color: #fdfdfd;
+            margin-top: 15px;
+        }
+        #historyDisplayArea .message-block {
+            margin-bottom: 10px;
+            padding: 8px;
+            border: 1px solid #eee;
+            border-radius: 5px;
+        }
+        #historyDisplayArea .message-block strong { display: block; margin-bottom: 4px; }
+        #historyDisplayArea pre {
+            white-space: pre-wrap;
+            word-break: break-all;
+            margin: 0;
+            background-color: inherit; /* Наследуем фон родителя */
+            padding: 0;
+            border: none;
+        }
+        .message-human { background-color: #e7f3fe; margin-left: 20px; }
+        .message-ai { background-color: #f0f0f0; }
+        .message-system { background-color: #fffbe6; }
+        .message-tool { background-color: #e6ffe6; font-family: monospace; font-size: 0.9em; }
     </style>
 </head>
 <body>
@@ -60,9 +88,35 @@
         </div>
 
         <hr class="my-4"> <!-- Разделитель -->
+        
+        <!-- +++ Секция просмотра истории чата +++ -->
+        <h2>Просмотр истории чата</h2>
+        <div class="mb-3">
+            <label for="historyTenantIdInput" class="form-label">ID Тенанта для истории (если отличается от верхнего):</label>
+            <input type="text" class="form-control" id="historyTenantIdInput" placeholder="ID тенанта из чата">
+        </div>
+        <div class="mb-3">
+            <label for="historyUserIdInput" class="form-label">User ID для истории:</label>
+            <input type="text" class="form-control" id="historyUserIdInput" placeholder="User ID из чата">
+        </div>
+        <div class="mb-3">
+            <label for="historyLimitInput" class="form-label">Лимит сообщений (по умолчанию 50):</label>
+            <input type="number" class="form-control" id="historyLimitInput" placeholder="50">
+        </div>
+        <button type="button" class="btn btn-info" id="loadHistoryButton">Загрузить историю</button>
+        <div id="historyDisplayArea">
+            <!-- История будет отображаться здесь -->
+        </div>
+        <div id="historyStatus" class="status-message"></div>
+        <!-- +++ Конец секции просмотра истории чата +++ -->
+
+        <hr class="my-4"> <!-- Разделитель -->
 
         <!-- +++ Секция чата +++ -->
         <h2>Чат для тестирования</h2>
+        <div class="d-flex justify-content-between align-items-center mb-1">
+            <small>Текущий User ID: <span id="chatUserIdDisplay"></span></small>
+        </div>
         <div id="chatArea">
             <!-- Сообщения будут добавляться сюда -->
         </div>
@@ -96,7 +150,19 @@
         const sendChatButton = document.getElementById('sendChatButton');
         const resetChatButton = document.getElementById('resetChatButton');
         const chatStatus = document.getElementById('chatStatus');
-        let chatUserId = `admin_user_${Math.random().toString(36).substring(7)}`; // Простой ID для сессии чата
+        const chatUserIdDisplay = document.getElementById('chatUserIdDisplay'); // Элемент для отображения chatUserId
+        let chatUserId = localStorage.getItem('chatAdminUserId') || `admin_user_${Math.random().toString(36).substring(7)}`; // Используем localStorage для user id
+        localStorage.setItem('chatAdminUserId', chatUserId); // Сохраняем или обновляем user id
+        if(chatUserIdDisplay) chatUserIdDisplay.textContent = chatUserId; // Отображаем User ID чата
+
+        // +++ Переменные для просмотра истории +++
+        const historyTenantIdInput = document.getElementById('historyTenantIdInput');
+        const historyUserIdInput = document.getElementById('historyUserIdInput');
+        const historyLimitInput = document.getElementById('historyLimitInput');
+        const loadHistoryButton = document.getElementById('loadHistoryButton');
+        const historyDisplayArea = document.getElementById('historyDisplayArea');
+        const historyStatus = document.getElementById('historyStatus');
+
 
         // --- Функции для настроек ---
 
@@ -108,10 +174,14 @@
                  return;
             }
             statusMessage.textContent = 'Загрузка настроек...';
-            chatArea.innerHTML = '';
+            chatArea.innerHTML = ''; // Очищаем чат при смене тенанта
             showChatStatus('');
+            historyDisplayArea.innerHTML = ''; // Очищаем историю при смене тенанта
+            showHistoryStatus('');
+            historyTenantIdInput.value = tenantId; // Обновляем tenant_id в секции истории
+            historyUserIdInput.value = chatUserId; // Обновляем user_id в секции истории
 
-            // Сбрасываем новые поля перед загрузкой
+            // Сбрасываем поля настроек перед загрузкой
             promptAdditionTextarea.value = '';
             clinicInfoAboutTextarea.value = '';
             clinicInfoHoursTextarea.value = '';
@@ -235,7 +305,7 @@
                      throw new Error(result.detail || `HTTP error! status: ${response.status}`);
                 }
                 showStatus(result.message || 'Настройки успешно сохранены!', 'success');
-                loadTenantSettings();
+                loadTenantSettings(); // Перезагружаем настройки, чтобы обновить дату модификации
             } catch (error) {
                 console.error(`Ошибка сохранения настроек для ${tenantId}:`, error);
                 showStatus(`Ошибка сохранения: ${error.message}`, 'danger');
@@ -246,6 +316,9 @@
         function showStatus(message, type = 'info') {
             statusMessage.textContent = message;
             statusMessage.className = `status-message alert alert-${type}`;
+             if (type === 'success' || type === 'info') {
+                setTimeout(() => { statusMessage.textContent = ''; statusMessage.className='status-message';}, 5000);
+            }
         }
 
         // --- Функции для чата ---
@@ -260,9 +333,19 @@
             strong.textContent = sender + ": ";
             messageElement.appendChild(strong);
             
-            message = message.replace(/\n/g, '<br>');
+            // Заменяем переносы строк на <br>, только если это строка
+            if (typeof message === 'string') {
+                message = message.replace(/\n/g, '<br>');
+            }
+            
             const span = document.createElement('span');
-            span.innerHTML = message;
+            // Проверяем, содержит ли сообщение HTML-теги (очень простая проверка)
+            if (typeof message === 'string' && /<[a-z][\s\S]*>/i.test(message)) {
+                span.innerHTML = message; // Если похоже на HTML, вставляем как HTML
+            } else {
+                span.textContent = message; // Иначе, как текст
+            }
+            
             messageElement.appendChild(span);
             chatArea.appendChild(messageElement);
             chatArea.scrollTop = chatArea.scrollHeight;
@@ -295,7 +378,7 @@
                     body: JSON.stringify({
                         message: message,
                         tenant_id: tenantId,
-                        user_id: chatUserId,
+                        user_id: chatUserId, // Используем chatUserId
                         reset_session: false
                     }),
                 });
@@ -303,6 +386,12 @@
                 const result = await response.json();
                 if (!response.ok) {
                     throw new Error(result.detail || `HTTP error! status: ${response.status}`);
+                }
+                // Обновляем chatUserId, если он изменился (хотя в текущей логике API он не должен)
+                if (result.user_id && result.user_id !== chatUserId) {
+                    chatUserId = result.user_id;
+                    localStorage.setItem('chatAdminUserId', chatUserId);
+                    if(chatUserIdDisplay) chatUserIdDisplay.textContent = chatUserId;
                 }
                 addChatMessage('Ассистент', result.response);
                 showChatStatus('');
@@ -339,9 +428,9 @@
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
-                        message: "(сброс сессии)",
+                        message: "(сброс сессии)", // Сообщение все еще нужно отправить, но оно не будет обработано LLM
                         tenant_id: tenantId,
-                        user_id: chatUserId,
+                        user_id: chatUserId, // Используем chatUserId
                         reset_session: true
                     }),
                 });
@@ -349,7 +438,8 @@
                  if (!response.ok) {
                     throw new Error(result.detail || `HTTP error! status: ${response.status}`);
                 }
-                showChatStatus('Диалог сброшен.', 'success');
+                 // Отображаем сообщение об успешном сбросе, которое вернул API
+                showChatStatus(result.response || 'Диалог сброшен.', 'success'); 
             } catch (error) {
                 console.error('Ошибка сброса диалога:', error);
                 showChatStatus(`Ошибка сброса: ${error.message}`, 'danger');
@@ -368,20 +458,141 @@
             }
             chatStatus.textContent = message;
             chatStatus.className = `status-message alert alert-${type}`;
+             if (type === 'success' || type === 'info') {
+                 setTimeout(() => { chatStatus.textContent = ''; chatStatus.className='status-message';}, 5000);
+             }
+        }
+        
+        // +++ Функции для просмотра истории +++
+        async function loadChatHistory() {
+            const tenantId = historyTenantIdInput.value.trim() || tenantIdInput.value.trim(); // Используем ID тенанта из настроек, если поле истории пустое
+            const userId = historyUserIdInput.value.trim();
+            const limitValue = historyLimitInput.value.trim();
+            const limit = limitValue && !isNaN(parseInt(limitValue)) ? parseInt(limitValue) : 50; // Парсим или берем дефолт
+
+            if (!tenantId) {
+                showHistoryStatus('Ошибка: ID Тенанта должен быть указан (либо в поле настроек, либо в поле истории).', 'danger');
+                return;
+            }
+            if (!userId) {
+                showHistoryStatus('Ошибка: User ID должен быть указан.', 'danger');
+                return;
+            }
+
+            showHistoryStatus('Загрузка истории...', 'info');
+            historyDisplayArea.innerHTML = ''; // Очищаем предыдущую историю
+
+            try {
+                const response = await fetch(`/history/${tenantId}/${userId}?limit=${limit}`);
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({ detail: `HTTP error! status: ${response.status}` }));
+                    throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+                }
+                const historyMessages = await response.json();
+
+                if (historyMessages.length === 0) {
+                    showHistoryStatus('История чата пуста или не найдена.', 'info');
+                    return;
+                }
+
+                historyMessages.forEach(msg => {
+                    displayHistoryMessage(msg);
+                });
+                showHistoryStatus('История успешно загружена.', 'success');
+
+            } catch (error) {
+                console.error('Ошибка загрузки истории чата:', error);
+                showHistoryStatus(`Ошибка загрузки истории: ${error.message}`, 'danger');
+            }
         }
 
-        // --- Инициализация ---
-        loadSettingsButton.addEventListener('click', loadTenantSettings);
+        function displayHistoryMessage(message) {
+            const messageDiv = document.createElement('div');
+            messageDiv.classList.add('message-block'); // Используем новый класс
+            
+            let sender = 'Неизвестно';
+            // Предполагаем структуру сообщения как словарь {type: '...', data: {...}} или {type: '...', content: '...'}
+            let messageContentObj = message.data || message; 
+            let contentType = messageContentObj.type || message.type || 'unknown'; // Тип может быть во внешнем объекте или во внутреннем
+            let content = messageContentObj.content !== undefined ? messageContentObj.content : JSON.stringify(messageContentObj); // Контент или вся структура data
 
-        saveButton.addEventListener('click', saveTenantSettings);
-
-        sendChatButton.addEventListener('click', sendChatMessage);
-        chatInput.addEventListener('keypress', function(event) {
-            if (event.key === 'Enter') {
-                sendChatMessage();
+            // Определяем отправителя и стиль в зависимости от типа сообщения
+            switch (contentType) {
+                case 'human':
+                    sender = 'Пользователь';
+                    messageDiv.classList.add('message-human');
+                    break;
+                case 'ai':
+                    sender = 'Ассистент';
+                    messageDiv.classList.add('message-ai');
+                    break;
+                case 'system':
+                    sender = 'Система';
+                    content = messageContentObj.content; // Для system обычно только content
+                    messageDiv.classList.add('message-system');
+                    break;
+                case 'tool':
+                    sender = `Инструмент (${messageContentObj.name || 'N/A'})`;
+                    content = messageContentObj.content; // ToolMessage имеет content
+                    messageDiv.classList.add('message-tool');
+                     // Форматируем JSON для читаемости, если content - строка JSON
+                    if (typeof content === 'string' && content.trim().startsWith('{') && content.trim().endsWith('}')) {
+                        try {
+                            content = JSON.stringify(JSON.parse(content), null, 2);
+                        } catch (e) { /* оставляем как есть, если не JSON */ }
+                    }
+                    break;
+                default:
+                    sender = contentType.charAt(0).toUpperCase() + contentType.slice(1); // Пытаемся использовать тип как имя
+                    // messageDiv.style.backgroundColor = '#fafafa'; // Общий стиль не нужен, т.к. есть message-block
             }
-        });
-        resetChatButton.addEventListener('click', resetChat);
+            
+            messageDiv.innerHTML = `<strong>${sender}:</strong>`; // Убрал <br>
+            
+            const contentPre = document.createElement('pre');
+            contentPre.textContent = (typeof content === 'string') ? content : JSON.stringify(content, null, 2); // Отображаем строку или форматированный JSON
+            messageDiv.appendChild(contentPre);
+
+            historyDisplayArea.appendChild(messageDiv);
+            // historyDisplayArea.scrollTop = historyDisplayArea.scrollHeight; // Можно убрать автоскролл для истории
+        }
+
+        function showHistoryStatus(message, type = 'info') {
+            historyStatus.textContent = message;
+            historyStatus.className = `status-message alert alert-${type}`;
+            if (type === 'success' || type === 'info') {
+                setTimeout(() => { historyStatus.textContent = ''; historyStatus.className='status-message';}, 5000);
+            }
+        }
+
+        // --- Инициализация и обработчики событий ---
+        window.onload = () => {
+            loadSettingsButton.addEventListener('click', loadTenantSettings);
+            saveButton.addEventListener('click', saveTenantSettings);
+            sendChatButton.addEventListener('click', sendChatMessage);
+            resetChatButton.addEventListener('click', resetChat);
+            chatInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    sendChatMessage();
+                }
+            });
+
+            // +++ Обработчик для кнопки загрузки истории +++
+            loadHistoryButton.addEventListener('click', loadChatHistory);
+             // Заполняем поле tenant_id для истории из основного поля при загрузке
+            if (tenantIdInput.value) {
+                historyTenantIdInput.value = tenantIdInput.value;
+            }
+            tenantIdInput.addEventListener('change', () => { // Обновляем и при изменении основного
+                if (tenantIdInput.value) {
+                    historyTenantIdInput.value = tenantIdInput.value;
+                }
+            });
+             // Авто-заполняем user_id для удобства
+            if (chatUserId) { 
+                 historyUserIdInput.value = chatUserId;
+            }
+        };
 
     </script>
      <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>

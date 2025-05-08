@@ -36,10 +36,16 @@ def get_original_filial_name(normalized_name: str, tenant_data: List[Dict[str, A
 # --- Определения Классов Функций ---
 
 class FindEmployees(BaseModel):
-    """Модель для поиска сотрудников по различным критериям."""
-    employee_name: Optional[str] = Field(default=None, description="Часть или полное ФИО сотрудника")
-    service_name: Optional[str] = Field(default=None, description="Точное или частичное название услуги")
-    filial_name: Optional[str] = Field(default=None, description="Точное название филиала")
+    """
+    Находит сотрудников.
+    - Если указан ТОЛЬКО 'filial_name', возвращает ВСЕХ сотрудников этого филиала.
+    - Можно также дополнительно фильтровать по 'employee_name' (ФИО сотрудника).
+    - Можно также дополнительно фильтровать по 'service_name' (если нужно найти, кто оказывает КОНКРЕТНУЮ УСЛУГУ).
+    - НЕ используйте эту функцию для поиска по КАТЕГОРИИ услуг. Для категорий есть FindSpecialistsByServiceOrCategoryAndFilial.
+    """
+    employee_name: Optional[str] = Field(default=None, description="Часть или полное ФИО сотрудника для фильтрации (опционально)")
+    service_name: Optional[str] = Field(default=None, description="Точное или частичное название КОНКРЕТНОЙ услуги для фильтрации (опционально)")
+    filial_name: Optional[str] = Field(default=None, description="Точное название филиала. Если указано только это поле, вернет ВСЕХ сотрудников филиала.")
 
     def process(self, tenant_data_docs: Optional[List[Document]] = None, raw_data: Optional[List[Dict]] = None) -> str:
         tenant_data = raw_data
@@ -94,8 +100,6 @@ class FindEmployees(BaseModel):
                  employees_info[e_id]['filials'].add(f_name)
 
         response_parts = []
-        output_limit = 10 # Лимит на количество выводимых сотрудников
-        items_shown_count = 0
         total_found_employees = 0
 
         sorted_employees = sorted(employees_info.values(), key=lambda x: normalize_text(x.get('name'), keep_spaces=True))
@@ -111,27 +115,15 @@ class FindEmployees(BaseModel):
             if norm_filial_name and not filials: continue
 
             total_found_employees += 1
-            if items_shown_count < output_limit:
-                service_str = f"   Услуги: {', '.join(services)}" if services else ""
-                filial_str = f"   Филиалы: {', '.join(filials)}" if filials else ""
-                emp_info = f"- {name}"
-                if filial_str: emp_info += f"\n{filial_str}"
-                if service_str: emp_info += f"\n{service_str}"
-                response_parts.append(emp_info)
-                items_shown_count += 1
+            emp_info = f"- {name}"
+            response_parts.append(emp_info)
 
         if total_found_employees == 0:
              return "Сотрудники найдены по части критериев, но ни один не соответствует всем условиям одновременно."
 
-        header_message = f"Найдено {total_found_employees} сотрудник(ов)."
-        if items_shown_count < total_found_employees :
-            header_message += f" Показаны первые {items_shown_count}:"
-        else:
-            header_message += " Все найденные сотрудники:"
+        header_message = f"Найдено {total_found_employees} сотрудник(ов). Все найденные сотрудники:"
 
         final_response = [header_message] + response_parts
-        if total_found_employees > items_shown_count:
-             final_response.append(f"\n... (и еще {total_found_employees - items_shown_count} сотрудник(ов). Уточните запрос для более точного списка или попросите показать остальных.)")
 
         return "\n".join(final_response)
 
@@ -545,8 +537,13 @@ class FindServiceLocations(BaseModel):
 
 
 class FindSpecialistsByServiceOrCategoryAndFilial(BaseModel):
-    """Модель для поиска специалистов по услуге/категории и филиалу."""
-    query_term: str = Field(description="Название услуги ИЛИ категории")
+    """
+    Находит специалистов в УКАЗАННОМ 'filial_name', которые предоставляют УСЛУГУ или относятся к КАТЕГОРИИ УСЛУГ, указанной в 'query_term'.
+    - 'query_term' ДОЛЖЕН БЫТЬ названием КОНКРЕТНОЙ услуги или КОНКРЕТНОЙ категории.
+    - НЕ используйте эту функцию, если нужно получить ВСЕХ сотрудников филиала (для этого используйте FindEmployees только с параметром filial_name).
+    - НЕ передавайте в 'query_term' общие слова вроде "специалисты", "врачи" и т.п. – только названия услуг/категорий.
+    """
+    query_term: str = Field(description="Название КОНКРЕТНОЙ услуги ИЛИ КОНКРЕТНОЙ категории")
     filial_name: str = Field(description="Точное название филиала")
 
     def process(self, tenant_data_docs: Optional[List[Document]] = None, raw_data: Optional[List[Dict]] = None) -> str:
@@ -596,18 +593,12 @@ class FindSpecialistsByServiceOrCategoryAndFilial(BaseModel):
              return f"Услуга/категория '{self.query_term}' найдена в филиале '{original_filial_name_from_db}', но специалисты для нее не указаны."
 
         sorted_specialists = sorted(list(specialists), key=lambda s: normalize_text(s, keep_spaces=True))
-        output_limit = 15
         total_specialists = len(sorted_specialists)
 
-        response_message = f"В филиале '{original_filial_name_from_db}' по запросу '{self.query_term}' найдено {total_specialists} специалист(ов)."
-        if total_specialists > output_limit:
-            response_message += f" Показаны первые {output_limit}:"
+        response_message = f"В филиале '{original_filial_name_from_db}' по запросу '{self.query_term}' найдено {total_specialists} специалист(ов). Все найденные специалисты:"
         
         response_parts = [response_message]
-        response_parts.extend([f"- {s}" for s in sorted_specialists[:output_limit]])
-
-        if total_specialists > output_limit:
-             response_parts.append(f"\n... (и еще {total_specialists - output_limit} специалист(ов))")
+        response_parts.extend([f"- {s}" for s in sorted_specialists])
 
         return "\n".join(response_parts)
 

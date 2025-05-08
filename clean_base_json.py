@@ -6,15 +6,10 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Слова-маркеры для удаления (без учета регистра)
-GARBAGE_MARKERS = ["test", "arrr","тест","Ожидание"]
+GARBAGE_MARKERS = ["Сабина Ахмедова Салмановна","Селима Муталиева  Андарбековна","Юлия Пигуль Сергеевна","Юрий Бобров Александрович"]
 
-# Путь к основному файлу данных (ВАЖНО: убедитесь, что это правильный путь)
-# Используем абсолютный путь для надежности при запуске из разных мест
-# (хотя в данном случае скрипт будет лежать рядом)
+
 FILE_PATH = "/home/erik/matrixai/base/medyumed.2023-04-24.json" 
-# Если нужно, можно создать бэкап автоматически
-# BACKUP_FILE_PATH = "/home/erik/matrixai/base/medyumed.2023-04-24.json.backup"
-
 
 def contains_garbage(item: dict, markers: list) -> bool:
     """
@@ -75,8 +70,6 @@ def clean_json_data(file_path: str, garbage_markers: list) -> bool:
     original_count = len(data)
     logging.info(f"Исходное количество записей: {original_count}")
 
-    # Фильтрация данных
-    # Создаем новый список, чтобы не изменять итерируемый объект
     cleaned_data = [item for item in data if not contains_garbage(item, garbage_markers)]
     
     removed_count = original_count - len(cleaned_data)
@@ -85,11 +78,10 @@ def clean_json_data(file_path: str, garbage_markers: list) -> bool:
         logging.info(f"Будет удалено записей: {removed_count}")
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(cleaned_data, f, ensure_ascii=False, indent=2) # indent=2 для читаемости
+                json.dump(cleaned_data, f, ensure_ascii=False, indent=2) 
             logging.info(f"Файл {file_path} успешно очищен и перезаписан. Новое количество записей: {len(cleaned_data)}")
         except Exception as e:
             logging.error(f"Не удалось записать очищенные данные в файл {file_path}: {e}")
-            # Попытка восстановить из бэкапа в случае ошибки записи
             if os.path.exists(backup_file_path):
                 try:
                     import shutil

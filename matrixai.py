@@ -82,7 +82,7 @@ try:
     chat_model = ChatDeepSeek(
         model=DEEPSEEK_CHAT_MODEL,
         api_key=DEEPSEEK_API_KEY,
-        temperature=0,
+        temperature=0.1,
         max_tokens=4096,
     )
     logger.info(f"Чат модель DeepSeek '{DEEPSEEK_CHAT_MODEL}' инициализирована.")
@@ -344,7 +344,7 @@ SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ 
 - Внимательно проанализируй ПОЛНУЮ ИСТОРИЮ ДИАЛОГА (chat_history).
 - ИСПОЛЬЗУЙ КОНТЕКСТ ИСТОРИИ! Не переспрашивай.
 - ЗАПОМИНАЙ ИМЯ ПОЛЬЗОВАТЕЛЯ, если он представился.
-
+Всегда используй функции для уточнения информации кроме случаяв когда клиент просит что-то посветовать или рассказать о чем-то
 ВЫБОР МЕЖДУ RAG, FUNCTION CALLING, ПАМЯТЬЮ ДИАЛОГА ИЛИ ПРЯМЫМ ОТВЕТОМ:
 - ПАМЯТЬ ДИАЛОГА: Для ответов на вопросы, связанные с предыдущим контекстом (местоимения "он/она/это", короткие вопросы "где?", "цена?", "кто?"), и для вопросов о самом пользователе.
 - RAG (Поиск по базе знаний): Используй ТОЛЬКО для ЗАПРОСОВ **ОПИСАНИЯ** услуг, врачей ИЛИ **ОБЩЕЙ ИНФОРМАЦИИ О КЛИНИКЕ** (например, "расскажи о компании", "какой у вас подход?", "сколько филиалов?"). Я предоставлю контекст. Синтезируй ответ на его основе.
@@ -352,10 +352,11 @@ SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ 
 - ПРЯМОЙ ОТВЕТ: Для приветствий, прощаний, простых уточнений или вопросов не по теме.
 
 ПРАВИЛА FUNCTION CALLING:
+- **Приоритет над RAG для списков и конкретных данных:** Если запрос касается получения СПИСКА (услуг сотрудника, филиалов сотрудника, цен, списка сотрудников по критерию и т.д.) или КОНКРЕТНЫХ ДАННЫХ, ВЫЗОВ СООТВЕТСТВУЮЩЕГО ИНСТРУМЕНТА ЯВЛЯЕТСЯ ОБЯЗАТЕЛЬНЫМ, ДАЖЕ ЕСЛИ RAG-КОНТЕКСТ СОДЕРЖИТ ПОХОЖУЮ ИНФОРМАЦИЮ. Это гарантирует использование актуальных данных и форматирования из инструмента.
 - **Обязательность вызова для списков:** Если пользователь спрашивает список (услуг, врачей, филиалов, категорий) или просит найти что-то по критериям, ТЫ ОБЯЗАН ВЫЗВАТЬ СООТВЕТСТВУЮЩИЙ ИНСТРУМЕНТ. Особенно:
-    - Для вопроса о ВСЕХ филиалах сотрудника ('где еще работает?', 'в каких филиалах?') -> ОБЯЗАТЕЛЬНО вызывай `list_employee_filials`.
-    - Для вопроса о ВСЕХ услугах сотрудника -> ОБЯЗАТЕЛЬНО вызывай `get_employee_services`.
-    - Для вопроса о ЦЕНЕ КОНКРЕТНОЙ услуги -> ОБЯЗАТЕЛЬНО вызывай `get_service_price`.
+    - Для вопроса о ВСЕХ филиалах сотрудника ('где еще работает?', 'в каких филиалах?') -> ОБЯЗАТЕЛЬНО вызывай `list_employee_filials_tool`.
+    - Для вопроса о ВСЕХ услугах сотрудника (например, "какие услуги выполняет ХХХ?", "чем занимается YYY?") -> ОБЯЗАТЕЛЬНО вызывай `get_employee_services_tool`. Даже если RAG-контекст содержит упоминания или частичный список услуг этого сотрудника (например, в его общем описании), для получения ПОЛНОГО и ТОЧНОГО списка услуг используй ИСКЛЮЧИТЕЛЬНО этот инструмент.
+    - Для вопроса о ЦЕНЕ КОНКРЕТНОЙ услуги -> ОБЯЗАТЕЛЬНО вызывай `get_service_price_tool`.
 - Точность Параметров: Извлекай параметры ТОЧНО из запроса и ИСТОРИИ.
 - Не Выдумывай Параметры: Если обязательного параметра нет, НЕ ВЫЗЫВАЙ функцию, а вежливо попроси уточнить.
 - ОБРАБОТКА НЕУДАЧНЫХ ВЫЗОВОВ: Если инструмент вернул ошибку или 'не найдено', НЕ ПЫТАЙСЯ вызвать его с теми же аргументами. Сообщи пользователю или предложи альтернативу.
@@ -370,7 +371,7 @@ SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ 
 ВАЖНО: Всегда сначала анализируй историю и цель пользователя. Реши, нужен ли ответ из памяти, RAG, вызов функции или простой ответ. Действуй соответственно.
 """
 
-# --- Custom Redis Chat History with Tenant ID ---
+
 
 class TenantAwareRedisChatMessageHistory(BaseChatMessageHistory):
     """Хранилище истории сообщений в Redis с учетом tenant_id."""
@@ -500,7 +501,7 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
          return "Ошибка: Некорректный объект эмбеддингов."
 
     try:
-        # Используем обертку при получении коллекции
+
         chroma_collection = chroma_client_global.get_collection(
             name=collection_name,
             embedding_function=embeddings_wrapper # <--- Используем обертку
@@ -513,14 +514,12 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         )
         chroma_retriever = chroma_vectorstore.as_retriever(search_kwargs={"k": search_k_global})
         logger.info(f"Chroma ретривер для коллекции '{collection_name}' (tenant: {tenant_id}) получен.")
-    except ValueError as e: # Ловим ValueError от Chroma, если сигнатура все еще не та
+    except ValueError as e: 
         logger.error(f"Ошибка ChromaDB при получении коллекции или создании ретривера '{collection_name}' для тенанта {tenant_id}: {e}", exc_info=True)
         # Возвращаем более конкретную ошибку
         return f"Ошибка: Проблема совместимости с базой знаний ChromaDB для филиала '{tenant_id}'. {e}"
     except Exception as e:
         logger.error(f"Не удалось получить Chroma коллекцию или ретривер '{collection_name}' для тенанта {tenant_id}: {e}", exc_info=True)
-        # Можно вернуть ошибку или продолжить без Chroma?
-        # Пока возвращаем ошибку, т.к. RAG важен
         return f"Ошибка: Не удалось получить доступ к базе знаний для филиала '{tenant_id}'."
 
     if not bm25_retriever:
@@ -622,7 +621,7 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
     tool_func_to_schema_map = {
         find_employees_tool: FindEmployeesArgs,
         get_service_price_tool: GetServicePriceArgs,
-        list_filials_tool: None, # Нет аргументов
+        list_filials_tool: None,
         get_employee_services_tool: GetEmployeeServicesArgs,
         check_service_in_filial_tool: CheckServiceInFilialArgs,
         compare_service_price_in_filials_tool: CompareServicePriceInFilialsArgs,
@@ -631,7 +630,7 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         list_services_in_category_tool: ListServicesInCategoryArgs,
         list_services_in_filial_tool: ListServicesInFilialArgs,
         find_services_in_price_range_tool: FindServicesInPriceRangeArgs,
-        list_all_categories_tool: None, # Нет аргументов
+        list_all_categories_tool: None, 
         list_employee_filials_tool: ListEmployeeFilialsArgs,
     }
 
@@ -793,28 +792,15 @@ agent_with_history = RunnableWithMessageHistory(
 
 logger.info("Основной Runnable агент с историей и RAG создан.")
 
-# --- Дополнительные функции (если нужны) ---
-# def clear_session_history(session_id: str):
-#     # Эта логика теперь внутри get_tenant_aware_history или redis_history
-#     pass
-
-# def get_active_session_count():
-#     # Эта логика, вероятно, должна быть в redis_history
-#     return redis_history.get_active_session_count() if hasattr(redis_history, 'get_active_session_count') else 0
-
-# --- Класс-обертка для совместимости эмбеддингов ---
 class ChromaGigaEmbeddingsWrapper(EmbeddingFunction):
     def __init__(self, gigachat_embeddings: GigaChatEmbeddings):
         self._gigachat_embeddings = gigachat_embeddings
         if not hasattr(self._gigachat_embeddings, 'embed_documents'):
              raise ValueError("Предоставленный объект эмбеддингов не имеет метода 'embed_documents'")
-        # Проверяем наличие embed_query
         if not hasattr(self._gigachat_embeddings, 'embed_query'):
              raise ValueError("Предоставленный объект эмбеддингов не имеет метода 'embed_query'")
 
-    def __call__(self, input: Documents) -> Embeddings:
-        # Вызываем метод embed_documents из объекта GigaChatEmbeddings
-        # LangChain embed_documents ожидает List[str], а Chroma передает Documents (List[str])
+    def __call__(self, input: Documents) -> Embeddings:         
         embeddings = self._gigachat_embeddings.embed_documents(input)
         # Возвращаем результат в формате, ожидаемом Chroma (List[List[float]])
         return embeddings
