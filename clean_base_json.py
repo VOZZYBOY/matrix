@@ -2,7 +2,7 @@ import json
 import os
 import logging
 
-# Настройка логирования
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Слова-маркеры для удаления (без учета регистра)
