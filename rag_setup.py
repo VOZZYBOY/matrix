@@ -6,6 +6,7 @@ import logging
 import shutil
 import glob
 from typing import List, Dict, Any, Optional, Tuple
+import re
 
 # --- LangChain Imports ---
 from langchain_core.documents import Document
@@ -28,9 +29,70 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 TENANT_COLLECTION_PREFIX = "tenant_"
+SERVICE_DETAILS_FILE = "base/service_details.json" # <--- ДОБАВЛЕНО: Путь к файлу с деталями услуг
+
+# --- Начало: Новая функция для загрузки деталей услуг ---
+def load_service_details(file_path: str = SERVICE_DETAILS_FILE) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    """
+    Загружает детали услуг (показания, противопоказания) из JSON-файла.
+    Ключом в словаре будет кортеж (нормализованное_имя_услуги, нормализованное_имя_категории).
+    """
+    service_details_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    try:
+        if not os.path.exists(file_path):
+            logger.warning(f"Файл с деталями услуг '{file_path}' не найден. Показания/противопоказания не будут загружены.")
+            return service_details_map
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        if not isinstance(data, list):
+            logger.error(f"Файл '{file_path}' должен содержать список объектов услуг. Получен: {type(data)}")
+            return service_details_map
+
+        for service_info in data:
+            if not isinstance(service_info, dict):
+                logger.warning(f"Пропуск элемента не-словаря в файле деталей услуг: {service_info}")
+                continue
+
+            service_name = service_info.get("service_name")
+            category_name = service_info.get("category")
+            indications = service_info.get("indications")
+            contraindications = service_info.get("contraindications")
+
+            if not service_name or not category_name:
+                logger.warning(f"Пропуск услуги без имени или категории в файле деталей: {service_info}")
+                continue
+
+            # Используем ту же нормализацию, что и для основных данных
+            # (для услуг - с сохранением пробелов, для категорий - тоже, т.к. они могут быть многословными)
+            norm_service_name = normalize_text(service_name, keep_spaces=True)
+            norm_category_name = normalize_text(category_name, keep_spaces=True)
+
+            key = (norm_service_name, norm_category_name)
+            details = {}
+            if isinstance(indications, list) and indications:
+                details["indications"] = indications
+            if isinstance(contraindications, list) and contraindications:
+                details["contraindications"] = contraindications
+            
+            if details: # Добавляем, только если есть что добавить
+                if key in service_details_map:
+                    logger.warning(f"Дублирующаяся запись для услуги '{service_name}' в категории '{category_name}' в файле деталей. Используется первая.")
+                else:
+                    service_details_map[key] = details
+        
+        logger.info(f"Загружено {len(service_details_map)} записей с деталями услуг из '{file_path}'.")
+
+    except Exception as e:
+        logger.error(f"Ошибка загрузки или обработки файла деталей услуг '{file_path}': {e}", exc_info=True)
+    return service_details_map
+
+# --- Конец: Новая функция для загрузки деталей услуг ---
+
 
 # --- Функция предобработки данных из JSON (услуги/сотрудники) ---
-def preprocess_for_rag_v2(data: List[Dict[str, Any]]) -> List[Document]:
+def preprocess_for_rag_v2(data: List[Dict[str, Any]], service_details_map: Dict[Tuple[str, str], Dict[str, Any]]) -> List[Document]:
     """Готовит документы по услугам и сотрудникам из JSON для RAG."""
     services_data = {}
     employees_data = {}
@@ -56,6 +118,10 @@ def preprocess_for_rag_v2(data: List[Dict[str, Any]]) -> List[Document]:
             current_desc = services_data[srv_id].get("description", "")
             if new_desc and new_desc.lower() not in ('', 'null', 'нет описания') and len(new_desc) > len(current_desc):
                 services_data[srv_id]["description"] = new_desc
+            # --- ДОБАВЛЕНО: Сохраняем оригинальное имя категории и услуги для сопоставления с service_details.json ---
+            services_data[srv_id]["original_service_name"] = item.get("serviceName", "Без названия")
+            services_data[srv_id]["original_category_name"] = item.get("categoryName", "Без категории")
+            # --- КОНЕЦ ДОБАВЛЕНИЯ ---
 
         # Обработка сотрудников
         emp_id = item.get("employeeId")
@@ -79,6 +145,26 @@ def preprocess_for_rag_v2(data: List[Dict[str, Any]]) -> List[Document]:
            not info.get("description") or info["description"].lower() in ('', 'null', 'нет описания'):
             continue
         text_content = f"Услуга: {info['name']}\nКатегория: {info['category']}\nОписание: {info['description']}"
+        
+        # --- ДОБАВЛЕНО: Попытка обогатить данными из service_details_map ---
+        norm_s_name_lookup = normalize_text(info.get("original_service_name"), keep_spaces=True)
+        norm_cat_name_lookup = normalize_text(info.get("original_category_name"), keep_spaces=True)
+        service_key = (norm_s_name_lookup, norm_cat_name_lookup)
+        
+        if service_details_map and service_key in service_details_map:
+            details = service_details_map[service_key]
+            indications_text = ""
+            if details.get("indications"):
+                indications_text = "\nПоказания: " + "; ".join(details["indications"])
+            contraindications_text = ""
+            if details.get("contraindications"):
+                contraindications_text = "\nПротивопоказания: " + "; ".join(details["contraindications"])
+            
+            if indications_text or contraindications_text:
+                text_content += indications_text + contraindications_text
+                logger.debug(f"Добавлены показания/противопоказания для услуги '{info['name']}' категории '{info['category']}'.")
+        # --- КОНЕЦ ДОБАВЛЕНИЯ ---
+
         metadata = {"id": f"srv_{srv_id}", "type": "service", "name": info['name'], "category": info['category'], "source": "base_json"}
         documents.append(Document(page_content=text_content, metadata=metadata))
 
@@ -97,7 +183,7 @@ def preprocess_for_rag_v2(data: List[Dict[str, Any]]) -> List[Document]:
 
 
 # --- Функция загрузки документов одного тенанта из base ---
-def load_tenant_base_data(tenant_id: str, data_path: str) -> Tuple[List[Document], Optional[List[Dict[str, Any]]]]:
+def load_tenant_base_data(tenant_id: str, data_path: str, service_details_map: Dict[Tuple[str, str], Dict[str, Any]]) -> Tuple[List[Document], Optional[List[Dict[str, Any]]]]:
     """Загружает документы услуг/сотрудников одного тенанта из JSON файла в 'base'."""
     documents = []
     raw_data = []
@@ -108,7 +194,7 @@ def load_tenant_base_data(tenant_id: str, data_path: str) -> Tuple[List[Document
         if not raw_data: logger.warning(f"Файл данных '{data_path}' пуст.")
         else: logger.info(f"Загружено {len(raw_data)} записей из {data_path} для тенанта {tenant_id}.")
 
-        documents = preprocess_for_rag_v2(raw_data)
+        documents = preprocess_for_rag_v2(raw_data, service_details_map)
     except Exception as e:
         logger.error(f"Ошибка загрузки базовых данных тенанта из {data_path}: {e}", exc_info=True)
         raw_data = []
@@ -237,7 +323,8 @@ def initialize_rag(
     Optional[GigaChatEmbeddings],
     Dict[str, BM25Retriever], # Карта tenant_id -> BM25Retriever
     Dict[str, List[Document]], # <--- Карта tenant_id -> List[Document] (объединенные)
-    Dict[str, List[Dict]]      # <--- ИЗМЕНЕНО: Карта tenant_id -> List[Dict] (сырые данные)
+    Dict[str, List[Dict]],      # <--- ИЗМЕНЕНО: Карта tenant_id -> List[Dict] (сырые данные)
+    Dict[Tuple[str, str], Dict[str, Any]] # <--- ДОБАВЛЕНО: Карта деталей услуг
 ]:
     """
     Инициализирует RAG-систему:
@@ -258,14 +345,15 @@ def initialize_rag(
         force_recreate_chroma: Если True, удалит все существующие коллекции Chroma и создаст заново.
 
     Returns:
-        Tuple: (chroma_client, embeddings_object, bm25_retrievers_map, tenant_documents_map, tenant_raw_data_map)
-               Или (None, None, {}, {}, {}) в случае критической ошибки.
+        Tuple: (chroma_client, embeddings_object, bm25_retrievers_map, tenant_documents_map, tenant_raw_data_map, service_details_map)
+               Или (None, None, {}, {}, {}, {}) в случае критической ошибки.
     """
     embeddings_object = None
     chroma_client = None
     bm25_retrievers_map: Dict[str, BM25Retriever] = {}
     tenant_documents_map: Dict[str, List[Document]] = {} # <--- Инициализируем словарь для документов
     tenant_raw_data_map: Dict[str, List[Dict]] = {} # <--- ИЗМЕНЕНО: Словарь для сырых данных по тенантам
+    service_details_map_loaded: Dict[Tuple[str, str], Dict[str, Any]] = {} # <--- ДОБАВЛЕНО
 
     # --- Инициализация эмбеддингов и Chroma клиента ---
     try:
@@ -276,7 +364,7 @@ def initialize_rag(
         logger.info(f"Эмбеддинги GigaChat ({embedding_model}) инициализированы.")
     except Exception as e:
         logger.critical(f"Критическая ошибка инициализации эмбеддингов: {e}", exc_info=True)
-        return None, None, {}, {}, {} # <-- ИЗМЕНЕНО: возвращаем пустой словарь
+        return None, None, {}, {}, {}, {} # <-- ИЗМЕНЕНО: возвращаем пустой словарь
 
     try:
         chroma_client = chromadb.PersistentClient(path=chroma_persist_dir)
@@ -300,16 +388,21 @@ def initialize_rag(
 
     except Exception as e:
         logger.critical(f"Критическая ошибка инициализации ChromaDB клиента: {e}", exc_info=True)
-        return None, embeddings_object, {}, {}, {} # <-- ИЗМЕНЕНО: возвращаем пустой словарь
+        return None, embeddings_object, {}, {}, {}, {} # <-- ИЗМЕНЕНО: возвращаем пустой словарь
+
+    # --- ДОБАВЛЕНО: Загрузка деталей услуг ---
+    try:
+        service_details_map_loaded = load_service_details() # Использует SERVICE_DETAILS_FILE по умолчанию
+    except Exception as e:
+        logger.error(f"Не удалось загрузить service_details.json: {e}. Продолжение без дополнительных деталей услуг.", exc_info=True)
+        # service_details_map_loaded останется пустым, что безопасно для дальнейшей работы
 
     # --- Сканирование и индексация данных тенантов ---
     tenant_files = glob.glob(os.path.join(data_dir, "*.json"))
     if not tenant_files:
         logger.warning(f"Не найдено JSON файлов тенантов в директории: {data_dir}")
         # Если файлов нет, возвращаем инициализированные клиент и эмбеддинги
-        return chroma_client, embeddings_object, {}, {}, {} # <-- ИЗМЕНЕНО: возвращаем пустой словарь
-    else:
-        logger.info(f"Найдено {len(tenant_files)} файлов тенантов для обработки.")
+        return chroma_client, embeddings_object, {}, {}, {}, service_details_map_loaded # <-- ИЗМЕНЕНО
 
     for tenant_file_path in tenant_files:
         base_name = os.path.basename(tenant_file_path)
@@ -322,7 +415,7 @@ def initialize_rag(
         logger.info(f"--- Обработка тенанта: {tenant_id} (Коллекция: {collection_name}) ---")
 
         # 1. Загружаем базовые данные (услуги/сотрудники) из base/
-        base_docs, tenant_raw_data = load_tenant_base_data(tenant_id, tenant_file_path)
+        base_docs, tenant_raw_data = load_tenant_base_data(tenant_id, tenant_file_path, service_details_map_loaded)
         if tenant_raw_data:
             # all_raw_base_data.extend(tenant_raw_data) # Сохраняем сырые данные <-- УДАЛЕНО
             tenant_raw_data_map[tenant_id] = tenant_raw_data # <-- ДОБАВЛЕНО: Сохраняем сырые данные в карту
@@ -370,7 +463,7 @@ def initialize_rag(
     logger.info(f"=== Инициализация RAG завершена. Обработано тенантов: {len(bm25_retrievers_map)} ===")
     # Возвращаем карту BM25 ретриверов и карту документов тенантов
     # return chroma_client, embeddings_object, bm25_retrievers_map, tenant_documents_map, all_raw_base_data <-- УДАЛЕНО
-    return chroma_client, embeddings_object, bm25_retrievers_map, tenant_documents_map, tenant_raw_data_map # <-- ИЗМЕНЕНО
+    return chroma_client, embeddings_object, bm25_retrievers_map, tenant_documents_map, tenant_raw_data_map, service_details_map_loaded # <-- ИЗМЕНЕНО
 
 # --- Начало: Новая функция для переиндексации данных одного тенанта ---
 
@@ -381,6 +474,7 @@ def reindex_tenant_specific_data(
     bm25_retrievers_map: Dict[str, BM25Retriever],
     tenant_documents_map: Dict[str, List[Document]],
     tenant_raw_data_map: Dict[str, List[Dict[str, Any]]], # Используем List[Dict[str, Any]] для raw_data
+    service_details_map: Dict[Tuple[str, str], Dict[str, Any]], # <--- ДОБАВЛЕНО
     base_data_dir: str, # Путь к директории 'base'
     chunk_size: int,
     chunk_overlap: int,
@@ -397,6 +491,7 @@ def reindex_tenant_specific_data(
         bm25_retrievers_map: Глобальная карта BM25 ретриверов (будет обновлена).
         tenant_documents_map: Глобальная карта документов тенантов (будет обновлена).
         tenant_raw_data_map: Глобальная карта сырых данных тенантов (будет обновлена).
+        service_details_map: Глобальная карта деталей услуг (будет обновлена).
         base_data_dir: Путь к директории с базовыми JSON файлами (например, 'base').
         chunk_size: Размер чанка для сплиттера.
         chunk_overlap: Перекрытие чанков.
@@ -423,7 +518,7 @@ def reindex_tenant_specific_data(
         current_tenant_raw_base_data = []
     else:
         # 1. Загружаем базовые данные (услуги/сотрудники) из base/
-        base_docs, current_tenant_raw_base_data = load_tenant_base_data(tenant_id, tenant_file_path)
+        base_docs, current_tenant_raw_base_data = load_tenant_base_data(tenant_id, tenant_file_path, service_details_map)
         if current_tenant_raw_base_data is None: # load_tenant_base_data может вернуть None для raw_data в случае ошибки
             current_tenant_raw_base_data = []
 
@@ -497,3 +592,27 @@ def reindex_tenant_specific_data(
     return True
 
 # --- Конец: Новая функция для переиндексации данных одного тенанта ---
+
+# --- ДОБАВЛЕНО: Функция нормализации текста (если еще не существует или импортирована глобально) ---
+# Поместим ее сюда, чтобы избежать проблем с circular import, если она используется только внутри rag_setup
+# Если она есть в другом общем модуле, лучше импортировать оттуда.
+# Для текущего контекста, предположим, что она нужна здесь или будет предоставлена.
+# Важно: если она уже есть где-то, этот блок нужно будет адаптировать.
+
+_text_normalize_pattern = re.compile(r'\s+')
+
+def normalize_text(text: Optional[str], keep_spaces: bool = False) -> str:
+    """
+    Приводит строку к нижнему регистру, удаляет дефисы и опционально пробелы.
+    Безопасно обрабатывает None, возвращая пустую строку.
+    """
+    if not text:
+        return ""
+    normalized = text.lower().replace("-", "")
+    if keep_spaces:
+        # Заменяем множественные пробелы на один и убираем пробелы по краям
+        normalized = _text_normalize_pattern.sub(' ', normalized).strip()
+    else:
+        normalized = normalized.replace(" ", "")
+    return normalized
+# --- КОНЕЦ ДОБАВЛЕНИЯ ФУНКЦИИ НОРМАЛИЗАЦИИ ---

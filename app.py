@@ -1,5 +1,3 @@
-# app.py (Пример использования matrixai_module.py)
-
 import logging
 import uvicorn
 import os
@@ -104,7 +102,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Clinic Assistant API (Module)",
     description="API для взаимодействия с ассистентом (использует matrixai)",
-    version="3.2.0", # Обновим версию
+    version="3.2.0", 
     lifespan=lifespan
 )
 app.add_middleware(

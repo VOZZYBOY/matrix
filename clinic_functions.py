@@ -68,7 +68,11 @@ class FindEmployees(BaseModel):
 
             emp_match = (not norm_emp_name or (norm_item_emp and norm_emp_name in norm_item_emp))
             filial_match = (not norm_filial_name or (norm_item_filial and norm_filial_name == norm_item_filial))
-            service_match = (not norm_service_name or (norm_item_service and norm_service_name in norm_item_service))
+            service_match = True # По умолчанию true, если norm_service_name не указан
+            if norm_service_name and norm_item_service: # Если и запрос, и услуга в базе существуют
+                service_match = (norm_service_name in norm_item_service) or (norm_item_service in norm_service_name)
+            elif norm_service_name and not norm_item_service: # Если запрос есть, а услуги в базе нет для этой строки
+                service_match = False
 
             if emp_match and service_match and filial_match:
                 filtered_data.append(item)
@@ -164,13 +168,19 @@ class GetServicePrice(BaseModel):
             category_name_match = False
             exact_match_flag = False
 
-            if norm_item_s_name and norm_search_term in norm_item_s_name:
-                 service_name_match = True
-                 exact_match_flag = (norm_search_term == norm_item_s_name)
+            if norm_item_s_name and norm_search_term: # Проверяем, что оба существуют
+                if (norm_search_term in norm_item_s_name) or (norm_item_s_name in norm_search_term):
+                    service_name_match = True
+                    exact_match_flag = (norm_search_term == norm_item_s_name)
 
-            if not service_name_match and norm_item_cat_name and norm_search_term in norm_item_cat_name:
-                 category_name_match = True
-                 exact_match_flag = (norm_search_term == norm_item_cat_name)
+            # Если по названию услуги не нашли, или нашли, но хотим проверить и категорию (если вдруг запрос соответствует и тому и другому)
+            # Лучше не делать elif, а проверять категорию независимо, если service_name_match не True или если хотим дать приоритет точному совпадению по услуге.
+            # Для упрощения текущей логики, оставим последовательную проверку, но с симметричным поиском.
+            if not service_name_match and norm_item_cat_name and norm_search_term: # Проверяем, что оба существуют
+                if (norm_search_term in norm_item_cat_name) or (norm_item_cat_name in norm_search_term):
+                    category_name_match = True
+                    # exact_match_flag для категории также проверяем
+                    exact_match_flag = (norm_search_term == norm_item_cat_name) 
 
             if service_name_match or category_name_match:
                 display_name = s_name_raw if s_name_raw else cat_name_raw
@@ -277,7 +287,7 @@ class GetEmployeeServices(BaseModel):
             return f"Для сотрудника '{found_employee_name}' не найдено услуг в базе данных."
 
         sorted_services = sorted(list(services), key=lambda s: normalize_text(s, keep_spaces=True))
-        output_limit = 25 # Увеличим лимит для услуг сотрудника
+        output_limit = 50 # Увеличим лимит для услуг сотрудника
         total_services = len(sorted_services)
         
         response_parts = [f"Сотрудник '{found_employee_name}' выполняет {total_services} услуг(и)."]
@@ -308,6 +318,7 @@ class CheckServiceInFilial(BaseModel):
         service_found_globally = False # Найдена ли услуга вообще где-либо
         service_found_in_target_filial = False
         found_service_canonical_name: Optional[str] = None # Каноническое имя найденной услуги
+        is_canonical_exact_match_to_query: bool = False # Флаг для канонического имени
         original_target_filial_name: Optional[str] = None # Оригинальное имя целевого филиала
         
         # Сначала найдем оригинальное имя целевого филиала и проверим его существование
@@ -334,16 +345,28 @@ class CheckServiceInFilial(BaseModel):
             norm_item_s_name = normalize_text(s_name_raw, keep_spaces=True)
             norm_item_f_name = normalize_text(f_name_raw_item)
 
-            if norm_service_search in norm_item_s_name:
+            # Симметричный поиск услуги
+            service_match_current_item = False
+            if norm_item_s_name and norm_service_search: # Убедимся, что оба существуют
+                service_match_current_item = (norm_service_search in norm_item_s_name) or \
+                                             (norm_item_s_name in norm_service_search)
+
+            if service_match_current_item and norm_item_f_name in valid_norm_filial_names_for_search:
                 service_found_globally = True
-                if found_service_canonical_name is None: # Запоминаем первое совпавшее каноничное имя услуги
-                    found_service_canonical_name = s_name_raw
-                # Проверка на неоднозначность названия услуги (если ищем "массаж", а нашли "массаж спины" и "общий массаж")
-                elif normalize_text(found_service_canonical_name, keep_spaces=True) != norm_item_s_name and \
-                     normalize_text(self.service_name, keep_spaces=True) != normalize_text(found_service_canonical_name, keep_spaces=True): # Пропускаем, если уже нашли точное
-                     logger.warning(f"Найдено несколько услуг, подходящих под '{self.service_name}'. Запрос неоднозначен.")
-                     return f"Найдено несколько услуг, содержащих '{self.service_name}'. Пожалуйста, уточните название услуги."
                 
+                current_is_exact_match_to_query = (norm_item_s_name == norm_service_search)
+                if found_service_canonical_name is None:
+                    found_service_canonical_name = s_name_raw
+                    is_canonical_exact_match_to_query = current_is_exact_match_to_query
+                else:
+                    if current_is_exact_match_to_query and not is_canonical_exact_match_to_query:
+                        found_service_canonical_name = s_name_raw
+                        is_canonical_exact_match_to_query = True
+                    elif not current_is_exact_match_to_query and \
+                         not is_canonical_exact_match_to_query and \
+                         len(norm_item_s_name) > len(normalize_text(found_service_canonical_name, keep_spaces=True)):
+                        found_service_canonical_name = s_name_raw
+
                 if norm_item_f_name == norm_filial_search:
                     service_found_in_target_filial = True
                 else:
@@ -383,6 +406,7 @@ class CompareServicePriceInFilials(BaseModel):
 
         results: Dict[str, Dict[str, Any]] = {} 
         found_service_name_canonical: Optional[str] = None 
+        is_canonical_exact_match_to_query: bool = False # Флаг для канонического имени
 
         original_filial_names_map_db: Dict[str, str] = {} 
         all_norm_filials_in_db: Set[str] = set()
@@ -422,24 +446,29 @@ class CompareServicePriceInFilials(BaseModel):
             if norm_service_search in norm_item_s_name and norm_item_f_name in valid_norm_filial_names_for_search:
                 service_found_at_least_once = True
 
+                current_is_exact_match_to_query = (norm_item_s_name == norm_service_search)
                 if found_service_name_canonical is None:
                     found_service_name_canonical = s_name_raw
-                elif normalize_text(found_service_name_canonical, keep_spaces=True) != norm_item_s_name and \
-                     normalize_text(self.service_name, keep_spaces=True) != normalize_text(found_service_name_canonical, keep_spaces=True):
-                     logger.warning(f"Найдено несколько услуг, подходящих под '{self.service_name}'. Запрос неоднозначен.")
-                     return f"Найдено несколько услуг, содержащих '{self.service_name}'. Пожалуйста, уточните название услуги."
+                    is_canonical_exact_match_to_query = current_is_exact_match_to_query
+                else:
+                    if current_is_exact_match_to_query and not is_canonical_exact_match_to_query:
+                        found_service_name_canonical = s_name_raw
+                        is_canonical_exact_match_to_query = True
+                    elif not current_is_exact_match_to_query and \
+                         not is_canonical_exact_match_to_query and \
+                         len(norm_item_s_name) > len(normalize_text(found_service_name_canonical, keep_spaces=True)):
+                        found_service_name_canonical = s_name_raw
 
                 try: price = float(str(price_raw).replace(' ', '').replace(',', '.'))
                 except (ValueError, TypeError): continue
 
                 current_result = results.get(norm_item_f_name)
-                is_exact_match_for_service = (normalize_text(self.service_name, keep_spaces=True) == norm_item_s_name)
                 should_update = False
                 if not current_result:
                     should_update = True
-                elif is_exact_match_for_service and not current_result.get('exact_match'):
+                elif is_canonical_exact_match_to_query and not current_result.get('exact_match'):
                      should_update = True
-                elif is_exact_match_for_service == current_result.get('exact_match') and price < current_result.get('price', float('inf')):
+                elif is_canonical_exact_match_to_query == current_result.get('exact_match') and price < current_result.get('price', float('inf')):
                     should_update = True
 
                 if should_update:
@@ -447,7 +476,7 @@ class CompareServicePriceInFilials(BaseModel):
                         'original_filial_name_from_db': original_filial_names_map_db.get(norm_item_f_name, f_name_raw),
                         'price': price,
                         'found_service_name_for_price': s_name_raw, 
-                        'exact_match': is_exact_match_for_service
+                        'exact_match': is_canonical_exact_match_to_query
                     }
 
         if not service_found_at_least_once:
@@ -492,6 +521,7 @@ class FindServiceLocations(BaseModel):
         norm_service_search = normalize_text(self.service_name, keep_spaces=True)
         filials_with_service: Set[str] = set()
         found_service_canonical_name: Optional[str] = None
+        is_canonical_exact_match_to_query: bool = False # Флаг для канонического имени
         service_found_at_least_once = False
 
         for item in tenant_data:
@@ -500,15 +530,28 @@ class FindServiceLocations(BaseModel):
             if not s_name_raw or not f_name_raw: continue
             norm_item_s_name = normalize_text(s_name_raw, keep_spaces=True)
 
-            if norm_service_search in norm_item_s_name:
-                 service_found_at_least_once = True
-                 if found_service_canonical_name is None:
-                      found_service_canonical_name = s_name_raw
-                 elif normalize_text(found_service_canonical_name, keep_spaces=True) != norm_item_s_name and \
-                      normalize_text(self.service_name, keep_spaces=True) != normalize_text(found_service_canonical_name, keep_spaces=True):
-                       logger.warning(f"Найдено несколько услуг, подходящих под '{self.service_name}'. Запрос неоднозначен.")
-                       return f"Найдено несколько услуг, содержащих '{self.service_name}'. Пожалуйста, уточните название услуги."
-                 filials_with_service.add(f_name_raw)
+            service_match_current_item = False
+            if norm_item_s_name and norm_service_search: # Убедимся, что оба существуют
+                service_match_current_item = (norm_service_search in norm_item_s_name) or \
+                                             (norm_item_s_name in norm_service_search)
+
+            if service_match_current_item:
+                service_found_at_least_once = True
+                current_is_exact_match_to_query = (norm_item_s_name == norm_service_search)
+
+                if found_service_canonical_name is None:
+                    found_service_canonical_name = s_name_raw
+                    is_canonical_exact_match_to_query = current_is_exact_match_to_query
+                else:
+                    if current_is_exact_match_to_query and not is_canonical_exact_match_to_query:
+                        found_service_canonical_name = s_name_raw
+                        is_canonical_exact_match_to_query = True
+                    elif not current_is_exact_match_to_query and \
+                         not is_canonical_exact_match_to_query and \
+                         len(norm_item_s_name) > len(normalize_text(found_service_canonical_name, keep_spaces=True)):
+                        found_service_canonical_name = s_name_raw
+                
+                filials_with_service.add(f_name_raw)
 
         if not service_found_at_least_once:
             return f"Услуга, содержащая '{self.service_name}', не найдена ни в одном филиале."
@@ -582,8 +625,15 @@ class FindSpecialistsByServiceOrCategoryAndFilial(BaseModel):
             norm_item_s = normalize_text(s_name_raw, keep_spaces=True)
             norm_item_cat = normalize_text(cat_name_raw, keep_spaces=True)
 
-            if (norm_item_s and norm_query in norm_item_s) or \
-               (norm_item_cat and norm_query in norm_item_cat):
+            service_match = False
+            if norm_item_s and norm_query: # Услуга в базе не пустая И запрос не пустой
+                service_match = (norm_query in norm_item_s) or (norm_item_s in norm_query)
+            
+            category_match = False
+            if norm_item_cat and norm_query: # Категория в базе не пустая И запрос не пустой
+                category_match = (norm_query in norm_item_cat) or (norm_item_cat in norm_query)
+
+            if service_match or category_match:
                 service_or_category_found_in_filial = True
                 specialists.add(e_name_raw)
 
@@ -615,6 +665,7 @@ class ListServicesInCategory(BaseModel):
         norm_cat_search = normalize_text(self.category_name, keep_spaces=True)
         services_in_category: Dict[str, str] = {} 
         found_category_canonical_name: Optional[str] = None
+        is_canonical_exact_match_to_query: bool = False # Флаг для канонического имени категории
         category_found_globally = False
 
         for item in tenant_data:
@@ -623,14 +674,26 @@ class ListServicesInCategory(BaseModel):
             if not s_name_raw or not cat_name_raw: continue
             norm_item_cat = normalize_text(cat_name_raw, keep_spaces=True)
 
-            if norm_cat_search in norm_item_cat:
+            category_match_current_item = False
+            if norm_item_cat and norm_cat_search: # Убедимся, что оба существуют
+                category_match_current_item = (norm_cat_search in norm_item_cat) or \
+                                              (norm_item_cat in norm_cat_search)
+
+            if category_match_current_item:
                 category_found_globally = True
+                current_is_exact_match_to_query = (norm_item_cat == norm_cat_search)
+
                 if found_category_canonical_name is None:
-                     found_category_canonical_name = cat_name_raw
-                elif normalize_text(found_category_canonical_name, keep_spaces=True) != norm_item_cat and \
-                     normalize_text(self.category_name, keep_spaces=True) != normalize_text(found_category_canonical_name, keep_spaces=True):
-                     logger.warning(f"Найдено несколько категорий, подходящих под '{self.category_name}'. Запрос неоднозначен.")
-                     return f"Найдено несколько категорий, содержащих '{self.category_name}'. Пожалуйста, уточните название категории."
+                    found_category_canonical_name = cat_name_raw
+                    is_canonical_exact_match_to_query = current_is_exact_match_to_query
+                else:
+                    if current_is_exact_match_to_query and not is_canonical_exact_match_to_query:
+                        found_category_canonical_name = cat_name_raw
+                        is_canonical_exact_match_to_query = True
+                    elif not current_is_exact_match_to_query and \
+                         not is_canonical_exact_match_to_query and \
+                         len(norm_item_cat) > len(normalize_text(found_category_canonical_name, keep_spaces=True)):
+                        found_category_canonical_name = cat_name_raw
                 
                 norm_item_s = normalize_text(s_name_raw, keep_spaces=True)
                 if norm_item_s not in services_in_category:
@@ -821,22 +884,39 @@ class FindServicesInPriceRange(BaseModel):
              if not filial_exists: return f"Филиал '{self.filial_name}' не найден."
         
         original_category_filter_name_from_db = self.category_name
+        is_category_filter_exact_match: bool = False # Флаг для точного совпадения имени категории фильтра
+
         if norm_cat_filter:
-             category_exists = False
-             # Для категории ищем каноническое имя более тщательно
-             temp_found_cat_name: Optional[str] = None
-             for item_check in tenant_data:
-                  cat_name_raw_check = item_check.get("categoryName")
-                  if cat_name_raw_check and norm_cat_filter in normalize_text(cat_name_raw_check, keep_spaces=True):
-                       category_exists = True
-                       if temp_found_cat_name is None: # Берем первое совпавшее имя для отображения
-                           temp_found_cat_name = cat_name_raw_check
-                       # Если уже нашли точное совпадение по имени, оно приоритетнее
-                       if normalize_text(self.category_name, keep_spaces=True) == normalize_text(cat_name_raw_check, keep_spaces=True):
-                           temp_found_cat_name = cat_name_raw_check
-                           break 
-             if not category_exists: return f"Категория, содержащая '{self.category_name}', не найдена."
-             if temp_found_cat_name: original_category_filter_name_from_db = temp_found_cat_name
+            category_exists_in_db = False
+            temp_canonical_cat_name: Optional[str] = None
+            
+            for item_check in tenant_data:
+                cat_name_raw_check = item_check.get("categoryName")
+                if not cat_name_raw_check: continue
+                norm_cat_check = normalize_text(cat_name_raw_check, keep_spaces=True)
+
+                current_item_cat_match_filter = False
+                if norm_cat_check and norm_cat_filter: # Оба существуют
+                    current_item_cat_match_filter = (norm_cat_filter in norm_cat_check) or \
+                                                    (norm_cat_check in norm_cat_filter)
+
+                if current_item_cat_match_filter:
+                    category_exists_in_db = True
+                    current_is_exact = (norm_cat_check == norm_cat_filter)
+                    if temp_canonical_cat_name is None:
+                        temp_canonical_cat_name = cat_name_raw_check
+                        is_category_filter_exact_match = current_is_exact
+                    else:
+                        if current_is_exact and not is_category_filter_exact_match:
+                            temp_canonical_cat_name = cat_name_raw_check
+                            is_category_filter_exact_match = True
+                        elif not current_is_exact and \
+                             not is_category_filter_exact_match and \
+                             len(norm_cat_check) > len(normalize_text(temp_canonical_cat_name, keep_spaces=True)):
+                            temp_canonical_cat_name = cat_name_raw_check
+            
+            if not category_exists_in_db: return f"Категория, для которой применен фильтр ('{self.category_name}'), не найдена в базе."
+            if temp_canonical_cat_name: original_category_filter_name_from_db = temp_canonical_cat_name
 
 
         for item in tenant_data:
@@ -847,12 +927,19 @@ class FindServicesInPriceRange(BaseModel):
 
             if not s_name_raw or price_raw is None or price_raw == '': continue
 
+            # Фильтрация по категории (теперь симметричная)
             if norm_cat_filter:
                 norm_item_cat = normalize_text(cat_name_raw_item, keep_spaces=True) if cat_name_raw_item else ""
-                if norm_cat_filter not in norm_item_cat: continue
+                category_passes_filter = False
+                if norm_item_cat and norm_cat_filter: # Оба существуют
+                     category_passes_filter = (norm_cat_filter in norm_item_cat) or \
+                                              (norm_item_cat in norm_cat_filter)
+                if not category_passes_filter: continue
+            
+            # Фильтрация по филиалу (остается как есть, т.к. там обычно точное совпадение)
             if norm_filial_filter:
-                 norm_item_f = normalize_text(f_name_raw_item) if f_name_raw_item else ""
-                 if norm_item_f != norm_filial_filter: continue
+                norm_item_f = normalize_text(f_name_raw_item) if f_name_raw_item else ""
+                if norm_item_f != norm_filial_filter: continue
 
             try: price = float(str(price_raw).replace(' ', '').replace(',', '.'))
             except (ValueError, TypeError): continue

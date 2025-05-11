@@ -58,23 +58,23 @@ try:
         model=DEEPSEEK_CHAT_MODEL,
         api_key=DEEPSEEK_API_KEY,
         temperature=0.1,
-        max_tokens=4096,
+        max_tokens=8192,
     )
     logger.info(f"Чат модель DeepSeek '{DEEPSEEK_CHAT_MODEL}' инициализирована.")
 except Exception as e:
     logger.critical(f"Ошибка инициализации модели DeepSeek Chat: {e}", exc_info=True)
     exit()
-chroma_client_global: Optional[chromadb.ClientAPI] = None
-embeddings_object_global: Optional[GigaChatEmbeddings] = None
-bm25_retrievers_map_global: Dict[str, BM25Retriever] = {}
-tenant_documents_map_global: Dict[str, List[Document]] = {}
-tenant_raw_data_map_global: Dict[str, List[Dict]] = {}
+# Глобальные переменные для RAG компонентов (будут инициализированы при старте)
+CHROMA_CLIENT: Optional[chromadb.ClientAPI] = None
+EMBEDDINGS_GIGA: Optional[GigaChatEmbeddings] = None
+BM25_RETRIEVERS_MAP: Dict[str, BM25Retriever] = {}
+TENANT_DOCUMENTS_MAP: Dict[str, List[Document]] = {}
+TENANT_RAW_DATA_MAP: Dict[str, List[Dict[str, Any]]] = {}
+SERVICE_DETAILS_MAP_GLOBAL: Dict[Tuple[str, str], Dict[str, Any]] = {} # <--- ДОБАВЛЕНО: Глобальная карта деталей услуг
 search_k_global = 5
 def initialize_rag_components():
     """Инициализирует RAG компоненты и сохраняет их в глобальные переменные."""
-    global chroma_client_global, embeddings_object_global
-    global bm25_retrievers_map_global, tenant_documents_map_global
-    global tenant_raw_data_map_global
+    global CHROMA_CLIENT, EMBEDDINGS_GIGA, BM25_RETRIEVERS_MAP, TENANT_DOCUMENTS_MAP, TENANT_RAW_DATA_MAP, SERVICE_DETAILS_MAP_GLOBAL
     global search_k_global
     chunk_size = int(os.getenv("CHUNK_SIZE", 1000))
     chunk_overlap = int(os.getenv("CHUNK_OVERLAP", 200))
@@ -86,7 +86,8 @@ def initialize_rag_components():
         exit()
     logger.info("Запуск инициализации RAG компонентов...")
     try:
-        chroma_client, embeddings, bm25_map, tenant_docs_map, tenant_raw_map = rag_setup.initialize_rag(
+        chroma_client_init, embeddings_object_init, bm25_retrievers_init, \
+            tenant_docs_init, raw_data_init, service_details_map_init = rag_setup.initialize_rag(
             data_dir=data_dir_base,
             chroma_persist_dir=chroma_persist_dir_global,
             embedding_credentials=GIGACHAT_CREDENTIALS,
@@ -97,18 +98,19 @@ def initialize_rag_components():
             chunk_overlap=chunk_overlap,
             search_k=search_k_global
         )
-        if chroma_client and embeddings:
-            chroma_client_global = chroma_client
-            embeddings_object_global = embeddings
-            bm25_retrievers_map_global = bm25_map
-            tenant_documents_map_global = tenant_docs_map
-            tenant_raw_data_map_global = tenant_raw_map
+        if chroma_client_init and embeddings_object_init:
+            CHROMA_CLIENT = chroma_client_init
+            EMBEDDINGS_GIGA = embeddings_object_init
+            BM25_RETRIEVERS_MAP = bm25_retrievers_init
+            TENANT_DOCUMENTS_MAP = tenant_docs_init
+            TENANT_RAW_DATA_MAP = raw_data_init
+            SERVICE_DETAILS_MAP_GLOBAL = service_details_map_init
             logger.info(f"Инициализация RAG завершена. Загружено:")
-            logger.info(f"  - Chroma клиент: {'Да' if chroma_client_global else 'Нет'}")
-            logger.info(f"  - Embeddings: {'Да' if embeddings_object_global else 'Нет'}")
-            logger.info(f"  - BM25 ретриверы: {len(bm25_retrievers_map_global)} шт.")
-            logger.info(f"  - Карта документов тенантов: {len(tenant_documents_map_global)} тенантов.")
-            logger.info(f"  - Карта сырых данных тенантов: {len(tenant_raw_data_map_global)} тенантов.")
+            logger.info(f"  - Chroma клиент: {'Да' if CHROMA_CLIENT else 'Нет'}")
+            logger.info(f"  - Embeddings: {'Да' if EMBEDDINGS_GIGA else 'Нет'}")
+            logger.info(f"  - BM25 ретриверы: {len(BM25_RETRIEVERS_MAP)} шт.")
+            logger.info(f"  - Карта документов тенантов: {len(TENANT_DOCUMENTS_MAP)} тенантов.")
+            logger.info(f"  - Карта сырых данных тенантов: {len(TENANT_RAW_DATA_MAP)} тенантов.")
         else:
             logger.error("Не удалось полностью инициализировать RAG компоненты.")
             exit()
@@ -263,9 +265,14 @@ SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ 
 - ИСПОЛЬЗУЙ КОНТЕКСТ ИСТОРИИ! Не переспрашивай.
 - ЗАПОМИНАЙ ИМЯ ПОЛЬЗОВАТЕЛЯ, если он представился.
 Всегда используй функции для уточнения информации кроме случаяв когда клиент просит что-то посветовать или рассказать о чем-то
+
 ВЫБОР МЕЖДУ RAG, FUNCTION CALLING, ПАМЯТЬЮ ДИАЛОГА ИЛИ ПРЯМЫМ ОТВЕТОМ:
 - ПАМЯТЬ ДИАЛОГА: Для ответов на вопросы, связанные с предыдущим контекстом (местоимения "он/она/это", короткие вопросы "где?", "цена?", "кто?"), и для вопросов о самом пользователе.
 - RAG (Поиск по базе знаний): Используй ТОЛЬКО для ЗАПРОСОВ **ОПИСАНИЯ** услуг, врачей ИЛИ **ОБЩЕЙ ИНФОРМАЦИИ О КЛИНИКЕ** (например, "расскажи о компании", "какой у вас подход?", "сколько филиалов?"). Я предоставлю контекст. Синтезируй ответ на его основе.
+    - **НОВИНКА: Информация о показаниях и противопоказаниях**: Для некоторых услуг в RAG-контексте теперь может содержаться информация о ПОКАЗАНИЯХ и ПРОТИВОПОКАЗАНИЯХ.
+        - Если пользователь спрашивает общее описание услуги, ты можешь кратко упомянуть о наличии таких деталей (например, "...также у процедуры есть свои показания и противопоказания.") и предложить рассказать подробнее, если ему интересно.
+        - Если пользователь ЦЕЛЕНАПРАВЛЕННО спрашивает о показаниях или противопоказаниях к услуге, используй информацию из RAG-контекста для ответа.
+        - **ВАЖНО: НЕ ДАВАЙ МЕДИЦИНСКИХ СОВЕТОВ!** Не говори "вам это подойдет" или "вам это нельзя". Формулируй нейтрально: "Среди показаний к [Услуга] указываются...", "Противопоказаниями являются...". Всегда подчеркивай, что окончательное решение принимает врач.
 - FUNCTION CALLING (Вызов Инструментов): Используй ТОЛЬКО для запросов КОНКРЕТНЫХ ДАННЫХ: цены, списки врачей/услуг/филиалов, проверка наличия, сравнение цен, ПОЛНЫЙ список филиалов сотрудника. Используй правильный инструмент.
 - ПРЯМОЙ ОТВЕТ: Для приветствий, прощаний, простых уточнений или вопросов не по теме.
 
@@ -277,6 +284,7 @@ SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ 
     - Для вопроса о ЦЕНЕ КОНКРЕТНОЙ услуги -> ОБЯЗАТЕЛЬНО вызывай `get_service_price_tool`.
 - Точность Параметров: Извлекай параметры ТОЧНО из запроса и ИСТОРИИ.
 - Не Выдумывай Параметры: Если обязательного параметра нет, НЕ ВЫЗЫВАЙ функцию, а вежливо попроси уточнить.
+    - **ОСОБЕННО ВАЖНО для `find_specialists_by_service_or_category_and_filial_tool`**: Этот инструмент ТРЕБУЕТ указания `filial_name`. Если пользователь спрашивает, например, "Кто делает [Услуга/Категория]?" и НЕ УКАЗЫВАЕТ ФИЛИАЛ (и его нет в недавней истории диалога), ТЫ ОБЯЗАН СНАЧАЛА УТОЧНИТЬ у пользователя: "В каком филиале вас интересуют специалисты по [Услуга/Категория]?" и только ПОСЛЕ ПОЛУЧЕНИЯ ответа на этот вопрос вызывать инструмент с указанным филиалом.
 - ОБРАБОТКА НЕУДАЧНЫХ ВЫЗОВОВ: Если инструмент вернул ошибку или 'не найдено', НЕ ПЫТАЙСЯ вызвать его с теми же аргументами. Сообщи пользователю или предложи альтернативу.
 - Интерпретация Результатов: Представляй результаты функций в понятной, человеческой форме.
 
@@ -284,7 +292,7 @@ SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ 
 - Точность: НЕ ПРИДУМЫВАЙ.
 - Краткость и Ясность.
 - Вежливость.
-- Медицинские Советы: НЕ ДАВАЙ.
+- Медицинские Советы: НЕ ДАВАЙ. Напоминай, что консультация со специалистом необходима.
 
 ВАЖНО: Всегда сначала анализируй историю и цель пользователя. Реши, нужен ли ответ из памяти, RAG, вызов функции или простой ответ. Действуй соответственно.
 """
@@ -365,29 +373,29 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
     except ValueError as e:
         raise ValueError(f"Ошибка разбора composite_session_id '{composite_session_id}': {e}")
     logger.info(f"run_agent_like_chain для Tenant: {tenant_id}, User: {user_id}, Вопрос: {question[:50]}...")
-    if not chroma_client_global or not embeddings_object_global:
+    if not CHROMA_CLIENT or not EMBEDDINGS_GIGA:
         logger.error(f"RAG компоненты (Chroma/Embeddings) не инициализированы.")
         return "Ошибка: Базовые компоненты RAG не готовы."
     if not tenant_id:
         logger.error("Tenant ID не найден в config.")
         return "Ошибка: Не удалось определить тенанта."
-    bm25_retriever = bm25_retrievers_map_global.get(tenant_id)
+    bm25_retriever = BM25_RETRIEVERS_MAP.get(tenant_id)
     collection_name = f"{TENANT_COLLECTION_PREFIX}{tenant_id}"
-    if not chroma_client_global or not embeddings_object_global:
+    if not CHROMA_CLIENT or not EMBEDDINGS_GIGA:
         logger.error("Глобальный Chroma клиент или эмбеддинги не инициализированы.")
         return "Ошибка: Глобальные компоненты RAG не готовы."
     try:
-        embeddings_wrapper = ChromaGigaEmbeddingsWrapper(embeddings_object_global)
+        embeddings_wrapper = ChromaGigaEmbeddingsWrapper(EMBEDDINGS_GIGA)
     except ValueError as e:
          logger.error(f"Ошибка создания обертки эмбеддингов: {e}")
          return "Ошибка: Некорректный объект эмбеддингов."
     try:
-        chroma_collection = chroma_client_global.get_collection(
+        chroma_collection = CHROMA_CLIENT.get_collection(
             name=collection_name,
             embedding_function=embeddings_wrapper
         )
         chroma_vectorstore = Chroma(
-            client=chroma_client_global,
+            client=CHROMA_CLIENT,
             collection_name=collection_name,
             embedding_function=embeddings_wrapper,
         )
@@ -458,7 +466,7 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
             system_prompt += f"\n\n[Дополнительные инструкции от администратора филиала {tenant_id}]:\n{prompt_addition}"
             logger.info(f"Добавлено дополнение к промпту для тенанта {tenant_id}.")
     tenant_tools = []
-    tenant_specific_docs: Optional[List[Document]] = tenant_documents_map_global.get(tenant_id)
+    tenant_specific_docs: Optional[List[Document]] = TENANT_DOCUMENTS_MAP.get(tenant_id)
     if not tenant_specific_docs:
          logger.warning(f"Не найдены загруженные документы для тенанта {tenant_id} в tenant_documents_map_global. Инструменты, требующие данные, не будут созданы или могут работать некорректно.")
     logger.info(f"Создание динамических инструментов для тенанта {tenant_id}...")
@@ -510,7 +518,7 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         tool_name = tool_function.__name__
         tool_description = tool_function.__doc__ or f"Инструмент {tool_name}"
         args_schema = tool_func_to_schema_map.get(tool_function)
-        wrapped_func = create_tool_wrapper(tool_function, tenant_specific_docs, tenant_raw_data_map_global.get(tenant_id, []))
+        wrapped_func = create_tool_wrapper(tool_function, tenant_specific_docs, TENANT_RAW_DATA_MAP.get(tenant_id, []))
         langchain_tool = StructuredTool.from_function(
             func=wrapped_func,
             name=tool_name,
@@ -571,37 +579,29 @@ async def trigger_reindex_tenant_async(tenant_id: str) -> bool:
     Использует глобальные RAG компоненты и конфигурации.
     """
     logger.info(f"[Async Trigger] Запрос на переиндексацию для тенанта: {tenant_id}")
-    if not chroma_client_global or not embeddings_object_global:
+    if not CHROMA_CLIENT or not EMBEDDINGS_GIGA:
         logger.error(f"[Async Trigger] Глобальные RAG компоненты (Chroma/Embeddings) не инициализированы. Переиндексация для {tenant_id} отменена.")
         return False
 
-    # Получаем необходимые глобальные переменные и конфигурации
-    global bm25_retrievers_map_global, tenant_documents_map_global, tenant_raw_data_map_global
+    global BM25_RETRIEVERS_MAP, TENANT_DOCUMENTS_MAP, TENANT_RAW_DATA_MAP, SERVICE_DETAILS_MAP_GLOBAL
     global search_k_global
 
-    # Эти значения обычно устанавливаются при инициализации, но для полноты можно их передать явно
-    # или убедиться, что они доступны в этой области видимости.
-    # В данном случае они глобальные, но для reindex_tenant_specific_data нужны их значения.
     data_dir_base = os.getenv("BASE_DATA_DIR", "base")
     chunk_size_cfg = int(os.getenv("CHUNK_SIZE", 1000))
     chunk_overlap_cfg = int(os.getenv("CHUNK_OVERLAP", 200))
-    # search_k_global уже есть
 
     try:
-        # Запускаем синхронную функцию reindex_tenant_specific_data в отдельном потоке,
-        # чтобы не блокировать основной цикл asyncio.
-        # asyncio.to_thread доступен в Python 3.9+
-        # Для более старых версий Python можно использовать loop.run_in_executor(None, ...)
-        import asyncio # Импортируем здесь, чтобы быть уверенным в доступности в этой функции
+        import asyncio 
 
         success = await asyncio.to_thread(
             rag_setup.reindex_tenant_specific_data,
             tenant_id=tenant_id,
-            chroma_client=chroma_client_global,
-            embeddings_object=embeddings_object_global,
-            bm25_retrievers_map=bm25_retrievers_map_global,
-            tenant_documents_map=tenant_documents_map_global,
-            tenant_raw_data_map=tenant_raw_data_map_global,
+            chroma_client=CHROMA_CLIENT,
+            embeddings_object=EMBEDDINGS_GIGA,
+            bm25_retrievers_map=BM25_RETRIEVERS_MAP,
+            tenant_documents_map=TENANT_DOCUMENTS_MAP,
+            tenant_raw_data_map=TENANT_RAW_DATA_MAP,
+            service_details_map=SERVICE_DETAILS_MAP_GLOBAL,
             base_data_dir=data_dir_base,
             chunk_size=chunk_size_cfg,
             chunk_overlap=chunk_overlap_cfg,
