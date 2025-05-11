@@ -1,4 +1,29 @@
 {
     "prompt_addition": "ты работаешь в клинике MED YU MED ",
-    "clinic_info_docs": []
+    "clinic_info_docs": [
+        {
+            "page_content": "мы крутые",
+            "metadata": {
+                "source": "tenant_config",
+                "type": "general_info",
+                "topic": "О клинике"
+            }
+        },
+        {
+            "page_content": "3 - 5",
+            "metadata": {
+                "source": "tenant_config",
+                "type": "schedule",
+                "topic": "Часы работы"
+            }
+        },
+        {
+            "page_content": "варшавское шоссе 65",
+            "metadata": {
+                "source": "tenant_config",
+                "type": "contacts",
+                "topic": "Контакты"
+            }
+        }
+    ]
 }

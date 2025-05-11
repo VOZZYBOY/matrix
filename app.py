@@ -16,7 +16,6 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from langchain_core.runnables import Runnable
 
-# Импортируем менеджер конфигураций
 try:
     import tenant_config_manager
 except ImportError as e:
@@ -30,7 +29,7 @@ except ImportError as e:
     redis_get_history = None
 
 try:
-    from matrixai import agent_with_history
+    from matrixai import agent_with_history, trigger_reindex_tenant_async
 except ImportError as e:
      logging.critical(f"Не удалось импортировать agent_with_history из matrixai.py: {e}", exc_info=True)
      raise SystemExit(f"Критическая ошибка импорта: {e}")
@@ -72,8 +71,7 @@ class SetTenantSettingsRequest(BaseModel):
 class GetTenantSettingsResponse(BaseModel):
     prompt_addition: Optional[str] = None
     clinic_info_docs: Optional[List[Dict[str, Any]]] = None
-    last_modified_general: Optional[str] = None # Добавим время последней модификации
-    last_modified_clinic_info: Optional[str] = None
+    last_modified_general: Optional[str] = None 
 
 class MessageRequest(BaseModel):
     message: str
@@ -207,6 +205,7 @@ async def set_tenant_settings(request: SetTenantSettingsRequest):
 
     success_general = True
     success_clinic_info = True
+    needs_reindex = False
 
     if general_settings: 
         logger.info(f"Получен запрос на сохранение общих настроек для тенанта '{tenant_id}': {general_settings}")
@@ -221,14 +220,35 @@ async def set_tenant_settings(request: SetTenantSettingsRequest):
         success_clinic_info = tenant_config_manager.save_tenant_clinic_info(tenant_id, clinic_info_docs_data)
         if not success_clinic_info:
             logger.error(f"Не удалось сохранить clinic_info_docs для тенанта '{tenant_id}'.")
+        else:
+            needs_reindex = True
 
-    if success_general and success_clinic_info:
-        return {"message": f"Настройки для тенанта '{tenant_id}' успешно сохранены/обновлены."}
-    else:
+    response_message = f"Настройки для тенанта '{tenant_id}' успешно сохранены/обновлены."
+    status_code = 200
+
+    if not success_general or not success_clinic_info:
         error_details = []
         if not success_general: error_details.append("общие настройки")
         if not success_clinic_info: error_details.append("clinic_info_docs")
-        raise HTTPException(status_code=500, detail=f"Не удалось сохранить части настроек ({', '.join(error_details)}) для тенанта '{tenant_id}'.")
+        if not success_clinic_info: needs_reindex = False 
+        response_message = f"Не удалось сохранить части настроек ({', '.join(error_details)}) для тенанта '{tenant_id}'."
+        status_code = 500
+        if not success_general and not success_clinic_info:
+             raise HTTPException(status_code=500, detail=response_message)
+    
+    if needs_reindex:
+        logger.info(f"Изменения в clinic_info_docs для тенанта '{tenant_id}' требуют переиндексации. Запускаем фоновую задачу...")
+        import asyncio
+        asyncio.create_task(trigger_reindex_tenant_async(tenant_id))
+        response_message += " Начата фоновая переиндексация данных клиники."
+
+    if status_code == 500 and (success_general or success_clinic_info):
+        return JSONResponse(content={"message": response_message}, status_code=200)
+
+    if status_code == 200:
+        return {"message": response_message}
+    else:
+        raise HTTPException(status_code=status_code, detail=response_message)
 
 @app.get("/tenant_settings/{tenant_id}", response_model=GetTenantSettingsResponse, tags=["tenant_config"])
 async def get_tenant_settings(tenant_id: str):
@@ -237,21 +257,19 @@ async def get_tenant_settings(tenant_id: str):
 
     logger.info(f"Запрос настроек для тенанта '{tenant_id}'")
     try:
-        # Загружаем основные настройки (включая prompt_addition)
+        
         settings = tenant_config_manager.load_tenant_settings(tenant_id)
-        # Загружаем clinic_info_docs
+        
         clinic_info = tenant_config_manager.load_tenant_clinic_info(tenant_id)
-        # Получаем время модификации файлов
+        
         general_mod_time = tenant_config_manager.get_settings_file_mtime(tenant_id)
         clinic_info_mod_time = tenant_config_manager.get_clinic_info_file_mtime(tenant_id)
 
-        # Если файлы не найдены, время будет None
+        
         general_mod_time_str = datetime.datetime.fromtimestamp(general_mod_time).isoformat() if general_mod_time else None
         clinic_info_mod_time_str = datetime.datetime.fromtimestamp(clinic_info_mod_time).isoformat() if clinic_info_mod_time else None
 
-        # Если файлов нет, load_tenant_settings вернет {}, а load_tenant_clinic_info вернет []
-        # или они могут выбросить исключение, если мы так решим в менеджере
-        # Пока предполагаем, что они возвращают пустые значения
+        
 
         return GetTenantSettingsResponse(
             prompt_addition=settings.get('prompt_addition'),

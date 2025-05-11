@@ -27,9 +27,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# --- Имена коллекций ---
-# Удаляем SHARED_COLLECTION_NAME
-# SHARED_COLLECTION_NAME = "shared_clinic_info"
 TENANT_COLLECTION_PREFIX = "tenant_"
 
 # --- Функция предобработки данных из JSON (услуги/сотрудники) ---
@@ -374,3 +371,129 @@ def initialize_rag(
     # Возвращаем карту BM25 ретриверов и карту документов тенантов
     # return chroma_client, embeddings_object, bm25_retrievers_map, tenant_documents_map, all_raw_base_data <-- УДАЛЕНО
     return chroma_client, embeddings_object, bm25_retrievers_map, tenant_documents_map, tenant_raw_data_map # <-- ИЗМЕНЕНО
+
+# --- Начало: Новая функция для переиндексации данных одного тенанта ---
+
+def reindex_tenant_specific_data(
+    tenant_id: str,
+    chroma_client: chromadb.ClientAPI,
+    embeddings_object: GigaChatEmbeddings,
+    bm25_retrievers_map: Dict[str, BM25Retriever],
+    tenant_documents_map: Dict[str, List[Document]],
+    tenant_raw_data_map: Dict[str, List[Dict[str, Any]]], # Используем List[Dict[str, Any]] для raw_data
+    base_data_dir: str, # Путь к директории 'base'
+    chunk_size: int,
+    chunk_overlap: int,
+    search_k: int
+) -> bool:
+    """
+    Переиндексирует данные для одного конкретного тенанта.
+    Обновляет его Chroma коллекцию, BM25 ретривер и записи в картах документов.
+
+    Args:
+        tenant_id: ID тенанта для переиндексации.
+        chroma_client: Инициализированный клиент ChromaDB.
+        embeddings_object: Инициализированный объект эмбеддингов.
+        bm25_retrievers_map: Глобальная карта BM25 ретриверов (будет обновлена).
+        tenant_documents_map: Глобальная карта документов тенантов (будет обновлена).
+        tenant_raw_data_map: Глобальная карта сырых данных тенантов (будет обновлена).
+        base_data_dir: Путь к директории с базовыми JSON файлами (например, 'base').
+        chunk_size: Размер чанка для сплиттера.
+        chunk_overlap: Перекрытие чанков.
+        search_k: Количество документов для возврата BM25 ретривером.
+
+    Returns:
+        True, если переиндексация прошла успешно, иначе False.
+    """
+    logger.info(f"--- Начало переиндексации для тенанта: {tenant_id} ---")
+
+    if not tenant_id:
+        logger.error("Tenant ID не может быть пустым для переиндексации.")
+        return False
+    if not chroma_client or not embeddings_object:
+        logger.error(f"Chroma клиент или объект эмбеддингов не предоставлены для переиндексации тенанта {tenant_id}.")
+        return False
+
+    collection_name = f"{TENANT_COLLECTION_PREFIX}{tenant_id}"
+    tenant_file_path = os.path.join(base_data_dir, f"{tenant_id}.json")
+
+    if not os.path.exists(tenant_file_path):
+        logger.warning(f"Базовый JSON файл для тенанта {tenant_id} не найден по пути: {tenant_file_path}. Будут использованы только clinic_info, если есть.")
+        base_docs = []
+        current_tenant_raw_base_data = []
+    else:
+        # 1. Загружаем базовые данные (услуги/сотрудники) из base/
+        base_docs, current_tenant_raw_base_data = load_tenant_base_data(tenant_id, tenant_file_path)
+        if current_tenant_raw_base_data is None: # load_tenant_base_data может вернуть None для raw_data в случае ошибки
+            current_tenant_raw_base_data = []
+
+    # 2. Загружаем специфичную информацию о клинике из tenant_configs/ (самую свежую)
+    clinic_info_docs = []
+    if tenant_config_manager:
+        try:
+            clinic_info_data = tenant_config_manager.load_tenant_clinic_info(tenant_id)
+            clinic_info_docs = clinic_info_data_to_docs(clinic_info_data)
+            logger.info(f"Для тенанта {tenant_id} загружено {len(clinic_info_docs)} док-ов из clinic_info.")
+        except Exception as e:
+            logger.error(f"Ошибка загрузки clinic_info для тенанта {tenant_id} при переиндексации: {e}", exc_info=True)
+            # Продолжаем без clinic_info_docs, если не удалось загрузить
+    else:
+        logger.warning(f"tenant_config_manager не импортирован, clinic_info для тенанта {tenant_id} не будет перезагружена.")
+
+    # 3. Объединяем документы
+    all_tenant_docs = base_docs + clinic_info_docs
+
+    if not all_tenant_docs:
+        logger.warning(f"Нет документов (base + clinic_info) для переиндексации для тенанта {tenant_id}. Возможно, будут удалены старые данные.")
+        # Если документов нет, мы должны очистить старые данные этого тенанта из карт
+        # и удалить его коллекцию из Chroma
+        tenant_documents_map.pop(tenant_id, None)
+        tenant_raw_data_map.pop(tenant_id, None)
+        bm25_retrievers_map.pop(tenant_id, None)
+        try:
+            chroma_client.delete_collection(collection_name)
+            logger.info(f"Коллекция Chroma '{collection_name}' для тенанта {tenant_id} удалена, так как нет новых документов.")
+        except Exception as e:
+            # Это может произойти, если коллекции и не было
+            logger.info(f"Попытка удаления коллекции '{collection_name}' для тенанта {tenant_id} (возможно, ее не было): {e}")
+        logger.info(f"--- Переиндексация для тенанта: {tenant_id} завершена (данные удалены, так как нет новых документов) ---")
+        return True # Считаем успешным, так как состояние консистентно
+
+    logger.info(f"Всего {len(all_tenant_docs)} документов для переиндексации для тенанта {tenant_id} (Base: {len(base_docs)}, ClinicInfo: {len(clinic_info_docs)}).")
+
+    # Обновляем карты в памяти (эти объекты передаются по ссылке, так что изменения отразятся в вызывающем коде)
+    tenant_documents_map[tenant_id] = all_tenant_docs
+    tenant_raw_data_map[tenant_id] = current_tenant_raw_base_data # Обновляем сырые данные из base/
+
+    # 4. Индексируем объединенные документы в Chroma
+    # Мы всегда хотим пересоздать коллекцию для этого тенанта, чтобы отразить изменения
+    logger.info(f"Принудительное пересоздание коллекции '{collection_name}' для тенанта {tenant_id}.")
+    vectorstore = index_documents_to_collection(
+        chroma_client=chroma_client,
+        embeddings_object=embeddings_object,
+        collection_name=collection_name,
+        documents=all_tenant_docs,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        force_recreate=True # Ключевой момент - всегда пересоздаем
+    )
+
+    if not vectorstore:
+        logger.error(f"Не удалось пересоздать/проиндексировать коллекцию Chroma '{collection_name}' для тенанта {tenant_id}.")
+        # Попытаемся откатить изменения в картах? Или оставить как есть, но пометить как ошибку?
+        # Пока просто логируем и возвращаем False.
+        return False
+
+    # 5. Создаем/Обновляем BM25 ретривер для тенанта на объединенных данных
+    try:
+        tenant_bm25 = BM25Retriever.from_documents(all_tenant_docs, k=search_k)
+        bm25_retrievers_map[tenant_id] = tenant_bm25
+        logger.info(f"BM25 ретривер для тенанта '{tenant_id}' (k={search_k}) обновлен/создан на {len(all_tenant_docs)} док-х.")
+    except Exception as e:
+        logger.error(f"Ошибка обновления/создания BM25 ретривера для тенанта '{tenant_id}': {e}", exc_info=True)
+        return False # Ошибка при создании BM25 также считается неудачей
+
+    logger.info(f"--- Переиндексация для тенанта: {tenant_id} успешно завершена ---")
+    return True
+
+# --- Конец: Новая функция для переиндексации данных одного тенанта ---
