@@ -52,7 +52,6 @@ class AskRequest(BaseModel):
     session_id: Optional[str] = None 
     tenant_id: Optional[str] = None 
     reset_session: bool = False
-    stream: bool = False 
 
 class TenantSettings(BaseModel):
     prompt_addition: Optional[str] = None
@@ -60,7 +59,6 @@ class TenantSettings(BaseModel):
         default=None,
         description="Список словарей, описывающих документы с общей информацией для тенанта. Каждый словарь должен содержать 'page_content' (str) и 'metadata' (dict)."
     )
-    # Можно д
 
 class SetTenantSettingsRequest(BaseModel):
     tenant_id: str

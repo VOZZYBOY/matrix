@@ -282,11 +282,16 @@ SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ 
     - Для вопроса о ВСЕХ филиалах сотрудника ('где еще работает?', 'в каких филиалах?') -> ОБЯЗАТЕЛЬНО вызывай `list_employee_filials_tool`.
     - Для вопроса о ВСЕХ услугах сотрудника (например, "какие услуги выполняет ХХХ?", "чем занимается YYY?") -> ОБЯЗАТЕЛЬНО вызывай `get_employee_services_tool`. Даже если RAG-контекст содержит упоминания или частичный список услуг этого сотрудника (например, в его общем описании), для получения ПОЛНОГО и ТОЧНОГО списка услуг используй ИСКЛЮЧИТЕЛЬНО этот инструмент.
     - Для вопроса о ЦЕНЕ КОНКРЕТНОЙ услуги -> ОБЯЗАТЕЛЬНО вызывай `get_service_price_tool`.
+    - **Для вопроса о СПЕЦИАЛИСТАХ в КОНКРЕТНОМ ФИЛИАЛЕ (например, "кто работает в X?", "какие врачи есть в Y?") -> ОБЯЗАТЕЛЬНО вызывай `find_employees_tool` ТОЛЬКО с параметром `filial_name`.**
 - Точность Параметров: Извлекай параметры ТОЧНО из запроса и ИСТОРИИ.
 - Не Выдумывай Параметры: Если обязательного параметра нет, НЕ ВЫЗЫВАЙ функцию, а вежливо попроси уточнить.
     - **ОСОБЕННО ВАЖНО для `find_specialists_by_service_or_category_and_filial_tool`**: Этот инструмент ТРЕБУЕТ указания `filial_name`. Если пользователь спрашивает, например, "Кто делает [Услуга/Категория]?" и НЕ УКАЗЫВАЕТ ФИЛИАЛ (и его нет в недавней истории диалога), ТЫ ОБЯЗАН СНАЧАЛА УТОЧНИТЬ у пользователя: "В каком филиале вас интересуют специалисты по [Услуга/Категория]?" и только ПОСЛЕ ПОЛУЧЕНИЯ ответа на этот вопрос вызывать инструмент с указанным филиалом.
+- **НОВИНКА: Пагинация:** Функции, возвращающие СПИСКИ (`FindEmployees`, `GetEmployeeServices`, `FindSpecialistsByServiceOrCategoryAndFilial`, `ListServicesInCategory`, `ListServicesInFilial`, `FindServicesInPriceRange`, `ListAllCategories`), теперь поддерживают опциональные параметры `page_number` (номер страницы, по умолчанию 1) и `page_size` (количество элементов на странице, по умолчанию разное, обычно 15-30).
+    - Если результат вызова функции содержит информацию о страницах (например, "Показаны 1-15 из 100. Страница 1 из 7."), ОБЯЗАТЕЛЬНО СООБЩИ пользователю об общем количестве и спроси, хочет ли он увидеть следующую страницу.
+    - **Если пользователь ПОСЛЕ получения пагинированного ответа пишет что-то вроде "дальше", "следующая", "еще", "давай", "продолжай", "покажи остальных" и т.п., это означает запрос на СЛЕДУЮЩУЮ СТРАНИЦУ. В этом случае ТЫ ОБЯЗАН вызвать ТУ ЖЕ САМУЮ ФУНКЦИЮ еще раз, ИСПОЛЬЗУЯ ТЕ ЖЕ ПАРАМЕТРЫ, ЧТО И В ПРЕДЫДУЩЕМ ВЫЗОВЕ, НО УВЕЛИЧИВ `page_number` на 1.** Не пытайся выполнить RAG-поиск или вызвать другую функцию в этом случае.
+    - Если ты ожидаешь, что список будет длинным, можешь сразу вызвать функцию с `page_number=1` и стандартным `page_size`, а затем сообщить пользователю об общем количестве найденных элементов и страниц.
 - ОБРАБОТКА НЕУДАЧНЫХ ВЫЗОВОВ: Если инструмент вернул ошибку или 'не найдено', НЕ ПЫТАЙСЯ вызвать его с теми же аргументами. Сообщи пользователю или предложи альтернативу.
-- Интерпретация Результатов: Представляй результаты функций в понятной, человеческой форме.
+- Интерпретация Результатов: Представляй результаты функций в понятной, человеческой форме. **ВАЖНО: Если функция вернула список (например, услуг, врачей, филиалов с пагинацией), ты ДОЛЖЕН показать этот список ПОЛНОСТЬЮ, как он был возвращен функцией, включая всю информацию о страницах. НЕ СОКРАЩАЙ и НЕ СУММИРУЙ такие списки.**
 
 ОБЩИЕ ПРАВИЛА:
 - Точность: НЕ ПРИДУМЫВАЙ.
@@ -429,8 +434,9 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
                 "чтобы найти ОПИСАНИЕ или детали этой сущности. Используй полные названия. "
                 "Пример: Если история содержит '1. Услуга А\n2. Услуга Б', а пользователь спрашивает 'расскажи о 2', "
                 "то best_rag_query должен быть что-то вроде 'Описание услуги Б'. "
-                "Если запрос не требует поиска описания в базе знаний (например, 'привет', 'какая цена на Х?', 'найди врачей Y в филиале Z', 'какие есть филиалы?', 'где еще работает доктор А?', 'сравни цены на Y в филиалах M и N'), "
-                "то best_rag_query должен быть пустой строкой или просто исходным запросом."
+                "Если запрос общий (приветствие, не по теме), или если он очевидно должен быть обработан вызовом функции (например, запросы на списки чего-либо, цены, проверки наличия, сравнения, поиск по точным критериям), "
+                "ИЛИ если последний ответ ассистента был результатом вызова функции со страницами, а текущий запрос пользователя похож на согласие посмотреть следующую страницу ('да', 'давай', 'продолжай', 'след', 'еще'), "
+                "то best_rag_query ДОЛЖЕН БЫТЬ ПУСТОЙ СТРОКОЙ. В остальных случаях (запросы на описание, общую информацию) сформулируй поисковый запрос."
             ))
         ]
         if history_messages:
@@ -440,22 +446,29 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         rag_thought_result = rag_query_llm.invoke(rag_prompt_messages, config=config)
         if isinstance(rag_thought_result, RagQueryThought):
             rag_thought = rag_thought_result
-            if rag_thought.best_rag_query and rag_thought.best_rag_query.strip().lower() != question.strip().lower():
+            if rag_thought.best_rag_query and rag_thought.best_rag_query.strip():
                  effective_rag_query = rag_thought.best_rag_query
-                 logger.info(f"[{tenant_id}:{user_id}] Сгенерирован улучшенный RAG-запрос: '{effective_rag_query}'")
-                 logger.debug(f"[{tenant_id}:{user_id}] Анализ LLM для RAG: {rag_thought.analysis}")
+                 logger.info(f"[{tenant_id}:{user_id}] Сгенерирован RAG-запрос от LLM: '{effective_rag_query}' (Анализ: {rag_thought.analysis})")
+            elif hasattr(rag_thought, 'best_rag_query') and not rag_thought.best_rag_query.strip():
+                effective_rag_query = ""
+                logger.info(f"[{tenant_id}:{user_id}] LLM указал, что RAG-запрос должен быть пустым (вероятно, это вызов функции). Анализ: {rag_thought.analysis}")
             else:
-                 logger.info(f"[{tenant_id}:{user_id}] LLM не сгенерировал специфичный RAG-запрос, используем исходный для RAG: '{question[:50]}...'")
+                 logger.info(f"[{tenant_id}:{user_id}] LLM не сгенерировал специфичный RAG-запрос или вернул None, используем исходный для RAG: '{question[:50]}...' (Анализ: {rag_thought.analysis if hasattr(rag_thought, 'analysis') else 'нет анализа'})")
         else:
             logger.warning(f"[{tenant_id}:{user_id}] LLM для генерации RAG-запроса вернул неожиданный тип: {type(rag_thought_result)}. Используем исходный запрос.")
     except Exception as e:
         logger.warning(f"[{tenant_id}:{user_id}] Исключение при улучшении RAG-запроса: {e}. Используем исходный: '{question[:50]}...'", exc_info=True)
     try:
-        relevant_docs = final_retriever.invoke(effective_rag_query, config=config)
-        rag_context = format_docs(relevant_docs)
-        logger.info(f"RAG: Найдено {len(relevant_docs)} док-в для запроса: '{effective_rag_query[:50]}...'. Контекст: {len(rag_context)} симв.")
+        if effective_rag_query and effective_rag_query.strip():
+            logger.info(f"[{tenant_id}:{user_id}] Выполнение RAG-поиска с запросом: '{effective_rag_query[:100]}...'")
+            relevant_docs = final_retriever.invoke(effective_rag_query, config=config)
+            rag_context = format_docs(relevant_docs)
+            logger.info(f"RAG: Найдено {len(relevant_docs)} док-в для запроса: '{effective_rag_query[:50]}...'. Контекст: {len(rag_context)} симв.")
+        else:
+            logger.info(f"[{tenant_id}:{user_id}] RAG-запрос пуст, RAG поиск пропущен.")
+            rag_context = "Поиск по базе знаний не выполнялся, так как запрос не предполагает этого или является вызовом функции."
     except Exception as e:
-        logger.error(f"Ошибка выполнения RAG поиска для тенанта {tenant_id}: {e}", exc_info=True)
+        logger.error(f"Ошибка выполнения RAG поиска для тенанта {tenant_id} с запросом '{effective_rag_query}': {e}", exc_info=True)
         rag_context = "[Ошибка получения информации из базы знаний]"
     system_prompt = SYSTEM_PROMPT
     prompt_addition = None
@@ -530,7 +543,8 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
     messages_for_llm = []
     messages_for_llm.append(SystemMessage(content=system_prompt))
     messages_for_llm.extend(history_messages)
-    rag_context_block = f"\n\n[Информация из базы знаний (по запросу '{effective_rag_query}')]:\n{rag_context}\n[/Информация из базы знаний]"
+    rag_query_display = effective_rag_query if effective_rag_query and effective_rag_query.strip() else "не выполнялся"
+    rag_context_block = f"\n\n[Информация из базы знаний (поисковый запрос: '{rag_query_display}')]:\n{rag_context}\n[/Информация из базы знаний]"
     messages_for_llm.append(HumanMessage(content=question + rag_context_block))
     llm_with_tools = chat_model.bind_tools(tenant_tools)
     logger.info(f"{chat_model.model_name} {len(tenant_tools)} {tenant_id}...")
