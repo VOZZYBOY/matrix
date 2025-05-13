@@ -73,13 +73,13 @@ async def fetch_client_details_by_phone(phone_number: str, api_token: str) -> Op
     if not phone_number or not api_token:
         return None
 
-    client_api_url = f"{CLIENT_API_BASE_URL}/Client/elasticByPhone?content={phone_number}"
+    client_api_url = f"{CLIENT_API_BASE_URL}/Client/elastic-by-phone-v2?content={phone_number}"
     headers = {"Authorization": f"Bearer {api_token}"}
 
     try:
         async with httpx.AsyncClient() as client:
             logger.info(f"Запрос данных клиента по номеру {phone_number} к {client_api_url} (Метод: POST)")
-            response = await client.post(client_api_url, headers=headers, timeout=10.0)
+            response = await client.get(client_api_url, headers=headers, timeout=10.0)
 
             if response.status_code == 200:
                 response_data = response.json()
