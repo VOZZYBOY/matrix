@@ -13,7 +13,6 @@ chroma_db_clinic_giga/
 .idea/
 .vscode/
 *.swp
-api.log
 ERROR
 # Конфиденциальные данные
 .env
