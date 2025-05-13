@@ -375,8 +375,8 @@ async def get_user_chat_history(tenant_id: str, user_id: str, limit: Optional[in
 
 class ClearHistoryRequest(BaseModel):
     tenant_id: str
-    user_id: Optional[str] = None # Может быть основным ID пользователя, если известен
-    phone_number: Optional[str] = None # Или номер телефона для формирования ID
+    user_id: Optional[str] = None 
+    phone_number: Optional[str] = None 
 
 @app.post("/clear_history", tags=["history"], status_code=200)
 async def clear_user_chat_history_endpoint(request: ClearHistoryRequest):
@@ -388,8 +388,6 @@ async def clear_user_chat_history_endpoint(request: ClearHistoryRequest):
 
     if request.phone_number:
         user_id_to_clear = f"{tenant_id}_{request.phone_number}"
-    # elif request.user_id: # Убираем эту ветку, чтобы не использовать ID от бэкенда для очистки нашей истории
-    #     user_id_to_clear = f"{tenant_id}_{request.user_id}"
     
     if not user_id_to_clear:
         raise HTTPException(status_code=400, detail="Необходимо предоставить 'phone_number' для идентификации сессии для очистки.")
@@ -406,8 +404,6 @@ async def clear_user_chat_history_endpoint(request: ClearHistoryRequest):
             logger.info(f"История для tenant '{tenant_id}', user '{user_id_to_clear}' успешно очищена.")
             return {"message": f"История для пользователя {user_id_to_clear} в тенанте {tenant_id} была очищена."}
         else:
-            # redis_clear_history возвращает True даже если ключ не найден, 
-            # так что этот блок может быть не достижим, если только сама функция не вернет False по другой причине
             logger.warning(f"Очистка истории для tenant '{tenant_id}', user '{user_id_to_clear}' не удалась (возможно, истории и не было или функция вернула False).")
             return {"message": f"Запрос на очистку истории для {user_id_to_clear} в тенанте {tenant_id} обработан. Возможно, истории не существовало."}
     except ValueError as ve: 
