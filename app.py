@@ -126,7 +126,6 @@ def generate_user_id() -> str:
 
 
 
-@app.get("/")
 async def read_root(request: Request):
     logger.info("Запрос корневой страницы (Admin+Chat)")
     return templates.TemplateResponse("index.html", {"request": request})

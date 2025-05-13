@@ -286,28 +286,50 @@ async def get_client_context_for_agent(
     context_parts = []
     client_identified_by_name = False
     full_visit_history_for_analysis: List[VisitRecordData] = []
+    
+    client_id_resolved_for_history: Optional[str] = None
 
     if phone_number:
         client_details = await fetch_client_details_by_phone(phone_number, client_api_token)
-        if client_details and client_details.fullName:
-            context_parts.append(f"Клиент идентифицирован как: {client_details.fullName.strip()}.")
-            client_identified_by_name = True
-        else:
-            logger.info(f"ФИО клиента по номеру {phone_number} не найдено.")
+        if client_details:
+            if client_details.id: 
+                client_id_resolved_for_history = client_details.id
+                logger.info(f"ID клиента '{client_details.id}' получен по номеру телефона {phone_number} и будет использован для истории посещений.")
+            
+            if client_details.fullName:
+                context_parts.append(f"Клиент идентифицирован как: {client_details.fullName.strip()}.")
+                client_identified_by_name = True
+            elif client_details.id: 
+                 logger.info(f"ФИО клиента по номеру {phone_number} не найдено, но ID '{client_details.id}' был получен.")
+            else: 
+                logger.info(f"Ни ID, ни ФИО клиента не были получены по номеру {phone_number} из fetch_client_details_by_phone.")
+        else: 
+            logger.info(f"Клиент по номеру {phone_number} не найден. Попытка использовать fallback ID для истории.")
+    
+    if not client_id_resolved_for_history and user_id_for_crm_history:
+        client_id_resolved_for_history = user_id_for_crm_history
+        logger.info(f"ID клиента по номеру телефона не определен/не предоставлен. Используется fallback ID '{user_id_for_crm_history}' для истории посещений.")
+    elif not client_id_resolved_for_history and not user_id_for_crm_history:
+        logger.info("Ни номер телефона для поиска ID, ни fallback ID для истории не предоставлены.")
 
-    if user_id_for_crm_history:
-        logger.info(f"Запрос истории посещений для user_id_for_crm_history: {user_id_for_crm_history} (лимит для анализа: {visit_history_analysis_limit})")
-        fetched_history = await fetch_client_visit_history(user_id_for_crm_history, client_api_token, internal_fetch_limit=visit_history_analysis_limit)
+
+    if client_id_resolved_for_history:
+        logger.info(f"Запрос истории посещений для ID клиента: {client_id_resolved_for_history} (лимит для анализа: {visit_history_analysis_limit})")
+        fetched_history = await fetch_client_visit_history(client_id_resolved_for_history, client_api_token, internal_fetch_limit=visit_history_analysis_limit)
         if fetched_history:
             full_visit_history_for_analysis = fetched_history
             formatted_history_display = format_visit_history_for_prompt(full_visit_history_for_analysis, display_limit=visit_history_display_limit)
             context_parts.append(formatted_history_display)
         else:
-            if client_identified_by_name or not phone_number: 
-                 context_parts.append("История предыдущих записей для данного ID клиента не найдена или пуста.")
-            logger.info(f"История записей для user_id_for_crm_history: {user_id_for_crm_history} не найдена или пуста.")
-    elif client_identified_by_name:
-        context_parts.append("ID клиента для запроса истории посещений не был предоставлен, поэтому история не запрашивалась.")
+            context_parts.append(f"История предыдущих записей для ID клиента '{client_id_resolved_for_history}' не найдена или пуста.")
+            logger.info(f"История записей для ID клиента: {client_id_resolved_for_history} не найдена или пуста.")
+    else: 
+        if client_identified_by_name: 
+            context_parts.append("ФИО клиента было определено, но ID для запроса истории посещений получить не удалось. История не запрашивалась.")
+        elif phone_number : 
+            context_parts.append(f"Клиент по номеру телефона {phone_number} не найден, ID для истории не определен. История не запрашивалась.")
+        else: 
+            context_parts.append("ID клиента для запроса истории посещений не был предоставлен (ни по телефону, ни напрямую), поэтому история не запрашивалась.")
 
     if full_visit_history_for_analysis:
         analysis_results = analyze_visit_patterns(
