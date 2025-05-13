@@ -125,7 +125,7 @@ def generate_user_id() -> str:
     return f"user_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
 
 
-
+@app.get("/")
 async def read_root(request: Request):
     logger.info("Запрос корневой страницы (Admin+Chat)")
     return templates.TemplateResponse("index.html", {"request": request})
@@ -135,31 +135,33 @@ async def ask_assistant(
     request: MessageRequest,
     agent_dependency: Runnable = Depends(get_agent)
 ):
-    user_id_for_agent_chat_history = request.user_id if request.user_id else generate_user_id()
     user_id_for_crm_visit_history = request.user_id 
     reset = request.reset_session
     tenant_id = request.tenant_id 
+
     if not tenant_id:
-        logger.error(f"Получен запрос без tenant_id от {user_id_for_agent_chat_history}")
+        logger.error(f"Получен запрос без tenant_id.")
         raise HTTPException(status_code=400, detail="Параметр 'tenant_id' обязателен.")
 
-    logger.info(f"Получен запрос от tenant '{tenant_id}', user '{user_id_for_agent_chat_history}', phone '{request.phone_number}': {request.message[:50]}... Reset: {reset}")
-
+    if request.phone_number:
+        user_id_for_agent_chat_history = f"{tenant_id}_{request.phone_number}"
+    else:
+        user_id_for_agent_chat_history = f"{tenant_id}_{generate_user_id()}"
+    
+    logger.info(f"Получен запрос от tenant '{tenant_id}', НАШ user_chat_history_id '{user_id_for_agent_chat_history}' (оригинальный request.user_id: '{request.user_id}', phone '{request.phone_number}'): {request.message[:50]}... Reset: {reset}")
 
     if reset:
-        target_user_id = user_id_for_agent_chat_history
         if redis_clear_history:
-            cleared = redis_clear_history(tenant_id=tenant_id, user_id=target_user_id)
-            logger.info(f"Запрос на сброс сессии для tenant '{tenant_id}', user '{target_user_id}'. Сессия удалена: {cleared}")
-            return MessageResponse(response="История чата была очищена.", user_id=target_user_id)
+            cleared = redis_clear_history(tenant_id=tenant_id, user_id=user_id_for_agent_chat_history)
+            logger.info(f"Запрос на сброс сессии для tenant '{tenant_id}', user_id '{user_id_for_agent_chat_history}'. Сессия удалена: {cleared}")
+            return MessageResponse(response="История чата была очищена.", user_id=user_id_for_agent_chat_history)
         else:
-             logger.error(f"Функция redis_clear_history не доступна для tenant '{tenant_id}', user '{target_user_id}'")
-             return MessageResponse(response="Запрос на сброс сессии получен, но функция очистки истории в Redis недоступна. Сообщение не было обработано.", user_id=target_user_id)
+             logger.error(f"Функция redis_clear_history не доступна для tenant '{tenant_id}', user_id '{user_id_for_agent_chat_history}'")
+             return MessageResponse(response="Запрос на сброс сессии получен, но функция очистки истории в Redis недоступна. Сообщение не было обработано.", user_id=user_id_for_agent_chat_history)
 
     try:
         start_time = time.time()
-        target_user_id = user_id_for_agent_chat_history
-        composite_session_id = f"{tenant_id}:{target_user_id}"
+        composite_session_id = f"{tenant_id}:{user_id_for_agent_chat_history}"
         logger.debug(f"Создан composite_session_id для истории чата ассистента: {composite_session_id}")
 
         client_context_str = await get_client_context_for_agent(
@@ -183,13 +185,13 @@ async def ask_assistant(
             config={
                 "configurable": {
                     "session_id": composite_session_id,
-                    "user_id": target_user_id, 
+                    "user_id": user_id_for_agent_chat_history,
                     "tenant_id": tenant_id
                  }
             }
         )
         end_time = time.time()
-        logger.info(f"Агент ответил для tenant '{tenant_id}', user '{target_user_id}' за {end_time - start_time:.2f} сек.")
+        logger.info(f"Агент ответил для tenant '{tenant_id}', user '{user_id_for_agent_chat_history}' за {end_time - start_time:.2f} сек.")
 
         if isinstance(response_data, str):
             response_text = response_data
@@ -197,11 +199,11 @@ async def ask_assistant(
             logger.warning(f"Агент вернул тип {type(response_data)}. Преобразуем в строку.")
             response_text = str(response_data)
 
-        logger.info(f"Ответ для {target_user_id}: {response_text[:50]}...")
-        return MessageResponse(response=response_text, user_id=target_user_id)
+        logger.info(f"Ответ для {user_id_for_agent_chat_history}: {response_text[:50]}...")
+        return MessageResponse(response=response_text, user_id=user_id_for_agent_chat_history)
 
     except Exception as e:
-        logger.error(f"Критическая ошибка при обработке запроса для {target_user_id}: {e}", exc_info=True)
+        logger.error(f"Критическая ошибка при обработке запроса для {user_id_for_agent_chat_history}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера.")
 
 @app.get("/health", tags=["health"])
@@ -370,6 +372,50 @@ async def get_user_chat_history(tenant_id: str, user_id: str, limit: Optional[in
     except Exception as e:
         logger.error(f"Непредвиденная ошибка при получении истории для tenant: '{tenant_id}', user: '{user_id}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при получении истории чата.")
+
+class ClearHistoryRequest(BaseModel):
+    tenant_id: str
+    user_id: Optional[str] = None # Может быть основным ID пользователя, если известен
+    phone_number: Optional[str] = None # Или номер телефона для формирования ID
+
+@app.post("/clear_history", tags=["history"], status_code=200)
+async def clear_user_chat_history_endpoint(request: ClearHistoryRequest):
+    tenant_id = request.tenant_id
+    user_id_to_clear = None
+
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="Параметр 'tenant_id' обязателен.")
+
+    if request.phone_number:
+        user_id_to_clear = f"{tenant_id}_{request.phone_number}"
+    # elif request.user_id: # Убираем эту ветку, чтобы не использовать ID от бэкенда для очистки нашей истории
+    #     user_id_to_clear = f"{tenant_id}_{request.user_id}"
+    
+    if not user_id_to_clear:
+        raise HTTPException(status_code=400, detail="Необходимо предоставить 'phone_number' для идентификации сессии для очистки.")
+
+    logger.info(f"Запрос на очистку истории для tenant: '{tenant_id}', user_id_to_clear (сформирован по номеру): '{user_id_to_clear}'")
+    
+    if not redis_clear_history:
+        logger.error("Функция redis_clear_history не доступна.")
+        raise HTTPException(status_code=503, detail="Функциональность очистки истории чата недоступна.")
+
+    try:
+        cleared = redis_clear_history(tenant_id=tenant_id, user_id=user_id_to_clear)
+        if cleared:
+            logger.info(f"История для tenant '{tenant_id}', user '{user_id_to_clear}' успешно очищена.")
+            return {"message": f"История для пользователя {user_id_to_clear} в тенанте {tenant_id} была очищена."}
+        else:
+            # redis_clear_history возвращает True даже если ключ не найден, 
+            # так что этот блок может быть не достижим, если только сама функция не вернет False по другой причине
+            logger.warning(f"Очистка истории для tenant '{tenant_id}', user '{user_id_to_clear}' не удалась (возможно, истории и не было или функция вернула False).")
+            return {"message": f"Запрос на очистку истории для {user_id_to_clear} в тенанте {tenant_id} обработан. Возможно, истории не существовало."}
+    except ValueError as ve: 
+        logger.error(f"Ошибка формирования ключа для очистки истории: {ve}")
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"Непредвиденная ошибка при очистке истории для tenant: '{tenant_id}', user '{user_id_to_clear}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера при очистке истории чата.")
 
 if __name__ == "__main__":
     app_host = os.getenv("APP_HOST", "0.0.0.0")
