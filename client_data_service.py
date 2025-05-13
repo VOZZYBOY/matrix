@@ -36,6 +36,7 @@ class VisitRecordData(BaseModel):
     employeeSurname: Optional[str] = None
     employeeFatherName: Optional[str] = None
     servicesList: Optional[List[ServiceInRecord]] = []
+    payStatus: Optional[bool] = None
 
 class ClientRecordsResponse(BaseModel):
     code: int
@@ -155,6 +156,40 @@ def format_visit_history_for_prompt(visit_history: List[VisitRecordData], displa
         return "История предыдущих записей не найдена или пуста."
 
     prompt_lines = ["Предыдущие записи клиента (последние до {}):".format(display_limit)]
+    
+    last_paid_visit_info = None
+    
+    for record in visit_history:
+        if record.payStatus is True:
+            try:
+                dt_object_paid = datetime.datetime.strptime(record.startTime, "%Y-%m-%d %H:%M:%S") if record.startTime else None
+                formatted_dt_paid = dt_object_paid.strftime("%d.%m.%Y %H:%M") if dt_object_paid else record.startTime
+                
+                emp_parts_paid = []
+                if record.employeeSurname: emp_parts_paid.append(record.employeeSurname.strip())
+                if record.employeeName: emp_parts_paid.append(record.employeeName.strip())
+                if record.employeeFatherName: emp_parts_paid.append(record.employeeFatherName.strip())
+                employee_full_name_paid = " ".join(emp_parts_paid) if emp_parts_paid else "Специалист не указан"
+                
+                service_names_paid = []
+                if record.servicesList:
+                    for srv_paid in record.servicesList:
+                        if srv_paid.serviceName:
+                            service_names_paid.append(srv_paid.serviceName.strip())
+                services_str_paid = ", ".join(service_names_paid) if service_names_paid else "Услуга не указана"
+                filial_name_str_paid = record.filialName.strip() if record.filialName else "Филиал не указан"
+                
+                last_paid_visit_info = f"Последняя подтвержденная (оплаченная) запись: {formatted_dt_paid} - {services_str_paid} у {employee_full_name_paid} в '{filial_name_str_paid}'."
+                break 
+            except Exception as e_paid: 
+                logger.error(f"Ошибка форматирования последней оплаченной записи {record.id}: {e_paid}", exc_info=True)
+                # Не прерываем, просто не будет этой информации
+
+    if last_paid_visit_info:
+        prompt_lines.insert(0, last_paid_visit_info) # Вставляем в начало списка
+    else:
+        prompt_lines.insert(0, "Оплаченных записей в предоставленной истории не найдено.")
+
     for record in visit_history[:display_limit]:
         try:
             dt_object = None
@@ -184,7 +219,14 @@ def format_visit_history_for_prompt(visit_history: List[VisitRecordData], displa
             
             filial_name_str = record.filialName.strip() if record.filialName else "Филиал не указан"
 
-            prompt_lines.append(f"- {formatted_dt}: {services_str} у {employee_full_name} в филиале '{filial_name_str}'.")
+            status_info = ""
+            if record.payStatus is False:
+                status_info = " (статус: не оплачено/отменено)" 
+            elif record.payStatus is True:
+                status_info = " (статус: оплачено)"
+            # Если payStatus is None, ничего не добавляем про статус
+
+            prompt_lines.append(f"- {formatted_dt}: {services_str} у {employee_full_name} в филиале '{filial_name_str}'.{status_info}")
         except Exception as e:
             logger.error(f"Ошибка форматирования записи {record.id}: {e}", exc_info=True)
             prompt_lines.append(f"- Не удалось полностью отформатировать запись ID: {record.id}")

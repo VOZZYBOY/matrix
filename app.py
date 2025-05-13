@@ -166,7 +166,7 @@ async def ask_assistant(
             phone_number=request.phone_number, 
             client_api_token=request.client_api_token,
             user_id_for_crm_history=user_id_for_crm_visit_history, 
-            visit_history_display_limit=5,
+            visit_history_display_limit=15,
             visit_history_analysis_limit=100,
             frequent_visit_threshold=3      
         )
