@@ -439,7 +439,7 @@ class CheckServiceInFilial(BaseModel):
                 service_match_current_item = (norm_service_search in norm_item_s_name) or \
                                              (norm_item_s_name in norm_service_search)
 
-            if service_match_current_item and norm_item_f_name in valid_norm_filial_names_for_search:
+            if service_match_current_item:
                 service_found_globally = True
                 
                 current_is_exact_match_to_query = (norm_item_s_name == norm_service_search)

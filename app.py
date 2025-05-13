@@ -6,13 +6,16 @@ import time
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
 import datetime
-from fastapi import FastAPI, HTTPException, Depends, Request, Body
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from langchain_core.runnables import Runnable
+
+
+from client_data_service import get_client_context_for_agent
 
 try:
     import tenant_config_manager
@@ -74,6 +77,8 @@ class MessageRequest(BaseModel):
     user_id: Optional[str] = None
     reset_session: bool = False
     tenant_id: str 
+    phone_number: Optional[str] = None
+    client_api_token: Optional[str] = None
 
 class MessageResponse(BaseModel):
     response: str
@@ -132,18 +137,19 @@ async def ask_assistant(
     request: MessageRequest,
     agent_dependency: Runnable = Depends(get_agent)
 ):
-    user_id = request.user_id if request.user_id else generate_user_id()
+    user_id_for_agent_chat_history = request.user_id if request.user_id else generate_user_id()
+    user_id_for_crm_visit_history = request.user_id 
     reset = request.reset_session
     tenant_id = request.tenant_id 
     if not tenant_id:
-        logger.error(f"Получен запрос без tenant_id от {user_id}")
+        logger.error(f"Получен запрос без tenant_id от {user_id_for_agent_chat_history}")
         raise HTTPException(status_code=400, detail="Параметр 'tenant_id' обязателен.")
 
-    logger.info(f"Получен запрос от tenant '{tenant_id}', user '{user_id}': {request.message[:50]}... Reset: {reset}")
+    logger.info(f"Получен запрос от tenant '{tenant_id}', user '{user_id_for_agent_chat_history}', phone '{request.phone_number}': {request.message[:50]}... Reset: {reset}")
 
 
     if reset:
-        target_user_id = user_id
+        target_user_id = user_id_for_agent_chat_history
         if redis_clear_history:
             cleared = redis_clear_history(tenant_id=tenant_id, user_id=target_user_id)
             logger.info(f"Запрос на сброс сессии для tenant '{tenant_id}', user '{target_user_id}'. Сессия удалена: {cleared}")
@@ -154,16 +160,32 @@ async def ask_assistant(
 
     try:
         start_time = time.time()
-        target_user_id = user_id
+        target_user_id = user_id_for_agent_chat_history
         composite_session_id = f"{tenant_id}:{target_user_id}"
-        logger.debug(f"Создан composite_session_id для истории: {composite_session_id}")
+        logger.debug(f"Создан composite_session_id для истории чата ассистента: {composite_session_id}")
+
+        client_context_str = await get_client_context_for_agent(
+            phone_number=request.phone_number, 
+            client_api_token=request.client_api_token,
+            user_id_for_crm_history=user_id_for_crm_visit_history, 
+            visit_history_display_limit=5,
+            visit_history_analysis_limit=100,
+            frequent_visit_threshold=3      
+        )
+
+        actual_message_for_agent = request.message
+        if client_context_str:
+            actual_message_for_agent = f"{client_context_str}\n\nИсходное сообщение: {request.message}"
+            logger.info(f"Добавлен контекст о клиенте. Новое сообщение для агента (начало): {actual_message_for_agent[:150]}...")
+        else:
+            logger.info("Контекст о клиенте не был сформирован (возможно, не указан номер/токен/ID клиента или данные не найдены).")
 
         response_data = await agent_dependency.ainvoke(
-            {"input": request.message},
+            {"input": actual_message_for_agent}, 
             config={
                 "configurable": {
                     "session_id": composite_session_id,
-                    "user_id": target_user_id,
+                    "user_id": target_user_id, 
                     "tenant_id": tenant_id
                  }
             }
