@@ -1,12 +1,9 @@
 # matrixai.py
 
 import os
-import json
 import logging
 from typing import List, Dict, Any, Optional, Tuple
-from operator import itemgetter
-from functools import partial
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda, RunnableConfig
+from langchain_core.runnables import  RunnableLambda, RunnableConfig
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, BaseMessage, messages_from_dict, messages_to_dict
 from langchain_core.runnables.history import RunnableWithMessageHistory
@@ -141,9 +138,11 @@ class RagQueryThought(BaseModel):
     analysis: str = Field(description="Анализ последнего запроса пользователя в контексте истории диалога. Если пользователь ссылается на что-то из истории (например, номер пункта, местоимение 'он'/'она'/'это'), явно укажи, к какой сущности (услуге, врачу, филиалу) это относится, используя ее полное название из истории.")
     best_rag_query: str = Field(description="Сформулируй оптимальный, самодостаточный запрос для поиска описания или детальной информации об основной сущности запроса в векторной базе знаний. Используй полное имя/название сущности. Если запрос общий (приветствие, не по теме) или явно запрашивает вызов функции (цена, список филиалов/услуг/врачей и т.д.), оставь поле пустым или верни исходный запрос.")
 class FindEmployeesArgs(BaseModel):
-    employee_name: Optional[str] = Field(default=None, description="Часть или полное ФИО сотрудника")
-    service_name: Optional[str] = Field(default=None, description="Точное или частичное название услуги")
-    filial_name: Optional[str] = Field(default=None, description="Точное название филиала")
+    employee_name: Optional[str] = Field(default=None, description="Часть или полное ФИО сотрудника для фильтрации (опционально)")
+    service_name: Optional[str] = Field(default=None, description="Точное или частичное название КОНКРЕТНОЙ услуги для фильтрации (опционально)")
+    filial_name: Optional[str] = Field(default=None, description="Точное название филиала. Если указано только это поле, вернет ВСЕХ сотрудников филиала.")
+    page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
+    page_size: Optional[int] = Field(default=15, description="Количество сотрудников на странице для пагинации")
 def find_employees_tool(employee_name: Optional[str] = None, service_name: Optional[str] = None, filial_name: Optional[str] = None) -> str:
     """Ищет сотрудников клиники по ФИО, выполняемой услуге или филиалу."""
     handler = clinic_functions.FindEmployees(employee_name=employee_name, service_name=service_name, filial_name=filial_name)
@@ -161,6 +160,8 @@ def list_filials_tool() -> str:
     return handler.process()
 class GetEmployeeServicesArgs(BaseModel):
     employee_name: str = Field(description="Точное или максимально близкое ФИО сотрудника")
+    page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
+    page_size: Optional[int] = Field(default=20, description="Количество услуг на странице для пагинации")
 def get_employee_services_tool(employee_name: str) -> str:
     """Возвращает список услуг КОНКРЕТНОГО сотрудника."""
     handler = clinic_functions.GetEmployeeServices(employee_name=employee_name)
@@ -188,18 +189,24 @@ def find_service_locations_tool(service_name: str) -> str:
 class FindSpecialistsByServiceOrCategoryAndFilialArgs(BaseModel):
     query_term: str = Field(description="Название услуги ИЛИ категории")
     filial_name: str = Field(description="Точное название филиала")
+    page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
+    page_size: Optional[int] = Field(default=15, description="Количество специалистов на странице для пагинации")
 def find_specialists_by_service_or_category_and_filial_tool(query_term: str, filial_name: str) -> str:
     """Ищет СПЕЦИАЛИСТОВ по УСЛУГЕ/КАТЕГОРИИ в КОНКРЕТНОМ филиале."""
     handler = clinic_functions.FindSpecialistsByServiceOrCategoryAndFilial(query_term=query_term.lower(), filial_name=filial_name.lower())
     return handler.process()
 class ListServicesInCategoryArgs(BaseModel):
     category_name: str = Field(description="Точное название категории")
+    page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
+    page_size: Optional[int] = Field(default=20, description="Количество услуг на странице для пагинации")
 def list_services_in_category_tool(category_name: str) -> str:
     """Возвращает список КОНКРЕТНЫХ услуг в указанной КАТЕГОРИИ."""
     handler = clinic_functions.ListServicesInCategory(category_name=category_name)
     return handler.process()
 class ListServicesInFilialArgs(BaseModel):
     filial_name: str = Field(description="Точное название филиала")
+    page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
+    page_size: Optional[int] = Field(default=30, description="Количество услуг на странице для пагинации (учитывайте, что вывод также содержит заголовки категорий)")
 def list_services_in_filial_tool(filial_name: str) -> str:
     """Возвращает ПОЛНЫЙ список УНИКАЛЬНЫХ услуг в КОНКРЕТНОМ филиале."""
     handler = clinic_functions.ListServicesInFilial(filial_name=filial_name)
@@ -209,10 +216,15 @@ class FindServicesInPriceRangeArgs(BaseModel):
     max_price: float = Field(description="Максимальная цена")
     category_name: Optional[str] = Field(default=None, description="Опционально: категория")
     filial_name: Optional[str] = Field(default=None, description="Опционально: филиал")
+    page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
+    page_size: Optional[int] = Field(default=20, description="Количество услуг на странице для пагинации")
 def find_services_in_price_range_tool(min_price: float, max_price: float, category_name: Optional[str] = None, filial_name: Optional[str] = None) -> str:
     """Ищет услуги в ЗАДАННОМ ЦЕНОВОМ ДИАПАЗОНЕ."""
     handler = clinic_functions.FindServicesInPriceRange(min_price=min_price, max_price=max_price, category_name=category_name, filial_name=filial_name)
     return handler.process()
+class ListAllCategoriesArgs(BaseModel):
+    page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
+    page_size: Optional[int] = Field(default=30, description="Количество категорий на странице для пагинации")
 def list_all_categories_tool() -> str:
     """Возвращает список ВСЕХ категорий услуг."""
     handler = clinic_functions.ListAllCategories()
@@ -235,6 +247,7 @@ TOOL_CLASSES = [
     ListServicesInCategoryArgs,
     ListServicesInFilialArgs,
     FindServicesInPriceRangeArgs,
+    ListAllCategoriesArgs,
     ListEmployeeFilialsArgs,
 ]
 logger.info(f"Определено {len(TOOL_CLASSES)} Pydantic классов для аргументов инструментов.")
@@ -534,7 +547,7 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         list_services_in_category_tool: ListServicesInCategoryArgs,
         list_services_in_filial_tool: ListServicesInFilialArgs,
         find_services_in_price_range_tool: FindServicesInPriceRangeArgs,
-        list_all_categories_tool: None, 
+        list_all_categories_tool: ListAllCategoriesArgs,
         list_employee_filials_tool: ListEmployeeFilialsArgs,
     }
     def create_tool_wrapper(original_tool_func: callable, data_docs: Optional[List[Document]], raw_data: Optional[List[Dict]]):
