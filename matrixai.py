@@ -36,9 +36,10 @@ try:
 except ImportError as e:
     logging.critical(f"Критическая ошибка: Не удалось импортировать 'redis_history'. Ошибка: {e}", exc_info=True)
     exit()
-from clinic_index import build_indexes_for_tenant
+from clinic_index import build_indexes_for_tenant, get_id_by_name # <--- ДОБАВЛЕНО get_id_by_name
 import pytz
 from datetime import datetime
+import inspect # <--- ДОБАВЛЕНО
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s:%(name)s:%(lineno)d - %(message)s')
 logger = logging.getLogger(__name__)
 GIGACHAT_CREDENTIALS = "OTkyYTgyNGYtMjRlNC00MWYyLTg3M2UtYWRkYWVhM2QxNTM1OjA5YWRkODc0LWRjYWItNDI2OC04ZjdmLWE4ZmEwMDIxMThlYw=="
@@ -238,7 +239,7 @@ def list_employee_filials_tool(employee_name: str) -> str:
     return handler.process()
 from clinic_functions import GetFreeSlots, BookAppointment
 class GetFreeSlotsArgs(BaseModel):
-    tenant_id: str = Field(description="ID тенанта (клиники)")
+    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
     employee_name: str = Field(description="ФИО сотрудника (точно или частично)")
     service_names: List[str] = Field(description="Список названий услуг (точно)")
     date_time: str = Field(description="Дата для поиска слотов (формат YYYY-MM-DD)")
@@ -246,7 +247,7 @@ class GetFreeSlotsArgs(BaseModel):
     lang_id: str = Field(default="ru", description="Язык ответа")
     api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
 class BookAppointmentArgs(BaseModel):
-    tenant_id: str = Field(description="ID тенанта (клиники)")
+    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
     phone_number: str = Field(description="Телефон клиента")
     service_name: str = Field(description="Название услуги (точно)")
     employee_name: str = Field(description="ФИО сотрудника (точно)")
@@ -283,22 +284,152 @@ TOOL_CLASSES = [
 ]
 logger.info(f"Определено {len(TOOL_CLASSES)} Pydantic классов для аргументов инструментов.")
 
-def get_free_slots_tool(*, config=None, **kwargs) -> str:
-    # Автоматически прокидываем client_api_token из config
-    if config and isinstance(config, dict):
-        token = config.get('configurable', {}).get('client_api_token')
-        if token:
-            kwargs['api_token'] = token
-    handler = GetFreeSlots(**kwargs)
-    return handler.process()
+async def get_free_slots_tool(*, config=None, **kwargs_from_llm) -> str:
+    tenant_id_from_config = kwargs_from_llm.get('tenant_id')
+    api_token_from_config = kwargs_from_llm.get('api_token')
 
-def book_appointment_tool(*, config=None, **kwargs) -> str:
-    if config and isinstance(config, dict):
-        token = config.get('configurable', {}).get('client_api_token')
-        if token:
-            kwargs['api_token'] = token
-    handler = BookAppointment(**kwargs)
-    return handler.process()
+    if not tenant_id_from_config:
+        logger.error(f"tenant_id отсутствует в аргументах ({kwargs_from_llm}) для GetFreeSlots.")
+        return "Критическая ошибка: ID тенанта не был предоставлен для вызова GetFreeSlots."
+
+    employee_name_from_llm = kwargs_from_llm.get('employee_name')
+    service_names_from_llm = kwargs_from_llm.get('service_names')
+    filial_name_from_llm = kwargs_from_llm.get('filial_name')
+    date_time_from_llm = kwargs_from_llm.get('date_time')
+
+    logger.info(f"[get_free_slots_tool] Имена от LLM: employee='{employee_name_from_llm}', services='{service_names_from_llm}', filial='{filial_name_from_llm}'")
+
+    if not all([employee_name_from_llm, service_names_from_llm, filial_name_from_llm, date_time_from_llm]):
+        missing_fields = []
+        if not employee_name_from_llm: missing_fields.append('employee_name')
+        if not service_names_from_llm: missing_fields.append('service_names')
+        if not filial_name_from_llm: missing_fields.append('filial_name')
+        if not date_time_from_llm: missing_fields.append('date_time')
+        return f"Ошибка: отсутствуют обязательные поля от LLM: {', '.join(missing_fields)}"
+
+    # Преобразование имен в ID
+    logger.info(f"[get_free_slots_tool] Попытка получить ID для employee: '{employee_name_from_llm}'")
+    employee_id = get_id_by_name(tenant_id_from_config, 'employee', employee_name_from_llm)
+    logger.info(f"[get_free_slots_tool] Попытка получить ID для filial: '{filial_name_from_llm}'")
+    filial_id = get_id_by_name(tenant_id_from_config, 'filial', filial_name_from_llm)
+    
+    service_ids = []
+    if service_names_from_llm:
+        for s_name in service_names_from_llm:
+            logger.info(f"[get_free_slots_tool] Попытка получить ID для service: '{s_name}'")
+            s_id = get_id_by_name(tenant_id_from_config, 'service', s_name)
+            service_ids.append(s_id)
+
+    if not employee_id:
+        return f"Не удалось найти ID для сотрудника: '{employee_name_from_llm}'"
+    if not filial_id:
+        return f"Не удалось найти ID для филиала: '{filial_name_from_llm}'"
+    if not all(service_ids):
+        problematic_services = [s_name for s_name, s_id in zip(service_names_from_llm, service_ids) if not s_id]
+        return f"Не удалось найти ID для следующих услуг: {', '.join(problematic_services)}"
+
+    handler_args = {
+        "tenant_id": tenant_id_from_config,
+        "employee_id": employee_id,
+        "service_ids": service_ids,
+        "date_time": date_time_from_llm,
+        "filial_id": filial_id,
+        "api_token": api_token_from_config
+    }
+
+    try:
+        logger.debug(f"Создание экземпляра GetFreeSlots с аргументами (ID): {handler_args}")
+        handler = clinic_functions.GetFreeSlots(**handler_args)
+        logger.debug(f"Вызов handler.process() для GetFreeSlots")
+        return await handler.process()
+    except Exception as e:
+        logger.error(f"Ошибка при создании или обработке GetFreeSlots: {e}", exc_info=True)
+        error_type = getattr(e, '__class__', Exception).__name__
+        return f"Ошибка при обработке запроса на свободные слоты ({error_type}): {str(e)}"
+
+async def book_appointment_tool(*, config=None, **kwargs_from_llm) -> str:
+    tenant_id_from_config = kwargs_from_llm.get('tenant_id')
+    api_token_from_config = kwargs_from_llm.get('api_token')
+
+    if not tenant_id_from_config:
+        logger.error(f"tenant_id отсутствует в аргументах ({kwargs_from_llm}) для BookAppointment.")
+        return "Критическая ошибка: ID тенанта не был предоставлен для вызова BookAppointment."
+
+    # Извлекаем все необходимые поля от LLM
+    phone_number_from_llm = kwargs_from_llm.get('phone_number')
+    service_name_from_llm = kwargs_from_llm.get('service_name')
+    employee_name_from_llm = kwargs_from_llm.get('employee_name')
+    filial_name_from_llm = kwargs_from_llm.get('filial_name')
+    category_name_from_llm = kwargs_from_llm.get('category_name')
+    date_of_record_from_llm = kwargs_from_llm.get('date_of_record')
+    start_time_from_llm = kwargs_from_llm.get('start_time')
+    end_time_from_llm = kwargs_from_llm.get('end_time')
+    duration_of_time_from_llm = kwargs_from_llm.get('duration_of_time')
+    price_from_llm = kwargs_from_llm.get('price', 0)
+
+    logger.info(f"[book_appointment_tool] Имена от LLM: service='{service_name_from_llm}', employee='{employee_name_from_llm}', filial='{filial_name_from_llm}', category='{category_name_from_llm}'")
+
+    required_names = {
+        'phone_number': phone_number_from_llm,
+        'service_name': service_name_from_llm,
+        'employee_name': employee_name_from_llm,
+        'filial_name': filial_name_from_llm,
+        'category_name': category_name_from_llm,
+        'date_of_record': date_of_record_from_llm,
+        'start_time': start_time_from_llm,
+        'end_time': end_time_from_llm,
+        'duration_of_time': duration_of_time_from_llm
+    }
+    missing_fields = [name for name, val in required_names.items() if val is None]
+    if missing_fields:
+        logger.error(f"[book_appointment_tool] Отсутствуют обязательные поля от LLM: {', '.join(missing_fields)}. Аргументы от LLM: {kwargs_from_llm}")
+        return f"Ошибка: отсутствуют обязательные поля от LLM для записи: {', '.join(missing_fields)}"
+    
+    # Преобразование имен в ID
+    logger.info(f"[book_appointment_tool] Попытка получить ID для service: '{service_name_from_llm}'")
+    service_id = get_id_by_name(tenant_id_from_config, 'service', service_name_from_llm)
+    logger.info(f"[book_appointment_tool] Попытка получить ID для employee: '{employee_name_from_llm}'")
+    employee_id = get_id_by_name(tenant_id_from_config, 'employee', employee_name_from_llm)
+    logger.info(f"[book_appointment_tool] Попытка получить ID для filial: '{filial_name_from_llm}'")
+    filial_id = get_id_by_name(tenant_id_from_config, 'filial', filial_name_from_llm)
+    logger.info(f"[book_appointment_tool] Попытка получить ID для category: '{category_name_from_llm}'")
+    category_id = get_id_by_name(tenant_id_from_config, 'category', category_name_from_llm)
+
+    if not service_id: return f"Не удалось найти ID для услуги: '{service_name_from_llm}'"
+    if not employee_id: return f"Не удалось найти ID для сотрудника: '{employee_name_from_llm}'"
+    if not filial_id: return f"Не удалось найти ID для филиала: '{filial_name_from_llm}'"
+    if not category_id: return f"Не удалось найти ID для категории: '{category_name_from_llm}'"
+
+    handler_args = {
+        "tenant_id": tenant_id_from_config,
+        "phone_number": phone_number_from_llm,
+        "service_id": service_id,
+        "employee_id": employee_id,
+        "filial_id": filial_id,
+        "category_id": category_id,
+        "date_of_record": date_of_record_from_llm,
+        "start_time": start_time_from_llm,
+        "end_time": end_time_from_llm,
+        "duration_of_time": duration_of_time_from_llm,
+        "api_token": api_token_from_config,
+        "price": price_from_llm,
+        "sale_price": kwargs_from_llm.get('sale_price', 0),
+        "complex_service_id": kwargs_from_llm.get('complex_service_id', ""),
+        "color_code_record": kwargs_from_llm.get('color_code_record', ""),
+        "total_price": kwargs_from_llm.get('total_price', 0),
+        "traffic_channel": kwargs_from_llm.get('traffic_channel', 0),
+        "traffic_channel_id": kwargs_from_llm.get('traffic_channel_id', "")
+    }
+        
+    try:
+        logger.debug(f"Создание экземпляра BookAppointment с аргументами (ID): {handler_args}")
+        handler = clinic_functions.BookAppointment(**handler_args)
+        logger.debug(f"Вызов handler.process() для BookAppointment")
+        return await handler.process()
+    except Exception as e:
+        logger.error(f"Ошибка при создании или обработке BookAppointment: {e}", exc_info=True)
+        error_type = getattr(e, '__class__', Exception).__name__
+        return f"Ошибка при обработке запроса на запись ({error_type}): {str(e)}"
 
 TOOL_FUNCTIONS = [
     find_employees_tool,
@@ -451,7 +582,8 @@ def get_tenant_aware_history(composite_session_id: str) -> BaseChatMessageHistor
         logger.error(f"Ошибка в get_tenant_aware_history для '{composite_session_id}': {e}", exc_info=True)
         raise ValueError(f"Не удалось создать историю чата: {e}")
 from langchain_core.tools import Tool, StructuredTool
-def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
+
+async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str: # <--- ИЗМЕНЕНО на async def
     """
     Функция, имитирующая выполнение основного агента или цепочки.
     Принимает словарь с 'input' (вопрос пользователя) и RunnableConfig.
@@ -541,7 +673,7 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
              rag_prompt_messages.extend(history_messages)
         rag_prompt_messages.append(HumanMessage(content=question))
         logger.debug(f"[{tenant_id}:{user_id}] Вызов LLM для генерации RAG-запроса...")
-        rag_thought_result = rag_query_llm.invoke(rag_prompt_messages, config=config)
+        rag_thought_result = await rag_query_llm.ainvoke(rag_prompt_messages, config=config) # <--- ИЗМЕНЕНО на await .ainvoke
         if isinstance(rag_thought_result, RagQueryThought):
             rag_thought = rag_thought_result
             if rag_thought.best_rag_query and rag_thought.best_rag_query.strip():
@@ -637,16 +769,51 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
     for tool_function in TOOL_FUNCTIONS:
         tool_name = tool_function.__name__
         tool_description = tool_function.__doc__ or f"Инструмент {tool_name}"
-        args_schema = tool_func_to_schema_map.get(tool_function)
-        wrapped_func = create_tool_wrapper(tool_function, tenant_specific_docs, TENANT_RAW_DATA_MAP.get(tenant_id, []))
+        
+        current_args_schema = None
+        func_for_tool = None
+
+        # Обработка новых инструментов (get_free_slots_tool, book_appointment_tool)
+        if tool_name == "get_free_slots_tool":
+            current_args_schema = GetFreeSlotsArgs
+            func_for_tool = tool_function # Используется прямая функция из matrixai.py
+        elif tool_name == "book_appointment_tool":
+            current_args_schema = BookAppointmentArgs
+            func_for_tool = tool_function # Используется прямая функция из matrixai.py
+        # Обработка старых инструментов, которые используют wrapper и schema_map
+        elif tool_function in tool_func_to_schema_map:
+            current_args_schema = tool_func_to_schema_map.get(tool_function)
+            func_for_tool = create_tool_wrapper(tool_function, tenant_specific_docs, TENANT_RAW_DATA_MAP.get(tenant_id, []))
+        # Обработка инструментов без аргументов (например, list_filials_tool уже покрыт выше)
+        # или других старых инструментов, которые могли быть пропущены в schema_map, но требуют wrapper.
+        else: 
+            # Этот блок для инструментов, которые не являются get_free_slots/book_appointment
+            # и не находятся в tool_func_to_schema_map (например, если у них нет аргументов
+            # и они не были явно добавлены в map с None).
+            # Все инструменты из TOOL_FUNCTIONS должны быть либо новыми, либо в schema_map.
+            # Если инструмент не попал в предыдущие условия, это может быть ошибкой конфигурации.
+            # Однако, list_filials_tool обрабатывается `elif tool_function in tool_func_to_schema_map`
+            # т.к. он там есть с args_schema=None.
+            # Для безопасности, если инструмент не опознан, логируем и пропускаем,
+            # но лучшe чтобы все инструменты были явно обработаны.
+            # На данный момент, предполагается, что все "старые" инструменты, требующие обертку,
+            # имеют запись в tool_func_to_schema_map (даже если схема None).
+            logger.warning(f"Инструмент '{tool_name}' не был классифицирован для создания (не новый и не в schema_map). Использование стандартной обертки и schema=None.")
+            current_args_schema = None 
+            func_for_tool = create_tool_wrapper(tool_function, tenant_specific_docs, TENANT_RAW_DATA_MAP.get(tenant_id, []))
+
+        if func_for_tool is None: # Дополнительная проверка на случай, если func_for_tool не был назначен
+            logger.error(f"Не удалось определить функцию для инструмента '{tool_name}'. Пропуск создания инструмента.")
+            continue
+            
         langchain_tool = StructuredTool.from_function(
-            func=wrapped_func,
+            func=func_for_tool,
             name=tool_name,
             description=tool_description,
-            args_schema=args_schema
+            args_schema=current_args_schema
         )
         tenant_tools.append(langchain_tool)
-        logger.debug(f"{tool_name} {tenant_id}. Schema: {args_schema.__name__ if args_schema else 'None'}")
+        logger.debug(f"Инструмент '{tool_name}' создан для тенанта {tenant_id}. Schema: {current_args_schema.__name__ if current_args_schema else 'None'}")
     messages_for_llm = []
     messages_for_llm.append(SystemMessage(content=system_prompt))
     messages_for_llm.extend(history_messages)
@@ -656,7 +823,7 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
     llm_with_tools = chat_model.bind_tools(tenant_tools)
     logger.info(f"{chat_model.model_name} {len(tenant_tools)} {tenant_id}...")
     try:
-        ai_response_message: AIMessage = llm_with_tools.invoke(messages_for_llm, config=config)
+        ai_response_message: AIMessage = await llm_with_tools.ainvoke(messages_for_llm, config=config) # <--- ИЗМЕНЕНО на await .ainvoke
         tool_calls = ai_response_message.tool_calls
         if tool_calls:
              logger.info(f"{[tc['name'] for tc in tool_calls]}")
@@ -668,21 +835,62 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
                   found_tool = next((t for t in tenant_tools if t.name == tool_name), None)
                   if found_tool:
                       try:
-                          output = found_tool.invoke(tool_args, config=config)
+                          # --- Начало модификации для аргументов --- 
+                          current_tool_args_for_invoke = tool_args
+                          if tool_args is None or (isinstance(tool_args, dict) and tool_args.get('args') is None and len(tool_args) == 1):
+                              # Это может быть случай для инструментов без аргументов, где LLM передает {'args': None} или просто None
+                              # или если схема аргументов была None и LLM вернула None
+                              logger.info(f"Аргументы для {tool_name} были None или эквивалент. Используем {{}} для вызова.")
+                              current_tool_args_for_invoke = {}
+                          elif isinstance(tool_args, dict) and 'args' in tool_args and tool_args.get('args') is None and len(tool_args) == 1:
+                               # Явный случай {'args': None}, который вызывает ошибку валидации Pydantic для инструментов без аргументов
+                               logger.info(f"Аргументы для {tool_name} были {{'args': None}}. Используем {{}} для вызова.")
+                               current_tool_args_for_invoke = {}
+
+                          # --- Начало модификации для get_free_slots_tool и book_appointment_tool ---
+                          if tool_name in ["get_free_slots_tool", "book_appointment_tool"]:
+                              if not isinstance(current_tool_args_for_invoke, dict):
+                                  logger.error(f"Ожидался dict для tool_args у {tool_name}, получено: {type(current_tool_args_for_invoke)}. Формирование вызова невозможно.")
+                                  raise ValueError(f"Аргументы для {tool_name} должны быть словарем, получено {type(current_tool_args_for_invoke)}")
+
+                              current_tenant_id = configurable.get("tenant_id")
+                              current_client_api_token = configurable.get("client_api_token")
+
+                              if not current_tenant_id:
+                                  logger.error(f"Критическая ошибка: tenant_id не найден в 'configurable' ({configurable}) при попытке подготовить вызов {tool_name}.")
+                                  raise ValueError(f"tenant_id отсутствует в конфигурации для обязательного использования в инструменте {tool_name}")
+                              
+                              current_tool_args_for_invoke['tenant_id'] = current_tenant_id
+                              if current_client_api_token:
+                                  current_tool_args_for_invoke['api_token'] = current_client_api_token
+                              elif 'api_token' not in current_tool_args_for_invoke:
+                                   current_tool_args_for_invoke['api_token'] = None
+                              
+                              logger.info(f"Обновленные аргументы для '{tool_name}' после добавления tenant_id/api_token: {current_tool_args_for_invoke}")
+                          # --- Конец модификации ---
+
+                          raw_output = await found_tool.ainvoke(current_tool_args_for_invoke, config=config) # Используем current_tool_args_for_invoke
+                          
+                          if inspect.iscoroutine(raw_output):
+                              logger.warning(f"Инструмент '{tool_name}' .ainvoke вернул короутину. Ожидаем ее явно.")
+                              output = await raw_output
+                          else:
+                              output = raw_output
+                              
                           output_str = str(output)
                           tool_outputs.append(ToolMessage(content=output_str, tool_call_id=tool_call["id"]))
-                          logger.info(f"{tool_name}: {output_str[:100]}...")
+                          logger.info(f"Результат вызова инструмента '{tool_name}': {output_str[:100]}...")
                       except Exception as e:
-                           error_message = f"Ошибка: Инструмент '{tool_name}' не смог успешно выполнить действие."
-                           logger.error(f"{tool_name} {e}", exc_info=True)
+                           error_message = f"Ошибка при вызове инструмента '{tool_name}': {type(e).__name__} - {str(e)}"
+                           logger.error(f"Ошибка вызова инструмента '{tool_name}' с аргументами {current_tool_args_for_invoke}: {e}", exc_info=True)
                            tool_outputs.append(ToolMessage(content=error_message, tool_call_id=tool_call["id"]))
                   else:
-                      logger.error(f"{tool_name} {tenant_tools}.")
+                      logger.error(f"Инструмент '{tool_name}' не найден среди доступных для тенанта {tenant_id}. Доступные инструменты: {[t.name for t in tenant_tools]}.")
                       tool_outputs.append(ToolMessage(content=f"Ошибка: Инструмент {tool_name} не найден.", tool_call_id=tool_call["id"]))
              messages_for_llm.append(ai_response_message)
              messages_for_llm.extend(tool_outputs)
              logger.info("")
-             final_response_message = llm_with_tools.invoke(messages_for_llm, config=config)
+             final_response_message = await llm_with_tools.ainvoke(messages_for_llm, config=config) # <--- ИЗМЕНЕНО на await .ainvoke
              final_answer = final_response_message.content
              logger.info(f"[{tenant_id}:{user_id}] Итоговый ответ (первые 100 симв): {final_answer[:100]}...")
              return final_answer

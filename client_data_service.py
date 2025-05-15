@@ -418,20 +418,18 @@ async def get_client_context_for_agent(
 
 async def get_free_times_of_employee_by_services(
     tenant_id: str,
-    employee_name: str,
-    service_names: list,
+    employee_id: str,
+    service_ids: list,
     date_time: str,
-    filial_name: str,
+    filial_id: str,
     lang_id: str = "ru",
-    api_url: str = "https://dev.back.matrixcrm.ru/api/v1/AI/getFreeTimesOfEmployeeByChoosenServices",
+    api_url: str = "https://back.matrixcrm.ru/api/v1/AI/getFreeTimesOfEmployeeByChoosenServices",
     api_token: str = None
 ) -> dict:
     """
     Получить свободные слоты для сотрудника по выбранным услугам.
+    Ожидает ID для сотрудника, услуг и филиала.
     """
-    employee_id = get_id_by_name(tenant_id, 'employee', employee_name)
-    filial_id = get_id_by_name(tenant_id, 'filial', filial_name)
-    service_ids = [get_id_by_name(tenant_id, 'service', s) for s in service_names]
     payload = {
         "employeeId": employee_id,
         "serviceId": service_ids,
@@ -451,16 +449,17 @@ async def get_free_times_of_employee_by_services(
 async def add_record(
     tenant_id: str,
     phone_number: str,
-    service_name: str,
-    employee_name: str,
-    filial_name: str,
-    category_name: str,
+    service_id: str,
+    employee_id: str,
+    filial_id: str,
+    category_id: str,
+    service_original_name: str,
     date_of_record: str,
     start_time: str,
     end_time: str,
     duration_of_time: int,
     lang_id: str = "ru",
-    api_url: str = "https://dev.back.matrixcrm.ru/api/v1/AI/addRecord",
+    api_url: str = "https://back.matrixcrm.ru/api/v1/AI/addRecord",
     api_token: str = None,
     price: float = 0,
     sale_price: float = 0,
@@ -472,11 +471,8 @@ async def add_record(
 ) -> dict:
     """
     Создать запись клиента на услугу.
+    Ожидает ID для услуги, сотрудника, филиала, категории.
     """
-    service_id = get_id_by_name(tenant_id, 'service', service_name)
-    employee_id = get_id_by_name(tenant_id, 'employee', employee_name)
-    filial_id = get_id_by_name(tenant_id, 'filial', filial_name)
-    category_id = get_id_by_name(tenant_id, 'category', category_name)
     payload = {
         "langId": lang_id,
         "clientPhoneNumber": phone_number,
@@ -485,7 +481,7 @@ async def add_record(
                 "rowNumber": 0,
                 "categoryId": category_id,
                 "serviceId": service_id,
-                "serviceName": service_name,
+                "serviceName": service_original_name,
                 "countService": 1,
                 "price": price,
                 "salePrice": sale_price,

@@ -10,6 +10,7 @@ import asyncio
 
 # --- Глобальное хранилище данных ---
 _internal_clinic_data: List[Dict[str, Any]] = []
+logger = logging.getLogger(__name__)
 
 def set_clinic_data(data: List[Dict[str, Any]]):
     """
@@ -862,49 +863,86 @@ class ListEmployeeFilials(BaseModel):
 
 class GetFreeSlots(BaseModel):
     tenant_id: str
-    employee_name: str
-    service_names: List[str]
+    employee_id: str
+    service_ids: List[str]
     date_time: str
-    filial_name: str
+    filial_id: str
     lang_id: str = "ru"
     api_token: Optional[str] = None
 
-    def process(self, **kwargs) -> str:
+    async def process(self, **kwargs) -> str:
         try:
-            employee_id = get_id_by_name(self.tenant_id, 'employee', self.employee_name)
-            filial_id = get_id_by_name(self.tenant_id, 'filial', self.filial_name)
-            service_ids = [get_id_by_name(self.tenant_id, 'service', s) for s in self.service_names]
-            if not employee_id:
-                return f"Сотрудник '{self.employee_name}' не найден (нет ID)."
-            if not filial_id:
-                return f"Филиал '{self.filial_name}' не найден (нет ID)."
-            if not all(service_ids):
-                return f"Одна или несколько услуг не найдены (нет ID): {[s for s, sid in zip(self.service_names, service_ids) if not sid]}"
-            loop = asyncio.get_event_loop()
-            result = loop.run_until_complete(get_free_times_of_employee_by_services(
+            if not self.employee_id:
+                return f"ID сотрудника не предоставлен."
+            if not self.filial_id:
+                return f"ID филиала не предоставлен."
+            if not all(self.service_ids):
+                return f"Один или несколько ID услуг не предоставлены или пусты."
+            
+            result = await get_free_times_of_employee_by_services(
                 tenant_id=self.tenant_id,
-                employee_name=employee_id,  # теперь ID
-                service_names=service_ids,  # теперь список ID
+                employee_id=self.employee_id,
+                service_ids=self.service_ids,
                 date_time=self.date_time,
-                filial_name=filial_id,      # теперь ID
+                filial_id=self.filial_id,
                 lang_id=self.lang_id,
                 api_token=self.api_token
-            ))
-            slots = result.get('data') or result.get('slots') or []
-            if not slots:
-                return "Свободные слоты не найдены. Попробуйте выбрать другую дату или специалиста."
-            slot_lines = [f"{slot.get('startTime')} - {slot.get('endTime')}" for slot in slots]
-            return "Доступные слоты:\n" + "\n".join(slot_lines)
+            )
+
+            if not isinstance(result, dict):
+                logger.error(f"get_free_times_of_employee_by_services вернул не словарь: {type(result)} - '{str(result)[:200]}'")
+                # Попытаемся извлечь сообщение об ошибке, если это возможно
+                error_message = str(result)
+                if hasattr(result, 'get'): # Если вдруг это какой-то dict-like объект, но не dict
+                    error_message = result.get("message", result.get("error", str(result)))
+                return f"Ошибка API при получении слотов: {error_message}"
+
+            slots_data_from_api = result.get('data') or result.get('slots')
+            
+            processed_slot_dicts = []
+            if isinstance(slots_data_from_api, list):
+                for item in slots_data_from_api:
+                    if isinstance(item, dict):
+                        processed_slot_dicts.append(item)
+                    else:
+                        logger.warning(f"Неожиданный тип ({type(item)}) элемента в списке слотов от API. Содержимое: '{str(item)[:100]}'. Элемент будет проигнорирован.")
+            elif slots_data_from_api is not None:
+                logger.warning(f"Ожидался список для 'data' или 'slots' от API, но получен {type(slots_data_from_api)}. Содержимое: '{str(slots_data_from_api)[:100]}'. Слоты не будут обработаны.")
+
+            if not processed_slot_dicts:
+                api_error_message = result.get("message") or result.get("error")
+                if result.get("code") != 200 and api_error_message:
+                    logger.error(f"API (код {result.get('code')}) вернуло ошибку или пустые данные для слотов: {api_error_message}. Ответ: {str(result)[:500]}")
+                    return f"Не удалось получить свободные слоты: {api_error_message}"
+                logger.info(f"Либо не найдено слотов, либо данные от API в неверном формате. Ответ API: {str(result)[:500]}")
+                return "Свободные слоты не найдены или данные от API в неверном формате. Попробуйте выбрать другую дату или специалиста."
+
+            slot_lines = []
+            for slot_dict in processed_slot_dicts:
+                start_time = slot_dict.get('startTime')
+                end_time = slot_dict.get('endTime')
+                # Дополнительно проверим, что startTime и endTime не пустые строки, если они есть
+                if start_time and isinstance(start_time, str) and end_time and isinstance(end_time, str):
+                    slot_lines.append(f"{start_time} - {end_time}")
+                else:
+                    logger.warning(f"Слот в списке processed_slot_dicts имеет неполные или некорректные данные (startTime/endTime): {slot_dict}")
+            
+            if not slot_lines:
+                 logger.warning(f"Не удалось извлечь время из доступных слотов из-за формата данных после фильтрации. processed_slot_dicts: {processed_slot_dicts}")
+                 return "Не удалось корректно обработать информацию о доступных слотах."
+            
+            return "Доступные слоты:\\n" + "\\n".join(slot_lines)
         except Exception as e:
-            return f"Ошибка при получении свободных слотов: {e}"
+            logger.error(f"Ошибка в GetFreeSlots.process для tenant '{self.tenant_id}', employee_id '{self.employee_id}': {e}", exc_info=True)
+            return f"Ошибка при получении свободных слотов: {type(e).__name__} - {e}"
 
 class BookAppointment(BaseModel):
     tenant_id: str
     phone_number: str
-    service_name: str
-    employee_name: str
-    filial_name: str
-    category_name: str
+    service_id: str
+    employee_id: str
+    filial_id: str
+    category_id: str
     date_of_record: str
     start_time: str
     end_time: str
@@ -916,31 +954,27 @@ class BookAppointment(BaseModel):
     complex_service_id: str = ""
     color_code_record: str = ""
     total_price: float = 0
-    traffic_channel: int = 0
-    traffic_channel_id: str = ""
+    traffic_channel: int = Field(default=0, description="Канал трафика (опционально)")
+    traffic_channel_id: str = Field(default="", description="ID канала трафика (опционально)")
 
-    def process(self, **kwargs) -> str:
+    async def process(self, **kwargs) -> str:
         try:
-            service_id = get_id_by_name(self.tenant_id, 'service', self.service_name)
-            employee_id = get_id_by_name(self.tenant_id, 'employee', self.employee_name)
-            filial_id = get_id_by_name(self.tenant_id, 'filial', self.filial_name)
-            category_id = get_id_by_name(self.tenant_id, 'category', self.category_name)
-            if not service_id:
-                return f"Услуга '{self.service_name}' не найдена (нет ID)."
-            if not employee_id:
-                return f"Сотрудник '{self.employee_name}' не найден (нет ID)."
-            if not filial_id:
-                return f"Филиал '{self.filial_name}' не найден (нет ID)."
-            if not category_id:
-                return f"Категория '{self.category_name}' не найдена (нет ID)."
-            loop = asyncio.get_event_loop()
-            result = loop.run_until_complete(add_record(
+            if not self.service_id:
+                return f"ID услуги не предоставлен."
+            if not self.employee_id:
+                return f"ID сотрудника не предоставлен."
+            if not self.filial_id:
+                return f"ID филиала не предоставлен."
+            if not self.category_id:
+                return f"ID категории не предоставлен."
+
+            result = await add_record(
                 tenant_id=self.tenant_id,
                 phone_number=self.phone_number,
-                service_name=service_id,  # теперь ID
-                employee_name=employee_id,  # теперь ID
-                filial_name=filial_id,      # теперь ID
-                category_name=category_id,  # теперь ID
+                service_id=self.service_id,
+                employee_id=self.employee_id,
+                filial_id=self.filial_id,
+                category_id=self.category_id,
                 date_of_record=self.date_of_record,
                 start_time=self.start_time,
                 end_time=self.end_time,
@@ -954,10 +988,11 @@ class BookAppointment(BaseModel):
                 total_price=self.total_price,
                 traffic_channel=self.traffic_channel,
                 traffic_channel_id=self.traffic_channel_id
-            ))
+            )
             if result.get('code') == 200:
                 return "Запись успешно создана!"
             else:
                 return f"Ошибка при создании записи: {result.get('message', 'Неизвестная ошибка')}"
         except Exception as e:
-            return f"Ошибка при создании записи: {e}"
+            logger.error(f"Ошибка в BookAppointment.process для tenant '{self.tenant_id}', service_id '{self.service_id}': {e}", exc_info=True)
+            return f"Ошибка при создании записи: {type(e).__name__} - {e}"

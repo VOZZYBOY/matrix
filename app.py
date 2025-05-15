@@ -13,7 +13,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from langchain_core.runnables import Runnable
-import pytz  
 
 from client_data_service import get_client_context_for_agent
 
@@ -186,7 +185,8 @@ async def ask_assistant(
                 "configurable": {
                     "session_id": composite_session_id,
                     "user_id": user_id_for_agent_chat_history,
-                    "tenant_id": tenant_id
+                    "tenant_id": tenant_id,
+                    "client_api_token": request.client_api_token
                  }
             }
         )
