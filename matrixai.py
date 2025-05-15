@@ -8,7 +8,7 @@ from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, BaseMessage, messages_from_dict, messages_to_dict
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_deepseek import ChatDeepSeek
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 import chromadb
 from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
@@ -36,30 +36,27 @@ try:
 except ImportError as e:
     logging.critical(f"Критическая ошибка: Не удалось импортировать 'redis_history'. Ошибка: {e}", exc_info=True)
     exit()
+from clinic_index import build_indexes_for_tenant
+import pytz
+from datetime import datetime
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s:%(name)s:%(lineno)d - %(message)s')
 logger = logging.getLogger(__name__)
 GIGACHAT_CREDENTIALS = "OTkyYTgyNGYtMjRlNC00MWYyLTg3M2UtYWRkYWVhM2QxNTM1OjA5YWRkODc0LWRjYWItNDI2OC04ZjdmLWE4ZmEwMDIxMThlYw=="
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "sk-1aae129014ac42e3804329d6d44497ce")
-if not DEEPSEEK_API_KEY:
-    logger.critical("Критическая ошибка: Ключ DeepSeek API не найден (DEEPSEEK_API_KEY).")
-    exit()
 JSON_DATA_PATH = os.environ.get("JSON_DATA_PATH", "base/cleaned_data.json")
 CHROMA_PERSIST_DIR = os.environ.get("CHROMA_PERSIST_DIR", "chroma_db_clinic_giga")
 GIGA_EMBEDDING_MODEL = os.environ.get("GIGA_EMBEDDING_MODEL", "EmbeddingsGigaR")
 GIGA_SCOPE = os.environ.get("GIGA_SCOPE", "GIGACHAT_API_PERS")
 GIGA_VERIFY_SSL = os.getenv("GIGA_VERIFY_SSL", "False").lower() == "true"
-DEEPSEEK_CHAT_MODEL = os.environ.get("DEEPSEEK_CHAT_MODEL", "deepseek-chat")
 TENANT_COLLECTION_PREFIX = "tenant_" 
 try:
-    chat_model = ChatDeepSeek(
-        model=DEEPSEEK_CHAT_MODEL,
-        api_key=DEEPSEEK_API_KEY,
-        temperature=0.1,
-        max_tokens=8192,
+    chat_model = ChatOpenAI(
+        model="gpt-4.1",
+        max_tokens=4096,
+        api_key="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"
     )
-    logger.info(f"Чат модель DeepSeek '{DEEPSEEK_CHAT_MODEL}' инициализирована.")
+    logger.info("Чат модель OpenAI o3-mini инициализирована.")
 except Exception as e:
-    logger.critical(f"Ошибка инициализации модели DeepSeek Chat: {e}", exc_info=True)
+    logger.critical(f"Ошибка инициализации модели OpenAI Chat: {e}", exc_info=True)
     exit()
 # Глобальные переменные для RAG компонентов (будут инициализированы при старте)
 CHROMA_CLIENT: Optional[chromadb.ClientAPI] = None
@@ -102,6 +99,9 @@ def initialize_rag_components():
             TENANT_DOCUMENTS_MAP = tenant_docs_init
             TENANT_RAW_DATA_MAP = raw_data_init
             SERVICE_DETAILS_MAP_GLOBAL = service_details_map_init
+            # --- Построение индексов для каждого тенанта ---
+            for tenant_id, raw_data in TENANT_RAW_DATA_MAP.items():
+                build_indexes_for_tenant(tenant_id, raw_data)
             logger.info(f"Инициализация RAG завершена. Загружено:")
             logger.info(f"  - Chroma клиент: {'Да' if CHROMA_CLIENT else 'Нет'}")
             logger.info(f"  - Embeddings: {'Да' if EMBEDDINGS_GIGA else 'Нет'}")
@@ -236,6 +236,35 @@ def list_employee_filials_tool(employee_name: str) -> str:
     logger.info(f"Вызов list_employee_filials_tool для: {employee_name}")
     handler = clinic_functions.ListEmployeeFilials(employee_name=employee_name)
     return handler.process()
+from clinic_functions import GetFreeSlots, BookAppointment
+class GetFreeSlotsArgs(BaseModel):
+    tenant_id: str = Field(description="ID тенанта (клиники)")
+    employee_name: str = Field(description="ФИО сотрудника (точно или частично)")
+    service_names: List[str] = Field(description="Список названий услуг (точно)")
+    date_time: str = Field(description="Дата для поиска слотов (формат YYYY-MM-DD)")
+    filial_name: str = Field(description="Название филиала (точно)")
+    lang_id: str = Field(default="ru", description="Язык ответа")
+    api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
+class BookAppointmentArgs(BaseModel):
+    tenant_id: str = Field(description="ID тенанта (клиники)")
+    phone_number: str = Field(description="Телефон клиента")
+    service_name: str = Field(description="Название услуги (точно)")
+    employee_name: str = Field(description="ФИО сотрудника (точно)")
+    filial_name: str = Field(description="Название филиала (точно)")
+    category_name: str = Field(description="Название категории (точно)")
+    date_of_record: str = Field(description="Дата записи (YYYY-MM-DD)")
+    start_time: str = Field(description="Время начала (HH:MM)")
+    end_time: str = Field(description="Время окончания (HH:MM)")
+    duration_of_time: int = Field(description="Длительность услуги (минуты)")
+    lang_id: str = Field(default="ru", description="Язык ответа")
+    api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
+    price: float = Field(default=0, description="Цена услуги")
+    sale_price: float = Field(default=0, description="Цена со скидкой")
+    complex_service_id: str = Field(default="", description="ID комплексной услуги (если есть)")
+    color_code_record: str = Field(default="", description="Цвет записи (опционально)")
+    total_price: float = Field(default=0, description="Общая цена")
+    traffic_channel: int = Field(default=0, description="Канал трафика (опционально)")
+    traffic_channel_id: str = Field(default="", description="ID канала трафика (опционально)")
 TOOL_CLASSES = [
     FindEmployeesArgs,
     GetServicePriceArgs,
@@ -249,8 +278,28 @@ TOOL_CLASSES = [
     FindServicesInPriceRangeArgs,
     ListAllCategoriesArgs,
     ListEmployeeFilialsArgs,
+    GetFreeSlotsArgs,  # Новый класс-аргументы
+    BookAppointmentArgs,  # Новый класс-аргументы
 ]
 logger.info(f"Определено {len(TOOL_CLASSES)} Pydantic классов для аргументов инструментов.")
+
+def get_free_slots_tool(*, config=None, **kwargs) -> str:
+    # Автоматически прокидываем client_api_token из config
+    if config and isinstance(config, dict):
+        token = config.get('configurable', {}).get('client_api_token')
+        if token:
+            kwargs['api_token'] = token
+    handler = GetFreeSlots(**kwargs)
+    return handler.process()
+
+def book_appointment_tool(*, config=None, **kwargs) -> str:
+    if config and isinstance(config, dict):
+        token = config.get('configurable', {}).get('client_api_token')
+        if token:
+            kwargs['api_token'] = token
+    handler = BookAppointment(**kwargs)
+    return handler.process()
+
 TOOL_FUNCTIONS = [
     find_employees_tool,
     get_service_price_tool,
@@ -265,6 +314,8 @@ TOOL_FUNCTIONS = [
     find_services_in_price_range_tool,
     list_all_categories_tool,
     list_employee_filials_tool,
+    get_free_slots_tool, 
+    book_appointment_tool,  
 ]
 logger.info(f"Определено {len(TOOL_FUNCTIONS)} функций-инструментов для динамической привязки.")
 SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ и информативный ИИ-ассистент.
@@ -297,7 +348,7 @@ SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ 
     - Не повторяй дословно всю информацию из резюме. Используй ее для того, чтобы сделать диалог более естественным и релевантным для клиента.
     - Если клиент задает вопрос, который можно связать с его предпочтениями (например, "посоветуйте процедуру"), его прошлые услуги могут быть хорошей отправной точкой для рекомендации.
 
-ПРИВЕТСТВИЕ И ИНИЦИАЛЬНАЯ ИНФОРМАЦИЯ:
+ПРИВЕТСТВИЕ И ИНФОРМАЦИЯ:
 - Если ты получаешь информацию о предыдущих записях клиента (блок "Предыдущие записи клиента...") ИЛИ "Резюме предпочтений клиента", И это начало диалога (например, первое сообщение от пользователя или история чата пуста/короткая), начни свой ПЕРВЫЙ ответ с краткого и дружелюбного упоминания этой информации.
 - Например: "Здравствуйте, [Имя клиента, если известно]! Вижу у вас есть недавние записи: [кратко 1-2 последние записи]. Чем могу помочь сегодня?"
 - Или, если есть только резюме: "Приветствую! Заметил, вы часто пользуетесь [услуга] и посещаете [специалист/филиал]. Что вас интересует сегодня?"
@@ -305,7 +356,7 @@ SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ 
 - Если информации о клиенте или его записях нет, просто начни диалог стандартным приветствием.
 
 ВЫБОР МЕЖДУ RAG, FUNCTION CALLING, ПАМЯТЬЮ ДИАЛОГА ИЛИ ПРЯМЫМ ОТВЕТОМ:
-- ПАМЯТЬ ДИАЛОГА: Для ответов на вопросы, связанные с предыдущим контекстом (местоимения "он/она/это", короткие вопросы "где?", "цена?", "кто?"), и для вопросов о самом пользователе.
+- ПАМЯТЬ ДИАЛОГА: Для ответов на вопросы, связанные с предыдущим контекстом (местоимения "он/она/это", короткие вопросы "где?", "цена?", "кто?") , и для вопросов о самом пользователе.
 - RAG (Поиск по базе знаний): Используй ТОЛЬКО для ЗАПРОСОВ **ОПИСАНИЯ** услуг, врачей ИЛИ **ОБЩЕЙ ИНФОРМАЦИИ О КЛИНИКЕ** (например, "расскажи о компании", "какой у вас подход?", "сколько филиалов?"). Я предоставлю контекст. Синтезируй ответ на его основе.
     - **НОВИНКА: Информация о показаниях и противопоказаниях**: Для некоторых услуг в RAG-контексте теперь может содержаться информация о ПОКАЗАНИЯХ и ПРОТИВОПОКАЗАНИЯХ.
         - Если пользователь спрашивает общее описание услуги, ты можешь кратко упомянуть о наличии таких деталей (например, "...также у процедуры есть свои показания и противопоказания.") и предложить рассказать подробнее, если ему интересно.
@@ -523,6 +574,14 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         logger.error(f"Ошибка выполнения RAG поиска для тенанта {tenant_id} с запросом '{effective_rag_query}': {e}", exc_info=True)
         rag_context = "[Ошибка получения информации из базы знаний]"
     system_prompt = SYSTEM_PROMPT
+    # Добавляем инфо о дате/времени в начало system_prompt
+    tz = pytz.timezone('Europe/Moscow')
+    now = datetime.now(tz)
+    date_str = now.strftime('%d %B %Y')
+    weekday_str = now.strftime('%A')
+    time_str = now.strftime('%H:%M')
+    datetime_info = f"Сегодня: {date_str}, {weekday_str}, текущее время: {time_str} (Europe/Moscow)"
+    system_prompt = f"{datetime_info}\n\n" + system_prompt
     prompt_addition = None
     if tenant_config_manager:
         settings = tenant_config_manager.load_tenant_settings(tenant_id)
@@ -554,35 +613,23 @@ def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         def actual_wrapper(*args, **kwargs) -> str:
             tool_name = original_tool_func.__name__
             logger.info(f"Вызов обертки для инструмента {tool_name} с args: {args}, kwargs: {kwargs}")
+            
+            # Устанавливаем данные клиники для текущего тенанта
+            clinic_functions.set_clinic_data(raw_data if raw_data is not None else [])
+            
             try:
-                # Важно: теперь kwargs - это словарь аргументов, переданный LLM для инструмента
-                # (например, {'filial_name': 'Ходынка', 'page_number': 2})
-                # Он должен напрямую использоваться для инициализации Pydantic модели.
-                
                 handler_class_name = ''.join(word.capitalize() for word in tool_name.replace('_tool', '').split('_'))
                 HandlerClass = getattr(clinic_functions, handler_class_name, None)
-                
                 if not HandlerClass:
                     logger.error(f"Не найден класс-обработчик '{handler_class_name}' в clinic_functions для функции {tool_name}")
                     return f"Ошибка: Некорректная конфигурация инструмента {tool_name}."
-
-                # Инициализируем Pydantic модель всеми kwargs, полученными от LLM
-                handler_instance = HandlerClass(**kwargs) 
-                
+                handler_instance = HandlerClass(**kwargs)
+                # Универсальный вызов process без лишних аргументов
                 if hasattr(handler_instance, 'process') and callable(getattr(handler_instance, 'process')):
-                    if data_docs is not None:
-                         logger.debug(f"Передача {len(data_docs)} документов в {handler_class_name}.process")
-                         # process теперь не должен принимать kwargs напрямую, т.к. они уже в self экземпляра
-                         return handler_instance.process(
-                             tenant_data_docs=data_docs,
-                             raw_data=raw_data
-                         )
-                    else:
-                         logger.warning(f"{handler_class_name} {tool_name}")
-                         return f"Ошибка: Отсутствуют данные тенанта для инструмента {tool_name}."
+                    return handler_instance.process()
                 else:
-                     logger.error(f"{handler_class_name}")
-                     return f"Ошибка: Некорректная конфигурация инструмента {handler_class_name}."
+                    logger.error(f"У обработчика {handler_class_name} отсутствует метод process.")
+                    return f"Ошибка: У обработчика {handler_class_name} отсутствует метод process."
             except Exception as e:
                 logger.error(f"{tool_name}: {e}", exc_info=True)
                 return f"При выполнении инструмента {tool_name} произошла ошибка."
@@ -689,11 +736,6 @@ async def trigger_reindex_tenant_async(tenant_id: str) -> bool:
     except Exception as e:
         logger.error(f"[Async Trigger] Исключение во время запуска переиндексации для тенанта {tenant_id}: {e}", exc_info=True)
         return False
-
-# --- Конец: Асинхронный триггер для переиндексации данных одного тенанта ---
-
-# Инициализация RAG должна быть вызвана до создания agent_runnable
-# initialize_rag_components() # Убедимся, что она вызывается один раз, если уже не сделано ранее
 
 agent_runnable = RunnableLambda(run_agent_like_chain)
 agent_with_history = RunnableWithMessageHistory(

@@ -3,6 +3,7 @@ import logging
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
 import datetime
+from clinic_index import get_id_by_name
 
 logger = logging.getLogger(__name__)
 
@@ -401,7 +402,7 @@ async def get_client_context_for_agent(
             if filial_descs:
                 prefix = "Посещал(а) филиал(ы): " if len(filial_descs) > 1 else "Основной филиал посещений: "
                 if len(analysis_results.top_filials) == 1:
-                     prefix = "Чаще всего посещал(а) филиал: " # Уточняем для одного филиала
+                     prefix = "Чаще всего посещал(а) филиал: " 
                 summary_for_prompt.append(f"{prefix}{', '.join(filial_descs)}.")
 
         if summary_for_prompt:
@@ -413,4 +414,100 @@ async def get_client_context_for_agent(
         logger.info("Не удалось сформировать контекст о клиенте.")
         return ""
 
-    return "\n".join(context_parts) 
+    return "\n".join(context_parts)
+
+async def get_free_times_of_employee_by_services(
+    tenant_id: str,
+    employee_name: str,
+    service_names: list,
+    date_time: str,
+    filial_name: str,
+    lang_id: str = "ru",
+    api_url: str = "https://dev.back.matrixcrm.ru/api/v1/AI/getFreeTimesOfEmployeeByChoosenServices",
+    api_token: str = None
+) -> dict:
+    """
+    Получить свободные слоты для сотрудника по выбранным услугам.
+    """
+    employee_id = get_id_by_name(tenant_id, 'employee', employee_name)
+    filial_id = get_id_by_name(tenant_id, 'filial', filial_name)
+    service_ids = [get_id_by_name(tenant_id, 'service', s) for s in service_names]
+    payload = {
+        "employeeId": employee_id,
+        "serviceId": service_ids,
+        "dateTime": date_time,
+        "tenantId": tenant_id,
+        "filialId": filial_id,
+        "langId": lang_id
+    }
+    headers = {"accept": "*/*", "Content-Type": "application/json"}
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(api_url, json=payload, headers=headers, timeout=15.0)
+        resp.raise_for_status()
+        return resp.json()
+
+async def add_record(
+    tenant_id: str,
+    phone_number: str,
+    service_name: str,
+    employee_name: str,
+    filial_name: str,
+    category_name: str,
+    date_of_record: str,
+    start_time: str,
+    end_time: str,
+    duration_of_time: int,
+    lang_id: str = "ru",
+    api_url: str = "https://dev.back.matrixcrm.ru/api/v1/AI/addRecord",
+    api_token: str = None,
+    price: float = 0,
+    sale_price: float = 0,
+    complex_service_id: str = "",
+    color_code_record: str = "",
+    total_price: float = 0,
+    traffic_channel: int = 0,
+    traffic_channel_id: str = ""
+) -> dict:
+    """
+    Создать запись клиента на услугу.
+    """
+    service_id = get_id_by_name(tenant_id, 'service', service_name)
+    employee_id = get_id_by_name(tenant_id, 'employee', employee_name)
+    filial_id = get_id_by_name(tenant_id, 'filial', filial_name)
+    category_id = get_id_by_name(tenant_id, 'category', category_name)
+    payload = {
+        "langId": lang_id,
+        "clientPhoneNumber": phone_number,
+        "services": [
+            {
+                "rowNumber": 0,
+                "categoryId": category_id,
+                "serviceId": service_id,
+                "serviceName": service_name,
+                "countService": 1,
+                "price": price,
+                "salePrice": sale_price,
+                "complexServiceId": complex_service_id,
+                "durationService": duration_of_time
+            }
+        ],
+        "filialId": filial_id,
+        "dateOfRecord": date_of_record,
+        "startTime": start_time,
+        "endTime": end_time,
+        "durationOfTime": duration_of_time,
+        "colorCodeRecord": color_code_record,
+        "toEmployeeId": employee_id,
+        "totalPrice": total_price,
+        "trafficChannel": traffic_channel,
+        "trafficChannelId": traffic_channel_id
+    }
+    headers = {"accept": "*/*", "Content-Type": "application/json"}
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(api_url, json=payload, headers=headers, timeout=15.0)
+        resp.raise_for_status()
+        return resp.json()
