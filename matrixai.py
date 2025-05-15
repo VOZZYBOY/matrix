@@ -266,6 +266,13 @@ class BookAppointmentArgs(BaseModel):
     total_price: float = Field(default=0, description="Общая цена")
     traffic_channel: int = Field(default=0, description="Канал трафика (опционально)")
     traffic_channel_id: str = Field(default="", description="ID канала трафика (опционально)")
+
+class GetEmployeeScheduleArgs(BaseModel):
+    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
+    employee_name: str = Field(description="ФИО сотрудника (точно или частично)")
+    filial_name: str = Field(description="Название филиала (точно)")
+    api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
+
 TOOL_CLASSES = [
     FindEmployeesArgs,
     GetServicePriceArgs,
@@ -281,6 +288,7 @@ TOOL_CLASSES = [
     ListEmployeeFilialsArgs,
     GetFreeSlotsArgs,  # Новый класс-аргументы
     BookAppointmentArgs,  # Новый класс-аргументы
+    GetEmployeeScheduleArgs, # <--- НОВЫЙ ИНСТРУМЕНТ
 ]
 logger.info(f"Определено {len(TOOL_CLASSES)} Pydantic классов для аргументов инструментов.")
 
@@ -431,6 +439,56 @@ async def book_appointment_tool(*, config=None, **kwargs_from_llm) -> str:
         error_type = getattr(e, '__class__', Exception).__name__
         return f"Ошибка при обработке запроса на запись ({error_type}): {str(e)}"
 
+async def get_employee_schedule_tool(*, config=None, **kwargs_from_llm) -> str:
+    tenant_id_from_config = kwargs_from_llm.get('tenant_id') # Этот ID нужен для get_id_by_name
+    api_token_from_config = kwargs_from_llm.get('api_token')
+
+    if not tenant_id_from_config: # Проверка остается, т.к. нужен для get_id_by_name
+        logger.error(f"tenant_id отсутствует в аргументах ({kwargs_from_llm}) для GetEmployeeSchedule.")
+        return "Критическая ошибка: ID тенанта не был предоставлен для разрешения имен."
+    
+    if not api_token_from_config: # Теперь токен критичен для API вызова
+        logger.error(f"api_token отсутствует в аргументах ({kwargs_from_llm}) для GetEmployeeSchedule.")
+        return "Критическая ошибка: API токен не был предоставлен для вызова GetEmployeeSchedule."
+
+    employee_name_from_llm = kwargs_from_llm.get('employee_name')
+    filial_name_from_llm = kwargs_from_llm.get('filial_name')
+
+    logger.info(f"[get_employee_schedule_tool] Имена от LLM: employee='{employee_name_from_llm}', filial='{filial_name_from_llm}'")
+
+    if not employee_name_from_llm or not filial_name_from_llm:
+        missing_fields = []
+        if not employee_name_from_llm: missing_fields.append('employee_name')
+        if not filial_name_from_llm: missing_fields.append('filial_name')
+        return f"Ошибка: отсутствуют обязательные поля от LLM: {', '.join(missing_fields)} для получения расписания."
+
+    logger.info(f"[get_employee_schedule_tool] Попытка получить ID для employee: '{employee_name_from_llm}'")
+    employee_id = get_id_by_name(tenant_id_from_config, 'employee', employee_name_from_llm)
+    logger.info(f"[get_employee_schedule_tool] Попытка получить ID для filial: '{filial_name_from_llm}'")
+    filial_id = get_id_by_name(tenant_id_from_config, 'filial', filial_name_from_llm)
+
+    if not employee_id:
+        return f"Не удалось найти ID для сотрудника: '{employee_name_from_llm}'"
+    if not filial_id:
+        return f"Не удалось найти ID для филиала: '{filial_name_from_llm}'"
+
+    handler_args = {
+        "tenant_id": tenant_id_from_config, # Передаем tenant_id для get_original_name в clinic_functions
+        "employee_id": employee_id,
+        "filial_id": filial_id,
+        "api_token": api_token_from_config # Это основной аутентификатор для API
+    }
+
+    try:
+        logger.debug(f"Создание экземпляра GetEmployeeSchedule с аргументами (ID): {handler_args}")
+        handler = clinic_functions.GetEmployeeSchedule(**handler_args)
+        logger.debug(f"Вызов handler.process() для GetEmployeeSchedule")
+        return await handler.process()
+    except Exception as e:
+        logger.error(f"Ошибка при создании или обработке GetEmployeeSchedule: {e}", exc_info=True)
+        error_type = getattr(e, '__class__', Exception).__name__
+        return f"Ошибка при обработке запроса на расписание сотрудника ({error_type}): {str(e)}"
+
 TOOL_FUNCTIONS = [
     find_employees_tool,
     get_service_price_tool,
@@ -447,6 +505,7 @@ TOOL_FUNCTIONS = [
     list_employee_filials_tool,
     get_free_slots_tool, 
     book_appointment_tool,  
+    get_employee_schedule_tool, # <--- НОВЫЙ ИНСТРУМЕНТ
 ]
 logger.info(f"Определено {len(TOOL_FUNCTIONS)} функций-инструментов для динамической привязки.")
 SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ и информативный ИИ-ассистент.
@@ -503,6 +562,7 @@ SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ 
     - Для вопроса о ВСЕХ услугах сотрудника (например, "какие услуги выполняет ХХХ?", "чем занимается YYY?") -> ОБЯЗАТЕЛЬНО вызывай `get_employee_services_tool`. Даже если RAG-контекст содержит упоминания или частичный список услуг этого сотрудника (например, в его общем описании), для получения ПОЛНОГО и ТОЧНОГО списка услуг используй ИСКЛЮЧИТЕЛЬНО этот инструмент.
     - Для вопроса о ЦЕНЕ КОНКРЕТНОЙ услуги -> ОБЯЗАТЕЛЬНО вызывай `get_service_price_tool`.
     - **Для вопроса о СПЕЦИАЛИСТАХ в КОНКРЕТНОМ ФИЛИАЛЕ (например, "кто работает в X?", "какие врачи есть в Y?") -> ОБЯЗАТЕЛЬНО вызывай `find_employees_tool` ТОЛЬКО с параметром `filial_name`.**
+    - **Для запроса РАБОЧИХ ДНЕЙ КОНКРЕТНОГО СОТРУДНИКА В КОНКРЕТНОМ ФИЛИАЛЕ (например, "когда работает ХХХ в филиале YYY?", "по каким дням принимает ZZZ в AAA?") -> ОБЯЗАТЕЛЬНО вызывай `get_employee_schedule_tool`.**
 - Точность Параметров: Извлекай параметры ТОЧНО из запроса и ИСТОРИИ.
 - Не Выдумывай Параметры: Если обязательного параметра нет, НЕ ВЫЗЫВАЙ функцию, а вежливо попроси уточнить.
     - **ОСОБЕННО ВАЖНО для `find_specialists_by_service_or_category_and_filial_tool`**: Этот инструмент ТРЕБУЕТ указания `filial_name`. Если пользователь спрашивает, например, "Кто делает [Услуга/Категория]?" и НЕ УКАЗЫВАЕТ ФИЛИАЛ (и его нет в недавней истории диалога), ТЫ ОБЯЗАН СНАЧАЛА УТОЧНИТЬ у пользователя: "В каком филиале вас интересуют специалисты по [Услуга/Категория]?" и только ПОСЛЕ ПОЛУЧЕНИЯ ответа на этот вопрос вызывать инструмент с указанным филиалом.
@@ -780,6 +840,9 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         elif tool_name == "book_appointment_tool":
             current_args_schema = BookAppointmentArgs
             func_for_tool = tool_function # Используется прямая функция из matrixai.py
+        elif tool_name == "get_employee_schedule_tool": # <--- НОВЫЙ ИНСТРУМЕНТ
+            current_args_schema = GetEmployeeScheduleArgs
+            func_for_tool = tool_function # Используется прямая функция из matrixai.py
         # Обработка старых инструментов, которые используют wrapper и schema_map
         elif tool_function in tool_func_to_schema_map:
             current_args_schema = tool_func_to_schema_map.get(tool_function)
@@ -835,20 +898,25 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
                   found_tool = next((t for t in tenant_tools if t.name == tool_name), None)
                   if found_tool:
                       try:
-                          # --- Начало модификации для аргументов --- 
                           current_tool_args_for_invoke = tool_args
-                          if tool_args is None or (isinstance(tool_args, dict) and tool_args.get('args') is None and len(tool_args) == 1):
-                              # Это может быть случай для инструментов без аргументов, где LLM передает {'args': None} или просто None
-                              # или если схема аргументов была None и LLM вернула None
-                              logger.info(f"Аргументы для {tool_name} были None или эквивалент. Используем {{}} для вызова.")
-                              current_tool_args_for_invoke = {}
-                          elif isinstance(tool_args, dict) and 'args' in tool_args and tool_args.get('args') is None and len(tool_args) == 1:
-                               # Явный случай {'args': None}, который вызывает ошибку валидации Pydantic для инструментов без аргументов
-                               logger.info(f"Аргументы для {tool_name} были {{'args': None}}. Используем {{}} для вызова.")
-                               current_tool_args_for_invoke = {}
 
-                          # --- Начало модификации для get_free_slots_tool и book_appointment_tool ---
-                          if tool_name in ["get_free_slots_tool", "book_appointment_tool"]:
+                          expects_args = True
+                          if not found_tool.args_schema or not found_tool.args_schema.model_fields:
+                              expects_args = False
+
+                          if not expects_args:
+                              if tool_args is not None and tool_args != {}: # Логируем, если LLM прислал что-то для инструмента без аргументов
+                                  logger.info(f"Инструмент {tool_name} не ожидает аргументов, но LLM передал: {tool_args}. Используем {{}}.")
+                              current_tool_args_for_invoke = {}
+                          elif isinstance(tool_args, dict) and tool_args.get('args') is None and len(tool_args) == 1 and expects_args:
+                              # Этот случай (LLM вернул {'args': None} для инструмента, ожидающего аргументы) приведет к ошибке Pydantic.
+                              # Оставляем current_tool_args_for_invoke как есть ({'args': None}), чтобы Pydantic обработал.
+                              logger.warning(f"LLM передал {{'args': None}} для инструмента {tool_name}, который ожидает аргументы. Pydantic, вероятно, выдаст ошибку.")
+                          # В остальных случаях (expects_args is True и tool_args это корректный словарь или None, который Pydantic обработает)
+                          # current_tool_args_for_invoke остается равным tool_args.
+
+                          # --- Начало модификации для get_free_slots_tool, book_appointment_tool, get_employee_schedule_tool ---
+                          if tool_name in ["get_free_slots_tool", "book_appointment_tool", "get_employee_schedule_tool"]:
                               if not isinstance(current_tool_args_for_invoke, dict):
                                   logger.error(f"Ожидался dict для tool_args у {tool_name}, получено: {type(current_tool_args_for_invoke)}. Формирование вызова невозможно.")
                                   raise ValueError(f"Аргументы для {tool_name} должны быть словарем, получено {type(current_tool_args_for_invoke)}")

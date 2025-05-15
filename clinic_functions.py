@@ -2,10 +2,10 @@
 
 import logging
 import re
-from typing import Optional, List, Dict, Any, Set
+from typing import Optional, List, Dict, Any, Set, Tuple
 from pydantic import BaseModel, Field
-from client_data_service import get_free_times_of_employee_by_services, add_record
-from clinic_index import get_id_by_name
+from client_data_service import get_free_times_of_employee_by_services, add_record, get_employee_schedule
+from clinic_index import get_id_by_name, get_name_by_id
 import asyncio
 
 # --- Глобальное хранилище данных ---
@@ -996,3 +996,93 @@ class BookAppointment(BaseModel):
         except Exception as e:
             logger.error(f"Ошибка в BookAppointment.process для tenant '{self.tenant_id}', service_id '{self.service_id}': {e}", exc_info=True)
             return f"Ошибка при создании записи: {type(e).__name__} - {e}"
+
+class GetEmployeeSchedule(BaseModel):
+    employee_id: str
+    filial_id: str
+    lang_id: str = "ru"
+    api_token: Optional[str] = None
+
+    async def process(self, **kwargs) -> str:
+        current_tenant_id_for_resolution = getattr(self, 'tenant_id', None)
+        if not current_tenant_id_for_resolution:
+             logger.warning("tenant_id отсутствует в экземпляре GetEmployeeSchedule, разрешение имен в ID может не работать корректно для логгирования/сообщений.")
+             # Можно вернуть ошибку или продолжить без разрешения имен для сообщений
+
+        try:
+            if not self.employee_id:
+                return "ID сотрудника не предоставлен."
+            if not self.filial_id:
+                return "ID филиала не предоставлен."
+            if not self.api_token: # Токен теперь обязателен, т.к. tenant_id не передается
+                logger.error("API токен отсутствует. Невозможно получить расписание сотрудника без tenantId или токена.")
+                return "Критическая ошибка: API токен не предоставлен для получения расписания."
+
+            result = await get_employee_schedule(
+                tenant_id=current_tenant_id_for_resolution, # передаем для логгирования/консистентности, но API его не использует
+                employee_id=self.employee_id,
+                filial_id=self.filial_id,
+                api_token=self.api_token
+            )
+
+            if not isinstance(result, dict):
+                logger.error(f"get_employee_schedule вернул не словарь: {type(result)} - '{str(result)[:200]}'")
+                return f"Ошибка API при получении расписания: {result}"
+
+            if result.get("code") != 200:
+                error_msg = result.get("message", "Неизвестная ошибка API")
+                logger.error(f"API расписания вернуло ошибку (код {result.get('code')}): {error_msg}")
+                return f"Не удалось получить расписание: {error_msg}"
+
+            schedule_data = result.get("data")
+            if not schedule_data or not isinstance(schedule_data, list):
+                # Пытаемся получить оригинальные имена для более информативного сообщения
+                employee_name_orig = get_name_by_id(current_tenant_id_for_resolution, 'employee', self.employee_id) if current_tenant_id_for_resolution else f"ID {self.employee_id}"
+                filial_name_orig = get_name_by_id(current_tenant_id_for_resolution, 'filial', self.filial_id) if current_tenant_id_for_resolution else f"ID {self.filial_id}"
+                logger.info(f"Данные о расписании для сотрудника '{employee_name_orig}' в филиале '{filial_name_orig}' отсутствуют или в неверном формате.")
+                return f"Расписание для сотрудника '{employee_name_orig}' в филиале '{filial_name_orig}' не найдено."
+
+            # Словарь для группировки дней по году и месяцу
+            schedule_by_month: Dict[Tuple[int, int], List[int]] = {}
+            month_names = [
+                "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
+            ]
+
+            for entry in schedule_data:
+                if not isinstance(entry, dict): continue
+                schedules_list = entry.get("schedules")
+                if not isinstance(schedules_list, list): continue
+                for schedule_item in schedules_list:
+                    if not isinstance(schedule_item, dict): continue
+                    year = schedule_item.get("year")
+                    month = schedule_item.get("month")
+                    days = schedule_item.get("days")
+                    if isinstance(year, int) and isinstance(month, int) and isinstance(days, list):
+                        month_key = (year, month)
+                        if month_key not in schedule_by_month:
+                            schedule_by_month[month_key] = []
+                        for day in days:
+                            if isinstance(day, int) and day not in schedule_by_month[month_key]:
+                                schedule_by_month[month_key].append(day)
+            
+            if not schedule_by_month:
+                employee_name_orig = get_name_by_id(current_tenant_id_for_resolution, 'employee', self.employee_id) if current_tenant_id_for_resolution else f"ID {self.employee_id}"
+                filial_name_orig = get_name_by_id(current_tenant_id_for_resolution, 'filial', self.filial_id) if current_tenant_id_for_resolution else f"ID {self.filial_id}"
+                return f"Не найдено рабочих дней в расписании для сотрудника '{employee_name_orig}' в филиале '{filial_name_orig}'."
+
+            output_lines = []
+            # Сортируем по году, затем по месяцу
+            for (year, month_num), days_list in sorted(schedule_by_month.items()):
+                month_name = month_names[month_num - 1] if 1 <= month_num <= 12 else f"Месяц {month_num}"
+                sorted_days = sorted(days_list)
+                output_lines.append(f"{month_name} {year}: {', '.join(map(str, sorted_days))}")
+            
+            employee_name_orig = get_name_by_id(current_tenant_id_for_resolution, 'employee', self.employee_id) if current_tenant_id_for_resolution else f"ID {self.employee_id}"
+            filial_name_orig = get_name_by_id(current_tenant_id_for_resolution, 'filial', self.filial_id) if current_tenant_id_for_resolution else f"ID {self.filial_id}"
+
+            return f"Сотрудник '{employee_name_orig}' доступен в филиале '{filial_name_orig}' в следующие дни:\n" + "\n".join(output_lines)
+
+        except Exception as e:
+            logger.error(f"Ошибка в GetEmployeeSchedule.process для tenant '{current_tenant_id_for_resolution}', employee_id '{self.employee_id}', filial_id '{self.filial_id}': {e}", exc_info=True)
+            return f"Ошибка при получении расписания сотрудника: {type(e).__name__} - {e}"

@@ -60,9 +60,11 @@ def get_id_by_name(tenant_id: str, entity: str, name: str) -> Optional[str]:
     """
     Получить id по имени для сущности (service, employee, filial, category) и tenant_id.
     Использует normalize_text.
+    Сначала ищет точное совпадение, затем частичное (если имя из запроса является подстрокой полного имени).
     entity: 'service', 'employee', 'filial', 'category'
     """
     keep_spaces_for_entity = False
+    # Для услуг, сотрудников и категорий сохраняем пробелы при нормализации, т.к. они могут быть частью названия
     if entity == "service" or entity == "employee" or entity == "category":
         keep_spaces_for_entity = True
     
@@ -78,11 +80,46 @@ def get_id_by_name(tenant_id: str, entity: str, name: str) -> Optional[str]:
         return None
 
     index_map_key = f"{name_key_for_index}_to_id"
+    name_to_id_map = TENANT_INDEXES.get(tenant_id, {}).get(index_map_key, {})
+
+    if not name_to_id_map:
+        logger.warning(f"Карта '{index_map_key}' не найдена или пуста для тенанта '{tenant_id}'.")
+        return None
+
+    # 1. Поиск точного совпадения
+    exact_match_id = name_to_id_map.get(normalized_name_to_search)
+    if exact_match_id:
+        logger.info(f"Найдено точное совпадение ID ('{exact_match_id}') для тенанта '{tenant_id}', сущности '{entity}', нормализованного имени '{normalized_name_to_search}' (исходное: '{name}').")
+        return exact_match_id
+
+    # 2. Поиск частичного совпадения (если normalized_name_to_search является подстрокой ключа в карте)
+    #    Это полезно, если пользователь ввел "Соня Сеферова", а в базе "Соня Сеферова Магамедовна"
+    #    Или для услуг, например, ввел "Лазерная эпиляция", а в базе "Лазерная эпиляция бикини".
+    partial_matches = []
+    for indexed_norm_name, item_id in name_to_id_map.items():
+        if normalized_name_to_search in indexed_norm_name:
+            partial_matches.append(item_id)
+            logger.debug(f"Найдено частичное совпадение: запрос '{normalized_name_to_search}' содержится в '{indexed_norm_name}' (ID: {item_id})")
+
+    if len(partial_matches) == 1:
+        logger.info(f"Найдено ОДНО частичное совпадение ID ('{partial_matches[0]}') для тенанта '{tenant_id}', сущности '{entity}', по запросу '{normalized_name_to_search}' (исходное: '{name}').")
+        return partial_matches[0]
     
-    found_id = TENANT_INDEXES.get(tenant_id, {}).get(index_map_key, {}).get(normalized_name_to_search)
-    if not found_id:
-        logger.warning(f"ID не найден для тенанта '{tenant_id}', сущности '{entity}', нормализованного имени '{normalized_name_to_search}' (исходное: '{name}'). Проверьте ENTITY_KEYS и keep_spaces флаги.")
-    return found_id
+    if len(partial_matches) > 1:
+        # Если частичных совпадений несколько, это неоднозначность.
+        # Пока возвращаем None и логируем, чтобы избежать неправильного выбора.
+        # В будущем можно вернуть список или специальный флаг.
+        original_names_found = []
+        id_to_name_map_key = f"{ENTITY_KEYS[[e[0] for e in ENTITY_KEYS].index(name_key_for_index)][1]}_to_name"
+        id_to_name_map = TENANT_INDEXES.get(tenant_id, {}).get(id_to_name_map_key, {})
+        for pid in partial_matches:
+            original_names_found.append(id_to_name_map.get(pid, f"(ID: {pid})"))
+        
+        logger.warning(f"Найдено НЕСКОЛЬКО ({len(partial_matches)}) частичных совпадений для тенанта '{tenant_id}', сущности '{entity}', по запросу '{normalized_name_to_search}' (исходное: '{name}'). Совпадения: {original_names_found}. Возвращаем None из-за неоднозначности.")
+        return None # Неоднозначность
+
+    logger.warning(f"ID не найден (ни точное, ни частичное совпадение) для тенанта '{tenant_id}', сущности '{entity}', нормализованного имени '{normalized_name_to_search}' (исходное: '{name}').")
+    return None
 
 def get_name_by_id(tenant_id: str, entity: str, id_: str) -> Optional[str]:
     id_key_for_index = ""
