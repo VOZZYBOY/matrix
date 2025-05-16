@@ -35,10 +35,11 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Make sure the base directory exists (if cleaned_data.json needs it)
 
 # Copy the application code and necessary files
-COPY app.py client_data_service.py matrixai.py clinic_functions.py rag_setup.py redis_history.py tenant_config_manager.py ./
+COPY app.py client_data_service.py matrixai.py clinic_functions.py rag_setup.py redis_history.py tenant_config_manager.py clinic_index.py ./
 COPY base/ ./base/
 COPY static ./static/
 COPY templates ./templates/
+COPY tenant_configs/ ./tenant_configs/
 # Expose the application port
 EXPOSE 8001
 
