@@ -39,7 +39,6 @@ COPY app.py client_data_service.py matrixai.py clinic_functions.py rag_setup.py 
 COPY base/ ./base/
 COPY static ./static/
 COPY templates ./templates/
-COPY tenant_configs/ ./tenant_configs/
 # Expose the application port
 EXPOSE 8001
 
