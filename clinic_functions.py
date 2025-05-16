@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from client_data_service import get_free_times_of_employee_by_services, add_record, get_employee_schedule
 from clinic_index import get_id_by_name, get_name_by_id
 import asyncio
+from datetime import datetime
 
 # --- Глобальное хранилище данных ---
 _internal_clinic_data: List[Dict[str, Any]] = []
@@ -871,70 +872,91 @@ class GetFreeSlots(BaseModel):
     api_token: Optional[str] = None
 
     async def process(self, **kwargs) -> str:
+        logger.info(f"Запрос свободных слотов: TenantID={self.tenant_id}, EmployeeID={self.employee_id}, ServiceIDs={self.service_ids}, Date={self.date_time}, FilialID={self.filial_id}")
         try:
-            if not self.employee_id:
-                return f"ID сотрудника не предоставлен."
-            if not self.filial_id:
-                return f"ID филиала не предоставлен."
-            if not all(self.service_ids):
-                return f"Один или несколько ID услуг не предоставлены или пусты."
-            
-            result = await get_free_times_of_employee_by_services(
+            response_data = await get_free_times_of_employee_by_services(
                 tenant_id=self.tenant_id,
                 employee_id=self.employee_id,
                 service_ids=self.service_ids,
                 date_time=self.date_time,
                 filial_id=self.filial_id,
-                lang_id=self.lang_id,
                 api_token=self.api_token
             )
 
-            if not isinstance(result, dict):
-                logger.error(f"get_free_times_of_employee_by_services вернул не словарь: {type(result)} - '{str(result)[:200]}'")
-                # Попытаемся извлечь сообщение об ошибке, если это возможно
-                error_message = str(result)
-                if hasattr(result, 'get'): # Если вдруг это какой-то dict-like объект, но не dict
-                    error_message = result.get("message", result.get("error", str(result)))
-                return f"Ошибка API при получении слотов: {error_message}"
+            if response_data and response_data.get('code') == 200:
+                api_data_content = response_data.get('data')
 
-            slots_data_from_api = result.get('data') or result.get('slots')
-            
-            processed_slot_dicts = []
-            if isinstance(slots_data_from_api, list):
-                for item in slots_data_from_api:
-                    if isinstance(item, dict):
-                        processed_slot_dicts.append(item)
-                    else:
-                        logger.warning(f"Неожиданный тип ({type(item)}) элемента в списке слотов от API. Содержимое: '{str(item)[:100]}'. Элемент будет проигнорирован.")
-            elif slots_data_from_api is not None:
-                logger.warning(f"Ожидался список для 'data' или 'slots' от API, но получен {type(slots_data_from_api)}. Содержимое: '{str(slots_data_from_api)[:100]}'. Слоты не будут обработаны.")
+                if isinstance(api_data_content, dict) and 'workDates' in api_data_content:
+                    all_formatted_slots = []
+                    employee_name_original = api_data_content.get('name', self.employee_id)
+                    # Используем get_name_by_id для получения оригинального имени филиала, если filial_id числовой
+                    filial_name_original = get_name_by_id(self.tenant_id, 'filial', self.filial_id) or self.filial_id
 
-            if not processed_slot_dicts:
-                api_error_message = result.get("message") or result.get("error")
-                if result.get("code") != 200 and api_error_message:
-                    logger.error(f"API (код {result.get('code')}) вернуло ошибку или пустые данные для слотов: {api_error_message}. Ответ: {str(result)[:500]}")
-                    return f"Не удалось получить свободные слоты: {api_error_message}"
-                logger.info(f"Либо не найдено слотов, либо данные от API в неверном формате. Ответ API: {str(result)[:500]}")
-                return "Свободные слоты не найдены или данные от API в неверном формате. Попробуйте выбрать другую дату или специалиста."
 
-            slot_lines = []
-            for slot_dict in processed_slot_dicts:
-                start_time = slot_dict.get('startTime')
-                end_time = slot_dict.get('endTime')
-                # Дополнительно проверим, что startTime и endTime не пустые строки, если они есть
-                if start_time and isinstance(start_time, str) and end_time and isinstance(end_time, str):
-                    slot_lines.append(f"{start_time} - {end_time}")
-                else:
-                    logger.warning(f"Слот в списке processed_slot_dicts имеет неполные или некорректные данные (startTime/endTime): {slot_dict}")
-            
-            if not slot_lines:
-                 logger.warning(f"Не удалось извлечь время из доступных слотов из-за формата данных после фильтрации. processed_slot_dicts: {processed_slot_dicts}")
-                 return "Не удалось корректно обработать информацию о доступных слотах."
-            
-            return "Доступные слоты:\\n" + "\\n".join(slot_lines)
+                    for work_day in api_data_content.get('workDates', []):
+                        date_str = work_day.get('date')
+                        time_slots_for_day = work_day.get('timeSlots', [])
+                        
+                        if date_str and time_slots_for_day:
+                            # Форматируем дату из ГГГГ.М.Д в ДД.ММ.ГГГГ для вывода
+                            try:
+                                formatted_date_str = datetime.strptime(date_str, "%Y.%m.%d").strftime("%d.%m.%Y")
+                            except ValueError:
+                                formatted_date_str = date_str # Если формат другой, оставляем как есть
+                            
+                            day_slots_str = f"На {formatted_date_str}: {', '.join(time_slots_for_day)}"
+                            all_formatted_slots.append(day_slots_str)
+                    
+                    if not all_formatted_slots:
+                        logger.info(f"Не найдено слотов в 'workDates' для сотрудника {employee_name_original} ({self.employee_id}) на {self.date_time} в филиале {filial_name_original} ({self.filial_id}).")
+                        return f"К сожалению, у сотрудника {employee_name_original} нет свободных слотов на указанную дату в филиале {filial_name_original} по выбранным услугам."
+                    
+                    response_message = f"Доступные слоты для сотрудника {employee_name_original} в филиале {filial_name_original}:\n" + "\\n".join(all_formatted_slots)
+                    return response_message
+
+                elif isinstance(api_data_content, list): # Обработка старого формата, если data - это список
+                    logger.info("API вернуло 'data' как список (старый формат). Обработка...")
+                    processed_slots = []
+                    if not api_data_content: # Пустой список data
+                         logger.info(f"API вернуло пустой список в 'data' для сотрудника {self.employee_id} на {self.date_time} в филиале {self.filial_id}.")
+                         return f"К сожалению, свободных слотов не найдено."
+
+                    for slot_info in api_data_content:
+                        if isinstance(slot_info, dict) and 'time' in slot_info:
+                            processed_slots.append(slot_info['time'])
+                    
+                    if not processed_slots:
+                        logger.info(f"Не найдено ключей 'time' в элементах списка 'data' от API для {self.employee_id}.")
+                        return "Свободные слоты не найдены (не удалось обработать ответ API)."
+                    
+                    # Используем get_name_by_id для получения оригинальных имен
+                    employee_name_display = get_name_by_id(self.tenant_id, 'employee', self.employee_id) or self.employee_id
+                    filial_name_display = get_name_by_id(self.tenant_id, 'filial', self.filial_id) or self.filial_id
+                    date_display = self.date_time # Предполагаем, что self.date_time уже в нужном формате для вывода или его не нужно менять
+
+                    return f"Для сотрудника {employee_name_display} в филиале {filial_name_display} на {date_display} доступны следующие слоты: {', '.join(processed_slots)}."
+
+                else: # Неожиданный формат data
+                    logger.warning(f"Ожидался список или словарь с 'workDates' для 'data' от API, но получен {type(api_data_content)}. Содержимое: {str(api_data_content)[:500]}. Слоты не будут обработаны.")
+                    # Попытка извлечь имя сотрудника из ответа, если это возможно
+                    employee_name_from_data = "неизвестного сотрудника"
+                    if isinstance(api_data_content, dict) and 'name' in api_data_content:
+                        employee_name_from_data = api_data_content['name']
+                    
+                    filial_name_display = get_name_by_id(self.tenant_id, 'filial', self.filial_id) or self.filial_id
+                    return f"Для сотрудника {employee_name_from_data} в филиале {filial_name_display} на {self.date_time} не найдено свободных слотов, или формат данных от API не распознан."
+
+            elif response_data:
+                error_msg = response_data.get('message', 'Неизвестная ошибка от API')
+                logger.error(f"Ошибка от API при запросе свободных слотов (код {response_data.get('code')}): {error_msg}. Параметры: emp={self.employee_id}, fil={self.filial_id}, date={self.date_time}")
+                return f"Не удалось получить свободные слоты: {error_msg}"
+            else:
+                logger.error(f"Нет ответа от API при запросе свободных слотов для emp={self.employee_id}, fil={self.filial_id}, date={self.date_time}")
+                return "Не удалось связаться с системой записи для получения свободных слотов."
+
         except Exception as e:
-            logger.error(f"Ошибка в GetFreeSlots.process для tenant '{self.tenant_id}', employee_id '{self.employee_id}': {e}", exc_info=True)
-            return f"Ошибка при получении свободных слотов: {type(e).__name__} - {e}"
+            logger.error(f"Исключение в GetFreeSlots.process для emp={self.employee_id}, fil={self.filial_id}, date={self.date_time}: {e}", exc_info=True)
+            return f"Произошла внутренняя ошибка при поиске свободных слотов: {e}"
 
 class BookAppointment(BaseModel):
     tenant_id: str
