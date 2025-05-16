@@ -8,7 +8,7 @@ from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, BaseMessage, messages_from_dict, messages_to_dict
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_openai import ChatOpenAI
+from langchain_deepseek import ChatDeepSeek 
 from pydantic import BaseModel, Field
 import chromadb
 from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
@@ -50,14 +50,14 @@ GIGA_SCOPE = os.environ.get("GIGA_SCOPE", "GIGACHAT_API_PERS")
 GIGA_VERIFY_SSL = os.getenv("GIGA_VERIFY_SSL", "False").lower() == "true"
 TENANT_COLLECTION_PREFIX = "tenant_" 
 try:
-    chat_model = ChatOpenAI(
-        model="gpt-4.1",
-        max_tokens=4096,
-        api_key="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"
+    chat_model = ChatDeepSeek(
+        model="deepseek-chat",
+        max_tokens=4096, 
+        api_key="sk-4622a469d2134c33a4a511c315e6e5ae", 
     )
-    logger.info("Чат модель OpenAI o3-mini инициализирована.")
+    logger.info("Чат модель DeepSeek (deepseek-chat) инициализирована.")
 except Exception as e:
-    logger.critical(f"Ошибка инициализации модели OpenAI Chat: {e}", exc_info=True)
+    logger.critical(f"Ошибка инициализации модели DeepSeek Chat: {e}", exc_info=True)
     exit()
 # Глобальные переменные для RAG компонентов (будут инициализированы при старте)
 CHROMA_CLIENT: Optional[chromadb.ClientAPI] = None
