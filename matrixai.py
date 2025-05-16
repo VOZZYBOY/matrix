@@ -236,7 +236,7 @@ def list_employee_filials_tool(employee_name: str) -> str:
     logger.info(f"Вызов list_employee_filials_tool для: {employee_name}")
     handler = clinic_functions.ListEmployeeFilials(employee_name=employee_name)
     return handler.process()
-from clinic_functions import GetFreeSlots, BookAppointment
+
 class GetFreeSlotsArgs(BaseModel):
     tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
     employee_name: str = Field(description="ФИО сотрудника (точно или частично)")
@@ -245,6 +245,7 @@ class GetFreeSlotsArgs(BaseModel):
     filial_name: str = Field(description="Название филиала (точно)")
     lang_id: str = Field(default="ru", description="Язык ответа")
     api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
+
 class BookAppointmentArgs(BaseModel):
     tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
     phone_number: str = Field(description="Телефон клиента")
