@@ -8,7 +8,7 @@ from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, BaseMessage, messages_from_dict, messages_to_dict
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_deepseek import ChatDeepSeek 
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 import chromadb
 from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
@@ -50,16 +50,15 @@ GIGA_SCOPE = os.environ.get("GIGA_SCOPE", "GIGACHAT_API_PERS")
 GIGA_VERIFY_SSL = os.getenv("GIGA_VERIFY_SSL", "False").lower() == "true"
 TENANT_COLLECTION_PREFIX = "tenant_" 
 try:
-    chat_model = ChatDeepSeek(
-        model="deepseek-chat",
-        max_tokens=4096, 
-        api_key="sk-4622a469d2134c33a4a511c315e6e5ae", 
+    chat_model = ChatOpenAI(
+        model="gpt-4.1",
+        max_tokens=16384, 
+        api_key="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"
     )
-    logger.info("Чат модель DeepSeek (deepseek-chat) инициализирована.")
+    logger.info("Чат модель OpenAI (gpt-4.1) инициализирована.")
 except Exception as e:
-    logger.critical(f"Ошибка инициализации модели DeepSeek Chat: {e}", exc_info=True)
+    logger.critical(f"Ошибка инициализации модели OpenAI Chat: {e}", exc_info=True)
     exit()
-# Глобальные переменные для RAG компонентов (будут инициализированы при старте)
 CHROMA_CLIENT: Optional[chromadb.ClientAPI] = None
 EMBEDDINGS_GIGA: Optional[GigaChatEmbeddings] = None
 BM25_RETRIEVERS_MAP: Dict[str, BM25Retriever] = {}
@@ -273,6 +272,37 @@ class GetEmployeeScheduleArgs(BaseModel):
     filial_name: str = Field(description="Название филиала (точно)")
     api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
 
+# Pydantic модель для нового инструмента записи (AI Payload)
+class BookAppointmentAIPayloadArgs(BaseModel):
+    # client_phone_number будет извлечен из конфигурации автоматически
+    services_details: List[Dict[str, Any]] = Field(
+        min_length=1, # <--- ДОБАВЛЕНО
+        description=(
+            "Список услуг для записи. ОБЯЗАТЕЛЬНО должен содержать хотя бы одну услугу. Каждая услуга - это словарь с полями: "
+            "'rowNumber' (int, порядковый номер), "
+            # parentId будет формироваться из categoryName
+            "'serviceName' (str, ТОЧНОЕ название услуги для поиска ее serviceId, цены и длительности), "
+            "'categoryName' (str, ТОЧНОЕ название КАТЕГОРИИ, к которой принадлежит эта услуга. Это имя будет использовано для поиска ID категории, который станет parentId услуги), "
+            "'countService' (int, количество), "
+            # price, salePrice и durationService будут добавлены автоматически из данных клиники
+            "'complexServiceId' (Optional[str], ID комплексной услуги, если эта услуга является частью комплекса)."
+            # Поля 'price', 'salePrice', 'durationService' больше не должны передаваться LLM здесь.
+        )
+    )
+    filial_name: str = Field(description="ТОЧНОЕ название филиала для записи.")
+    date_of_record: str = Field(description="Дата записи в формате YYYY-MM-DD.")
+    start_time: str = Field(description="Время начала записи в формате HH:MM.")
+    end_time: str = Field(description="Время окончания записи в формате HH:MM.")
+    duration_of_time: int = Field(description="ОБЩАЯ длительность всей записи в минутах.")
+    employee_name: str = Field(description="ТОЧНОЕ ФИО сотрудника для записи.")
+    total_price: float = Field(description="ОБЩАЯ цена всей записи.")
+    lang_id: str = Field(default="ru", description="Язык ответа (например, 'ru').")
+    # api_token и tenant_id будут добавлены автоматически из конфигурации
+    # Опциональные поля из JSON, которые LLM может захотеть передать (но не обязана)
+    color_code_record: Optional[str] = Field(default=None, description="Код цвета для записи (опционально).")
+    traffic_channel: Optional[int] = Field(default=None, description="ID канала трафика (опционально).")
+    traffic_channel_id: Optional[str] = Field(default=None, description="Строковый ID канала трафика (опционально).")
+
 TOOL_CLASSES = [
     FindEmployeesArgs,
     GetServicePriceArgs,
@@ -289,6 +319,7 @@ TOOL_CLASSES = [
     GetFreeSlotsArgs,  # Новый класс-аргументы
     BookAppointmentArgs,  # Новый класс-аргументы
     GetEmployeeScheduleArgs, # <--- НОВЫЙ ИНСТРУМЕНТ
+    BookAppointmentAIPayloadArgs, # <--- ДОБАВЛЕН НОВЫЙ ИНСТРУМЕНТ
 ]
 logger.info(f"Определено {len(TOOL_CLASSES)} Pydantic классов для аргументов инструментов.")
 
@@ -489,6 +520,101 @@ async def get_employee_schedule_tool(*, config=None, **kwargs_from_llm) -> str:
         error_type = getattr(e, '__class__', Exception).__name__
         return f"Ошибка при обработке запроса на расписание сотрудника ({error_type}): {str(e)}"
 
+async def book_appointment_ai_payload_tool(*, config=None, **kwargs_from_llm) -> str:
+    configurable_params = config.get("configurable", {})
+    tenant_id_from_config = configurable_params.get('tenant_id')
+    api_token_from_config = configurable_params.get('api_token')
+    client_phone_number_from_config = configurable_params.get('phone_number')
+
+    if not tenant_id_from_config:
+        logger.error(f"tenant_id отсутствует в конфигурации для book_appointment_ai_payload_tool. Configurable: {configurable_params}")
+        return "Критическая ошибка: ID тенанта не был предоставлен системе для вызова book_appointment_ai_payload_tool."
+    
+    if not client_phone_number_from_config:
+        logger.error(f"client_phone_number отсутствует в конфигурации для book_appointment_ai_payload_tool. Configurable: {configurable_params}")
+        return "Критическая ошибка: Номер телефона клиента не был предоставлен системе для вызова book_appointment_ai_payload_tool. Пожалуйста, уточните номер телефона у клиента."
+
+    try:
+        validated_args = BookAppointmentAIPayloadArgs(**kwargs_from_llm)
+    except Exception as e:
+        logger.error(f"Ошибка валидации аргументов от LLM для book_appointment_ai_payload_tool: {e}. Аргументы: {kwargs_from_llm}", exc_info=True)
+        return f"Ошибка: неверные или отсутствующие аргументы для создания записи: {e}"
+
+    filial_id = get_id_by_name(tenant_id_from_config, 'filial', validated_args.filial_name)
+    to_employee_id = get_id_by_name(tenant_id_from_config, 'employee', validated_args.employee_name)
+
+    if not filial_id:
+        return f"Не удалось найти ID для филиала: '{validated_args.filial_name}'"
+    if not to_employee_id:
+        return f"Не удалось найти ID для сотрудника: '{validated_args.employee_name}'"
+
+    processed_services_payload = []
+    for service_detail_from_llm in validated_args.services_details:
+        service_name_from_llm = service_detail_from_llm.get('serviceName')
+        category_name_from_llm = service_detail_from_llm.get('categoryName')
+        count_service = service_detail_from_llm.get('countService')
+        row_number = service_detail_from_llm.get('rowNumber')
+        complex_service_id = service_detail_from_llm.get('complexServiceId')
+
+        if not service_name_from_llm:
+            return f"Ошибка: в одном из объектов services_details отсутствует 'serviceName'. Детали: {service_detail_from_llm}"
+        if not category_name_from_llm:
+            return f"Ошибка: в одном из объектов services_details отсутствует 'categoryName' (необходимо для parentId). Детали: {service_detail_from_llm}"
+            # Если categoryName не предоставлен, можно решить, что делать: 
+            # 1. Вернуть ошибку (как сейчас)
+            # 2. Попытаться получить parentId как-то иначе (например, если услуга уже имеет parentId)
+            # 3. Пропустить parentId (если API это позволяет, но payload примера его требует)
+            return f"Ошибка: в одном из объектов services_details отсутствует 'categoryName' (необходимо для parentId). Детали: {service_detail_from_llm}"
+        
+        service_id = get_id_by_name(tenant_id_from_config, 'service', service_name_from_llm)
+        parent_id_for_service = get_id_by_name(tenant_id_from_config, 'category', category_name_from_llm) # Категория услуги становится ее parentId
+
+        if not service_id:
+            return f"Не удалось найти ID для услуги: '{service_name_from_llm}' в {tenant_id_from_config}"
+        if not parent_id_for_service:
+            # Можно также разрешить parentId: null или пустую строку, если API это поддерживает
+            # Сейчас требуем, чтобы категория была найдена
+            return f"Не удалось найти ID для категории (parentId) '{category_name_from_llm}' для услуги '{service_name_from_llm}' в {tenant_id_from_config}"
+        
+        current_service_for_payload = service_detail_from_llm.copy()
+        current_service_for_payload['serviceId'] = service_id
+        current_service_for_payload['parentId'] = parent_id_for_service # Устанавливаем parentId
+        
+        # Удаляем исходные имена, если они там были и больше не нужны в таком виде
+        if 'serviceName' in current_service_for_payload: del current_service_for_payload['serviceName'] 
+        if 'categoryName' in current_service_for_payload: del current_service_for_payload['categoryName']
+        
+        processed_services_payload.append(current_service_for_payload)
+
+    # Аргументы для вызова BookAppointmentAIPayload из clinic_functions
+    # category_id и tenant_id больше не передаются явно в конструктор BookAppointmentAIPayload
+    handler_args_for_clinic_func = {
+        "lang_id": validated_args.lang_id,
+        "client_phone_number": client_phone_number_from_config, # <--- ДОБАВЛЕНО
+        "services_payload": processed_services_payload, 
+        "filial_id": filial_id, 
+        "date_of_record": validated_args.date_of_record,
+        "start_time": validated_args.start_time,
+        "end_time": validated_args.end_time,
+        "duration_of_time": validated_args.duration_of_time,
+        "to_employee_id": to_employee_id, 
+        "total_price": validated_args.total_price,
+        "api_token": api_token_from_config, # tenant_id не передается сюда, т.к. BookAppointmentAIPayload его не ожидает
+        "color_code_record": validated_args.color_code_record,
+        "traffic_channel": validated_args.traffic_channel,
+        "traffic_channel_id": validated_args.traffic_channel_id
+    }
+
+    try:
+        logger.debug(f"Создание экземпляра clinic_functions.BookAppointmentAIPayload с аргументами: {handler_args_for_clinic_func}")
+        handler = clinic_functions.BookAppointmentAIPayload(**handler_args_for_clinic_func)
+        logger.debug(f"Вызов handler.process() для BookAppointmentAIPayload")
+        return await handler.process()
+    except Exception as e:
+        logger.error(f"Ошибка при создании или обработке BookAppointmentAIPayload: {e}", exc_info=True)
+        error_type = getattr(e, '__class__', Exception).__name__
+        return f"Ошибка при обработке запроса на запись (AI Payload) ({error_type}): {str(e)}"
+
 TOOL_FUNCTIONS = [
     find_employees_tool,
     get_service_price_tool,
@@ -506,6 +632,7 @@ TOOL_FUNCTIONS = [
     get_free_slots_tool, 
     book_appointment_tool,  
     get_employee_schedule_tool, # <--- НОВЫЙ ИНСТРУМЕНТ
+    book_appointment_ai_payload_tool, # <--- ДОБАВЛЕН НОВЫЙ ИНСТРУМЕНТ
 ]
 logger.info(f"Определено {len(TOOL_FUNCTIONS)} функций-инструментов для динамической привязки.")
 SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ и информативный ИИ-ассистент.
@@ -585,6 +712,46 @@ SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ 
 - Медицинские Советы: НЕ ДАВАЙ. Напоминай, что консультация со специалистом необходима.
 
 ВАЖНО: Всегда сначала анализируй историю и цель пользователя. Реши, нужен ли ответ из памяти, RAG, вызов функции или простой ответ. Действуй соответственно.
+
+ПРОЦЕСС ЗАПИСИ НА ПРИЕМ (БУКИРОВАНИЕ):
+1.  Убедись, что у тебя есть ВСЯ необходимая информация от пользователя или из истории:
+    *   Номер телефона клиента (`client_phone_number`). Если его нет, ОБЯЗАТЕЛЬНО спроси.
+    *   Конкретная(ые) услуга(и) (`serviceName` для каждой).
+    *   Категория для каждой услуги (`categoryName`). Эту информацию ты часто можешь получить из ответа инструмента `get_service_price_tool`.
+    *   ФИО сотрудника (`employee_name`).
+    *   Название филиала (`filial_name`).
+    *   Дата записи (`date_of_record`).
+    *   Время начала (`start_time`).
+2.  После того как пользователь подтвердил дату и время (например, выбрав из списка свободных слотов, полученных через `get_free_slots_tool`):
+    *   Если цена или длительность услуги еще не известны или не подтверждены, используй `get_service_price_tool` для их получения. Ответ этого инструмента также может содержать `categoryName` и `durationService` для услуги.
+    *   Рассчитай ОБЩУЮ длительность (`duration_of_time`) и ОБЩУЮ цену (`total_price`) для всей записи (особенно если услуг несколько). Для одной услуги это будут ее длительность и цена.
+    *   Рассчитай время окончания (`end_time`) на основе `start_time` и `duration_of_time`.
+3.  **Формирование `services_details` и вызов инструмента:**
+    a.  **СНАЧАЛА**: На основе информации, собранной на шаге 1 (особенно `serviceName` и `categoryName` для каждой услуги), ТЫ ОБЯЗАН СФОРМИРОВАТЬ поле `services_details`.
+        *   `services_details` ДОЛЖНО БЫТЬ СПИСКОМ словарей. Каждый словарь представляет одну услугу.
+        *   Для КАЖДОЙ услуги в списке `services_details` укажи:
+            *   `serviceName` (ТОЧНОЕ название услуги).
+            *   `categoryName` (ТОЧНОЕ название КАТЕГОРИИ).
+            *   `countService` (int, обычно 1).
+            *   `rowNumber` (int, порядковый номер услуги в записи, начиная с 1).
+            *   `complexServiceId` (Optional[str], если применимо, иначе `null` или не передавай).
+        *   Пример ОДНОЙ услуги в `services_details`: `[{ "rowNumber": 1, "serviceName": "Soprano Пальцы для женщин", "categoryName": "Soprano", "countService": 1, "complexServiceId": null }]`
+        *   Если услуг несколько, добавь соответствующие словари в список `services_details`.
+        *   Помни: `serviceId`, `parentId`, индивидуальные `price`, `salePrice`, `durationService` для каждой услуги будут добавлены автоматически системой позже, тебе нужно предоставить только указанные выше поля (`serviceName`, `categoryName` и т.д.) для каждой услуги в `services_details`.
+    b.  **ЗАТЕМ**: Собери все остальные данные, включая ТОЛЬКО ЧТО СФОРМИРОВАННЫЙ список `services_details`, и вызови инструмент `book_appointment_ai_payload_tool`.
+        *   Убедись, что ты передаешь:
+            *   `services_details` (сформированный тобой список).
+            *   `filial_name`
+            *   `date_of_record`
+            *   `start_time`
+            *   `end_time`
+            *   `duration_of_time` (общую)
+            *   `employee_name`
+            *   `total_price` (общую)
+            *   Опционально: `lang_id`, `color_code_record`, `traffic_channel`, `traffic_channel_id`.
+        *   Номер телефона клиента (`client_phone_number`), ID тенанта (`tenant_id`) и API токен (`api_token`) будут добавлены автоматически системой.
+    c.  **ВАЖНО**: Если на шаге 3.a ты не смог сформировать `services_details` (например, не хватает `serviceName` или `categoryName` для какой-либо из услуг), НЕ ПЕРЕХОДИ к шагу 3.b. Вместо этого, вернись к шагу 4.
+4.  Если чего-то не хватает для вызова `book_appointment_ai_payload_tool` (из того, что ТЫ должен предоставить, ОСОБЕННО `serviceName` и `categoryName` для КАЖДОЙ услуги в `services_details` для формирования поля `services_details`), ВЕЖЛИВО УТОЧНИ у пользователя недостающую информацию ПЕРЕД вызовом инструмента.
 """
 class TenantAwareRedisChatMessageHistory(BaseChatMessageHistory):
     """Хранилище истории сообщений в Redis с учетом tenant_id."""
@@ -842,6 +1009,9 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
             func_for_tool = tool_function # Используется прямая функция из matrixai.py
         elif tool_name == "get_employee_schedule_tool": # <--- НОВЫЙ ИНСТРУМЕНТ
             current_args_schema = GetEmployeeScheduleArgs
+            func_for_tool = tool_function # Используется прямая функция из matrixai.py
+        elif tool_name == "book_appointment_ai_payload_tool": # <--- ДОБАВЛЕНА ОБРАБОТКА НОВОГО ИНСТРУМЕНТА
+            current_args_schema = BookAppointmentAIPayloadArgs
             func_for_tool = tool_function # Используется прямая функция из matrixai.py
         # Обработка старых инструментов, которые используют wrapper и schema_map
         elif tool_function in tool_func_to_schema_map:
