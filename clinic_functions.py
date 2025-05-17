@@ -453,7 +453,10 @@ class CompareServicePriceInFilials(BaseModel):
                 fn = item_data.get('filialName')
                 if fn: all_db_filial_names_set.add(fn)
             existing_filials_str = ", ".join(sorted(list(all_db_filial_names_set), key=normalize_text)) if all_db_filial_names_set else "(нет данных)"
-            return f"Следующие запрошенные филиалы не найдены: {", ".join(invalid_filial_names_input)}. Доступные филиалы в базе: {existing_filials_str}."
+            
+            # Вынесем .join() в отдельную переменную
+            joined_invalid_names = ", ".join(invalid_filial_names_input)
+            return f"Следующие запрошенные филиалы не найдены: {joined_invalid_names}. Доступные филиалы в базе: {existing_filials_str}."
         
         # Эта проверка может быть излишней, если unique_input_filial_names уже проверен на >=2
         # Однако, если все уникальные имена оказались одним и тем же ID (маловероятно, но возможно), то len(valid_filial_ids_to_query) может быть < 2
