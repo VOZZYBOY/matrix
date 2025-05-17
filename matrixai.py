@@ -950,11 +950,11 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         list_employee_filials_tool: ListEmployeeFilialsArgs,
     }
 
-    def create_tool_wrapper_react(original_tool_func: callable, raw_data_for_tenant: Optional[List[Dict]]):
+    def create_tool_wrapper_react(original_tool_func: callable, raw_data_for_tenant: Optional[List[Dict]], tenant_id_for_tool: str): # <--- ДОБАВЛЕН tenant_id_for_tool
         def actual_wrapper(*args, **kwargs) -> str:
             tool_name = original_tool_func.__name__
             logger.info(f"[ReAct Tool] Вызов обертки для {tool_name} с args: {args}, kwargs: {kwargs}")
-            clinic_functions.set_clinic_data(raw_data_for_tenant if raw_data_for_tenant is not None else [])
+            clinic_functions.set_clinic_data(raw_data_for_tenant if raw_data_for_tenant is not None else [], tenant_id=tenant_id_for_tool) # <--- ПЕРЕДАЕМ tenant_id
             try:
                 handler_class_name = ''.join(word.capitalize() for word in tool_name.replace('_tool', '').split('_'))
                 HandlerClass = getattr(clinic_functions, handler_class_name, None)
@@ -989,11 +989,11 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
             func_for_tool = tool_function
         elif tool_function in tool_func_to_schema_map:
             current_args_schema = tool_func_to_schema_map.get(tool_function)
-            func_for_tool = create_tool_wrapper_react(tool_function, TENANT_RAW_DATA_MAP.get(tenant_id, []))
+            func_for_tool = create_tool_wrapper_react(tool_function, TENANT_RAW_DATA_MAP.get(tenant_id, []), tenant_id) # <--- ПЕРЕДАЕМ tenant_id
         else:
             logger.warning(f"Инструмент '{tool_name}' не классифицирован. Использование стандартной обертки и schema=None.")
-            current_args_schema = None
-            func_for_tool = create_tool_wrapper_react(tool_function, TENANT_RAW_DATA_MAP.get(tenant_id, []))
+            current_args_schema = None # Явно None, если не классифицирован
+            func_for_tool = create_tool_wrapper_react(tool_function, TENANT_RAW_DATA_MAP.get(tenant_id, []), tenant_id) # <--- ПЕРЕДАЕМ tenant_id
 
         if func_for_tool is None:
             logger.error(f"Не удалось определить функцию для инструмента '{tool_name}'. Пропуск.")
@@ -1145,7 +1145,6 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
     logger.info(f"[{tenant_id}:{user_id}] Итоговый ответ ReAct (первые 100 симв): {final_answer_content[:100]}...")
     return final_answer_content
 
-# --- Начало: Асинхронный триггер для переиндексации данных одного тенанта ---
 async def trigger_reindex_tenant_async(tenant_id: str) -> bool:
     """
     Асинхронно запускает переиндексацию данных для указанного тенанта.

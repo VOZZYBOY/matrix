@@ -91,8 +91,7 @@ class BookAppointmentArgs(BaseModel):
     start_time: str
     end_time: str
     duration_of_time: int
-    # НЕ НУЖНО: category_id, service_id, employee_id, filial_id, service_original_name
-    # Эти поля вычисляются внутри функции-обертки!
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
