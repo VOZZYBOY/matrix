@@ -84,14 +84,43 @@ def build_indexes_for_tenant(tenant_id: str, raw_data: List[Dict[str, Any]]):
             id_ = item.get(id_key)
             if name and id_:
                 normalized_name = normalize_text(name, keep_spaces=keep_spaces_flag, sort_words=sort_words_flag)
+                
+                # Логика для name_to_id
                 if normalized_name not in name_to_id:
                     name_to_id[normalized_name] = id_
+                elif name_to_id[normalized_name] != id_: 
+                     logger.warning(
+                        f"Tenant '{tenant_id}': Обнаружена коллизия нормализованных имен для сущности '{name_key}'. "
+                        f"Нормализованное имя '{normalized_name}' (из оригинала: '{name}') пытается сопоставиться с ID '{id_}', "
+                        f"но уже сопоставлено с ID '{name_to_id[normalized_name]}'. "
+                        f"Сохраняется первое сопоставление (с ID '{name_to_id[normalized_name]}'). "
+                        f"Это может произойти, если два разных оригинальных имени нормализуются к одной строке и имеют разные ID."
+                    )
+
+                # Логика для id_to_name
                 if id_ not in id_to_name:
-                    id_to_name[id_] = name
+                    id_to_name[id_] = name # Сохраняем оригинальное имя
+                elif id_to_name[id_] != name: 
+                    # Особое внимание для филиалов, так как это текущая проблема
+                    if id_key == "filialId":
+                        logger.warning(
+                            f"Tenant '{tenant_id}': Обнаружено несоответствие данных для filialId '{id_}'. "
+                            f"Этот ID уже сопоставлен с оригинальным именем филиала '{id_to_name[id_]}', "
+                            f"но другая запись пытается сопоставить его с именем '{name}'. "
+                            f"Для функции get_name_by_id будет сохранено первое сопоставленное имя ('{id_to_name[id_]}'). "
+                            f"Это НАСТОЯТЕЛЬНО УКАЗЫВАЕТ на то, что в исходном файле данных один и тот же filialId используется для разных названий филиалов."
+                        )
+                    else: # Общее предупреждение для других сущностей
+                        logger.warning(
+                            f"Tenant '{tenant_id}': Дублирующийся ID '{id_}' для сущности '{name_key}'. "
+                            f"Существующее оригинальное имя: '{id_to_name[id_]}', новое оригинальное имя: '{name}'. "
+                            f"Сохраняется первое ('{id_to_name[id_]}'). Это может указывать на несоответствие данных."
+                        )
+                        
         indexes[f"{name_key}_to_id"] = name_to_id
         indexes[f"{id_key}_to_name"] = id_to_name
     TENANT_INDEXES[tenant_id] = indexes
-    # --- Строим индекс serviceId -> categoryId ---
+    
     serviceid_to_categoryid = {}
     for item in raw_data:
         service_id = item.get("serviceId")
@@ -99,7 +128,7 @@ def build_indexes_for_tenant(tenant_id: str, raw_data: List[Dict[str, Any]]):
         if service_id and category_id:
             serviceid_to_categoryid[service_id] = category_id
     SERVICEID_TO_CATEGORYID_INDEX[tenant_id] = serviceid_to_categoryid
-    logger.info(f"Построены индексы для тенанта {tenant_id} с использованием normalize_text и индекс serviceId->categoryId.")
+    logger.info(f"Построены индексы для тенанта {tenant_id} с использованием normalize_text и индекс serviceId->categoryId. Проверьте предупреждения выше на возможные несоответствия данных.")
 
 
 def get_id_by_name(tenant_id: str, entity: str, name: str) -> Optional[str]:
@@ -110,14 +139,13 @@ def get_id_by_name(tenant_id: str, entity: str, name: str) -> Optional[str]:
     entity: 'service', 'employee', 'filial', 'category'
     """
     keep_spaces_for_entity = False
-    sort_words_for_entity = False # <--- Добавляем флаг сортировки для поиска
+    sort_words_for_entity = False 
     
     if entity == "service" or entity == "category":
         keep_spaces_for_entity = True
     elif entity == "employee":
         keep_spaces_for_entity = True
-        sort_words_for_entity = True # <--- Сортируем слова при поиске имени сотрудника
-    # Для filial keep_spaces остается False, sort_words False
+        sort_words_for_entity = True 
     
     normalized_name_to_search = normalize_text(name, keep_spaces=keep_spaces_for_entity, sort_words=sort_words_for_entity)
     

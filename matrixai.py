@@ -144,7 +144,7 @@ class FindEmployeesArgs(BaseModel):
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=15, description="Количество сотрудников на странице для пагинации")
 def find_employees_tool(employee_name: Optional[str] = None, service_name: Optional[str] = None, filial_name: Optional[str] = None) -> str:
-    """Ищет сотрудников клиники по ФИО, выполняемой услуге или филиалу."""
+    """Ищет сотрудников клиники по ФИО, выполняемой услуге или филиалу. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 15), если ожидается много результатов или пользователь просит показать все/дальше."""
     handler = clinic_functions.FindEmployees(employee_name=employee_name, service_name=service_name, filial_name=filial_name)
     return handler.process()
 class GetServicePriceArgs(BaseModel):
@@ -163,7 +163,7 @@ class GetEmployeeServicesArgs(BaseModel):
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=20, description="Количество услуг на странице для пагинации")
 def get_employee_services_tool(employee_name: str) -> str:
-    """Возвращает список услуг КОНКРЕТНОГО сотрудника."""
+    """Возвращает список услуг КОНКРЕТНОГО сотрудника. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 20), если ожидается много результатов или пользователь просит показать все/дальше."""
     handler = clinic_functions.GetEmployeeServices(employee_name=employee_name)
     return handler.process()
 class CheckServiceInFilialArgs(BaseModel):
@@ -192,7 +192,7 @@ class FindSpecialistsByServiceOrCategoryAndFilialArgs(BaseModel):
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=15, description="Количество специалистов на странице для пагинации")
 def find_specialists_by_service_or_category_and_filial_tool(query_term: str, filial_name: str) -> str:
-    """Ищет СПЕЦИАЛИСТОВ по УСЛУГЕ/КАТЕГОРИИ в КОНКРЕТНОМ филиале."""
+    """Ищет СПЕЦИАЛИСТОВ по УСЛУГЕ/КАТЕГОРИИ в КОНКРЕТНОМ филиале. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 15), если ожидается много результатов или пользователь просит показать все/дальше."""
     handler = clinic_functions.FindSpecialistsByServiceOrCategoryAndFilial(query_term=query_term.lower(), filial_name=filial_name.lower())
     return handler.process()
 class ListServicesInCategoryArgs(BaseModel):
@@ -200,7 +200,7 @@ class ListServicesInCategoryArgs(BaseModel):
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=20, description="Количество услуг на странице для пагинации")
 def list_services_in_category_tool(category_name: str) -> str:
-    """Возвращает список КОНКРЕТНЫХ услуг в указанной КАТЕГОРИИ."""
+    """Возвращает список КОНКРЕТНЫХ услуг в указанной КАТЕГОРИИ. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 20), если ожидается много результатов или пользователь просит показать все/дальше."""
     handler = clinic_functions.ListServicesInCategory(category_name=category_name)
     return handler.process()
 class ListServicesInFilialArgs(BaseModel):
@@ -208,7 +208,7 @@ class ListServicesInFilialArgs(BaseModel):
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=30, description="Количество услуг на странице для пагинации (учитывайте, что вывод также содержит заголовки категорий)")
 def list_services_in_filial_tool(filial_name: str) -> str:
-    """Возвращает ПОЛНЫЙ список УНИКАЛЬНЫХ услуг в КОНКРЕТНОМ филиале."""
+    """Возвращает ПОЛНЫЙ список УНИКАЛЬНЫХ услуг в КОНКРЕТНОМ филиале. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 30), если ожидается много результатов или пользователь просит показать все/дальше. Учитывайте, что вывод page_size также включает заголовки категорий."""
     handler = clinic_functions.ListServicesInFilial(filial_name=filial_name)
     return handler.process()
 class FindServicesInPriceRangeArgs(BaseModel):
@@ -219,14 +219,14 @@ class FindServicesInPriceRangeArgs(BaseModel):
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=20, description="Количество услуг на странице для пагинации")
 def find_services_in_price_range_tool(min_price: float, max_price: float, category_name: Optional[str] = None, filial_name: Optional[str] = None) -> str:
-    """Ищет услуги в ЗАДАННОМ ЦЕНОВОМ ДИАПАЗОНЕ."""
+    """Ищет услуги в ЗАДАННОМ ЦЕНОВОМ ДИАПАЗОНЕ. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 20), если ожидается много результатов или пользователь просит показать все/дальше."""
     handler = clinic_functions.FindServicesInPriceRange(min_price=min_price, max_price=max_price, category_name=category_name, filial_name=filial_name)
     return handler.process()
 class ListAllCategoriesArgs(BaseModel):
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=30, description="Количество категорий на странице для пагинации")
 def list_all_categories_tool() -> str:
-    """Возвращает список ВСЕХ категорий услуг."""
+    """Возвращает список ВСЕХ категорий услуг. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 30), если ожидается много результатов или пользователь просит показать все/дальше."""
     handler = clinic_functions.ListAllCategories()
     return handler.process()
 class ListEmployeeFilialsArgs(BaseModel):
@@ -946,7 +946,7 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         find_service_locations_tool: FindServiceLocationsArgs, find_specialists_by_service_or_category_and_filial_tool: FindSpecialistsByServiceOrCategoryAndFilialArgs,
         list_services_in_category_tool: ListServicesInCategoryArgs, list_services_in_filial_tool: ListServicesInFilialArgs,
         find_services_in_price_range_tool: FindServicesInPriceRangeArgs, 
-        list_all_categories_tool: NoArgsSchema, # <--- ИЗМЕНЕНО с None
+        list_all_categories_tool: ListAllCategoriesArgs, # <--- ИСПРАВЛЕНО с NoArgsSchema
         list_employee_filials_tool: ListEmployeeFilialsArgs,
     }
 
@@ -1108,10 +1108,10 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
 
 
                         output_str = str(output)
-                        MAX_TOOL_OUTPUT_LENGTH = 3000
-                        if len(output_str) > MAX_TOOL_OUTPUT_LENGTH:
-                            output_str = output_str[:MAX_TOOL_OUTPUT_LENGTH] + "\\n[...Вывод инструмента был усечен...]"
-                            logger.warning(f"Вывод инструмента '{tool_name}' был усечен.")
+                        # MAX_TOOL_OUTPUT_LENGTH = 3000
+                        # if len(output_str) > MAX_TOOL_OUTPUT_LENGTH:
+                        #     output_str = output_str[:MAX_TOOL_OUTPUT_LENGTH] + "\\n[...Вывод инструмента был усечен...]"
+                        #     logger.warning(f"Вывод инструмента '{tool_name}' был усечен.")
                         
                         tool_outputs.append(ToolMessage(content=output_str, tool_call_id=tool_call["id"]))
                         logger.info(f"Результат вызова '{tool_name}': {output_str[:100]}...")
