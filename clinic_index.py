@@ -1,9 +1,26 @@
 # clinic_index.py
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import logging
 import re
 
 logger = logging.getLogger(__name__)
+
+
+def levenshtein_distance(s1: str, s2: str) -> int:
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    return previous_row[-1]
 
 
 def normalize_text(text: Optional[str], keep_spaces: bool = False) -> str:
@@ -17,7 +34,7 @@ def normalize_text(text: Optional[str], keep_spaces: bool = False) -> str:
     if keep_spaces:
         normalized = re.sub(r'\s+', ' ', normalized).strip()
     else:
-        normalized = normalized.replace(" ", "")
+        normalized = re.sub(r'\s+', '', normalized)
     return normalized
 
 
@@ -107,32 +124,87 @@ def get_id_by_name(tenant_id: str, entity: str, name: str) -> Optional[str]:
         return exact_match_id
 
     # 2. Поиск частичного совпадения (если normalized_name_to_search является подстрокой ключа в карте)
-    #    Это полезно, если пользователь ввел "Соня Сеферова", а в базе "Соня Сеферова Магамедовна"
-    #    Или для услуг, например, ввел "Лазерная эпиляция", а в базе "Лазерная эпиляция бикини".
-    partial_matches = []
+    partial_matches_ids = []
+    # Собираем ID и нормализованные имена для последующего нечеткого поиска, если понадобится
+    candidate_norm_names_for_fuzzy: List[Tuple[str, str]] = [] 
+
     for indexed_norm_name, item_id in name_to_id_map.items():
+        candidate_norm_names_for_fuzzy.append((indexed_norm_name, item_id))
         if normalized_name_to_search in indexed_norm_name:
-            partial_matches.append(item_id)
-            logger.debug(f"Найдено частичное совпадение: запрос '{normalized_name_to_search}' содержится в '{indexed_norm_name}' (ID: {item_id})")
+            partial_matches_ids.append(item_id)
+            logger.debug(f"Найдено частичное совпадение (подстрока): запрос '{normalized_name_to_search}' содержится в '{indexed_norm_name}' (ID: {item_id})")
 
-    if len(partial_matches) == 1:
-        logger.info(f"Найдено ОДНО частичное совпадение ID ('{partial_matches[0]}') для тенанта '{tenant_id}', сущности '{entity}', по запросу '{normalized_name_to_search}' (исходное: '{name}').")
-        return partial_matches[0]
+    if len(partial_matches_ids) == 1:
+        logger.info(f"Найдено ОДНО частичное совпадение (подстрока) ID ('{partial_matches_ids[0]}') для тенанта '{tenant_id}', сущности '{entity}', по запросу '{normalized_name_to_search}' (исходное: '{name}').")
+        return partial_matches_ids[0]
     
-    if len(partial_matches) > 1:
-        # Если частичных совпадений несколько, это неоднозначность.
-        # Пока возвращаем None и логируем, чтобы избежать неправильного выбора.
-        # В будущем можно вернуть список или специальный флаг.
-        original_names_found = []
-        id_to_name_map_key = f"{ENTITY_KEYS[[e[0] for e in ENTITY_KEYS].index(name_key_for_index)][1]}_to_name"
-        id_to_name_map = TENANT_INDEXES.get(tenant_id, {}).get(id_to_name_map_key, {})
-        for pid in partial_matches:
-            original_names_found.append(id_to_name_map.get(pid, f"(ID: {pid})"))
-        
-        logger.warning(f"Найдено НЕСКОЛЬКО ({len(partial_matches)}) частичных совпадений для тенанта '{tenant_id}', сущности '{entity}', по запросу '{normalized_name_to_search}' (исходное: '{name}'). Совпадения: {original_names_found}. Возвращаем None из-за неоднозначности.")
-        return None # Неоднозначность
+    if len(partial_matches_ids) > 1:
+        # Если частичных совпадений несколько, это неоднозначность для данного этапа.
+        # Логируем, но не возвращаем, так как нечеткий поиск может дать лучший результат.
+        logger.warning(f"Найдено НЕСКОЛЬКО ({len(partial_matches_ids)}) частичных совпадений (подстрока) для тенанта '{tenant_id}', сущности '{entity}', по запросу '{normalized_name_to_search}' (исходное: '{name}'). Переходим к нечеткому поиску.")
+        # Не возвращаем None здесь, а продолжаем к нечеткому поиску по всем кандидатам.
 
-    logger.warning(f"ID не найден (ни точное, ни частичное совпадение) для тенанта '{tenant_id}', сущности '{entity}', нормализованного имени '{normalized_name_to_search}' (исходное: '{name}').")
+    # 3. Нечеткий поиск с использованием расстояния Левенштейна
+    if candidate_norm_names_for_fuzzy:
+        fuzzy_matches = []
+        # Динамический порог: 1 для коротких строк (<=5 символов), иначе 2.
+        # Для филиалов (entity == 'filial') всегда 1, так как их названия обычно короткие и точные.
+        # Для более длинных названий услуг или сотрудников можно допустить 2 ошибки.
+        threshold = 1
+        if entity == 'filial':
+            threshold = 1
+        elif len(normalized_name_to_search) > 7: # Увеличил порог длины для большего threshold
+            threshold = 2
+        elif len(normalized_name_to_search) > 4: # Промежуточный порог
+             threshold = 1 # Оставляем 1 для средней длины
+        # Для очень коротких (<=4) останется 1 по умолчанию из threshold = 1
+
+        logger.info(f"Нечеткий поиск для '{normalized_name_to_search}' (длина {len(normalized_name_to_search)}) с порогом {threshold}...")
+
+        for norm_name_candidate, item_id_candidate in candidate_norm_names_for_fuzzy:
+            dist = levenshtein_distance(normalized_name_to_search, norm_name_candidate)
+            if dist <= threshold:
+                fuzzy_matches.append({'id': item_id_candidate, 'name': norm_name_candidate, 'dist': dist})
+                logger.debug(f"Кандидат для нечеткого поиска: '{norm_name_candidate}' (ID: {item_id_candidate}), расстояние: {dist}")
+
+        if fuzzy_matches:
+            # Сортируем по расстоянию, затем по длине имени (предпочитаем более короткие при равном расстоянии)
+            fuzzy_matches.sort(key=lambda x: (x['dist'], len(x['name'])))
+            
+            # Если лучший результат имеет расстояние 0, и он один такой, это почти как точное совпадение.
+            if fuzzy_matches[0]['dist'] == 0:
+                # Убедимся, что он один с dist 0
+                zero_dist_matches = [m for m in fuzzy_matches if m['dist'] == 0]
+                if len(zero_dist_matches) == 1:
+                    logger.info(f"Найдено ОДНО точное совпадение через нечеткий поиск (dist 0): ID ('{zero_dist_matches[0]['id']}') для '{normalized_name_to_search}'.")
+                    return zero_dist_matches[0]['id']
+                else: # Несколько с dist 0 - это странно, но возможно если нормализация дала одинаковые строки для разных ID
+                    logger.warning(f"Найдено НЕСКОЛЬКО ({len(zero_dist_matches)}) совпадений с расстоянием 0 через нечеткий поиск для '{normalized_name_to_search}'. Это неоднозначность. ID: {[m['id'] for m in zero_dist_matches]}")
+                    return None # Неоднозначность
+
+            # Если есть совпадения с расстоянием > 0, но в пределах порога
+            # и если первое из них (лучшее) имеет уникальное расстояние среди всех
+            # или если все с минимальным расстоянием указывают на один и тот же ID (маловероятно, но для полноты)
+            best_fuzzy_match = fuzzy_matches[0]
+            # Проверим, есть ли другие матчи с таким же минимальным расстоянием
+            all_best_dist_matches = [m for m in fuzzy_matches if m['dist'] == best_fuzzy_match['dist']]
+
+            if len(all_best_dist_matches) == 1:
+                logger.info(f"Найдено ОДНО лучшее нечеткое совпадение: ID ('{best_fuzzy_match['id']}') для '{normalized_name_to_search}' (кандидат: '{best_fuzzy_match['name']}', расстояние: {best_fuzzy_match['dist']}).")
+                return best_fuzzy_match['id']
+            else:
+                # Если несколько совпадений с одинаковым минимальным расстоянием Левенштейна
+                # Получаем оригинальные имена для этих совпадений
+                id_to_name_map_key = f"{ENTITY_KEYS[[e[0] for e in ENTITY_KEYS].index(name_key_for_index)][1]}_to_name"
+                id_to_name_map = TENANT_INDEXES.get(tenant_id, {}).get(id_to_name_map_key, {})
+                original_names_of_ambiguous_matches = [
+                    id_to_name_map.get(m['id'], f"ID:{m['id']}") for m in all_best_dist_matches
+                ]
+                logger.warning(f"Найдено НЕСКОЛЬКО ({len(all_best_dist_matches)}) нечетких совпадений с одинаковым лучшим расстоянием ({best_fuzzy_match['dist']}) для '{normalized_name_to_search}'. Оригинальные имена кандидатов: {original_names_of_ambiguous_matches}. Это неоднозначность.")
+                return None # Неоднозначность
+
+    # Если ничего не найдено ни одним из методов
+    logger.warning(f"ID не найден (ни точное, ни частичное, ни нечеткое совпадение) для тенанта '{tenant_id}', сущности '{entity}', нормализованного имени '{normalized_name_to_search}' (исходное: '{name}').")
     return None
 
 def get_name_by_id(tenant_id: str, entity: str, id_: str) -> Optional[str]:

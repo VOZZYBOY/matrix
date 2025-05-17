@@ -3,7 +3,6 @@
 import os
 import logging
 from typing import List, Dict, Any, Optional, Tuple
-from langchain_core.runnables import  RunnableLambda, RunnableConfig
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, BaseMessage, messages_from_dict, messages_to_dict
 from langchain_core.runnables.history import RunnableWithMessageHistory
@@ -40,6 +39,7 @@ from clinic_index import build_indexes_for_tenant, get_id_by_name, get_category_
 import pytz
 from datetime import datetime
 import inspect # <--- ДОБАВЛЕНО
+from langchain_core.runnables import RunnableLambda, RunnableConfig # <--- Убрали get_config_value
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s:%(name)s:%(lineno)d - %(message)s')
 logger = logging.getLogger(__name__)
 GIGACHAT_CREDENTIALS = "OTkyYTgyNGYtMjRlNC00MWYyLTg3M2UtYWRkYWVhM2QxNTM1OjA5YWRkODc0LWRjYWItNDI2OC04ZjdmLWE4ZmEwMDIxMThlYw=="
@@ -268,35 +268,46 @@ class BookAppointmentArgs(BaseModel):
     traffic_channel_id: str = Field(default="", description="ID канала трафика (опционально)")
 
 # Pydantic модель для нового инструмента записи (AI Payload)
+class ServiceDetailItemFromLLM(BaseModel): # <--- НОВАЯ МОДЕЛЬ
+    rowNumber: int = Field(description="Порядковый номер услуги в записи, начиная с 1.")
+    serviceName: str = Field(description="ТОЧНОЕ название услуги для поиска ее serviceId.")
+    categoryName: Optional[str] = Field(default=None, description="НАЗВАНИЕ КАТЕГОРИИ. По возможности передайте, если известно или было явно уточнено. Система в первую очередь попытается определить категорию автоматически по ID услуги, но это поле может служить уточнением или запасным вариантом.")
+    countService: int = Field(default=1, description="Количество данной услуги.")
+    complexServiceId: Optional[str] = Field(default=None, description="ID комплексной услуги, если эта услуга является частью комплекса.")
+    price: float = Field(description="Цена ИМЕННО ЭТОЙ УСЛУГИ (за единицу, если countService > 1). LLM должен определить это значение, используя get_service_price_tool при необходимости.")
+    durationService: int = Field(description="Длительность ИМЕННО ЭТОЙ УСЛУГИ в минутах. LLM должен определить это значение (например, из описания услуги или общих знаний).")
+
 class BookAppointmentAIPayloadArgs(BaseModel):
-    # client_phone_number будет извлечен из конфигурации автоматически
-    services_details: List[Dict[str, Any]] = Field(
-        min_length=1, # <--- ДОБАВЛЕНО
-        description=(
-            "Список услуг для записи. ОБЯЗАТЕЛЬНО должен содержать хотя бы одну услугу. Каждая услуга - это словарь с полями: "
-            "'rowNumber' (int, порядковый номер), "
-            # parentId будет формироваться из categoryName
-            "'serviceName' (str, ТОЧНОЕ название услуги для поиска ее serviceId, цены и длительности), "
-            "'categoryName' (str, ТОЧНОЕ название КАТЕГОРИИ, к которой принадлежит эта услуга. Это имя будет использовано для поиска ID категории, который станет parentId услуги), "
-            "'countService' (int, количество), "
-            # price, salePrice и durationService будут добавлены автоматически из данных клиники
-            "'complexServiceId' (Optional[str], ID комплексной услуги, если эта услуга является частью комплекса)."
-            # Поля 'price', 'salePrice', 'durationService' больше не должны передаваться LLM здесь.
-        )
-    )
+    # client_phone_number будет извлечен из конфигурации автоматически (Устаревшее утверждение, теперь он часть модели)
     filial_name: str = Field(description="ТОЧНОЕ название филиала для записи.")
     date_of_record: str = Field(description="Дата записи в формате YYYY-MM-DD.")
     start_time: str = Field(description="Время начала записи в формате HH:MM.")
     end_time: str = Field(description="Время окончания записи в формате HH:MM.")
     duration_of_time: int = Field(description="ОБЩАЯ длительность всей записи в минутах.")
     employee_name: str = Field(description="ТОЧНОЕ ФИО сотрудника для записи.")
+    services_details: List[ServiceDetailItemFromLLM] = Field( # <--- ИЗМЕНЕНО List[Dict[str, Any]] на List[ServiceDetailItemFromLLM]
+        min_length=1, 
+        description=(
+            "Список услуг для записи. ОБЯЗАТЕЛЬНО должен содержать хотя бы одну услугу. Каждая услуга - это ОБЪЕКТ со следующими полями: "
+            "'rowNumber' (int, порядковый номер), "
+            "'serviceName' (str, ТОЧНОЕ название услуги для поиска ее serviceId, цены и длительности), "
+            "'categoryName' (Optional[str], НАЗВАНИЕ КАТЕГОРИИ. По возможности передайте его, если оно известно или было явно уточнено. Система в первую очередь попытается определить категорию автоматически по ID услуги, но это поле может служить уточнением или запасным вариантом), "
+            "'countService' (int, количество), "
+            "'complexServiceId' (Optional[str], ID комплексной услуги, если эта услуга является частью комплекса), "
+            "'price' (float, цена ИМЕННО ЭТОЙ услуги), " # <--- ДОБАВЛЕНО В ОПИСАНИЕ
+            "'durationService' (int, длительность ИМЕННО ЭТОЙ услуги в минутах)." # <--- ДОБАВЛЕНО В ОПИСАНИЕ
+        )
+    )
     total_price: float = Field(description="ОБЩАЯ цена всей записи.")
     lang_id: str = Field(default="ru", description="Язык ответа (например, 'ru').")
-    # api_token и tenant_id будут добавлены автоматически из конфигурации
-    # Опциональные поля из JSON, которые LLM может захотеть передать (но не обязана)
     color_code_record: Optional[str] = Field(default=None, description="Код цвета для записи (опционально).")
     traffic_channel: Optional[int] = Field(default=None, description="ID канала трафика (опционально).")
     traffic_channel_id: Optional[str] = Field(default=None, description="Строковый ID канала трафика (опционально).")
+
+    # Системные поля, которые будут добавлены в run_agent_like_chain
+    tenant_id: Optional[str] = Field(default=None, description="[СИСТЕМНОЕ ПОЛЕ] ID тенанта. Не заполняется LLM.")
+    api_token: Optional[str] = Field(default=None, description="[СИСТЕМНОЕ ПОЛЕ] API токен. Не заполняется LLM.")
+    client_phone_number: str = Field(description="[СИСТЕМНОЕ ПОЛЕ] Телефон клиента. Не заполняется LLM, должен быть добавлен системой.")
 
 from clinic_functions import BookAppointmentAIPayload
 
@@ -320,40 +331,57 @@ TOOL_CLASSES = [
 ]
 logger.info(f"Определено {len(TOOL_CLASSES)} Pydantic классов для аргументов инструментов.")
 
-async def get_free_slots_tool(*, config=None, **kwargs_from_llm) -> str:
-    tenant_id_from_config = kwargs_from_llm.get('tenant_id')
-    api_token_from_config = kwargs_from_llm.get('api_token')
+async def get_free_slots_tool(**kwargs_from_llm) -> str:
+    logger.info(f"ENTERING get_free_slots_tool. Raw kwargs_from_llm: {kwargs_from_llm}")
 
-    if not tenant_id_from_config:
-        logger.error(f"tenant_id отсутствует в аргументах ({kwargs_from_llm}) для GetFreeSlots.")
-        return "Критическая ошибка: ID тенанта не был предоставлен для вызова GetFreeSlots."
+    try:
+        validated_args = GetFreeSlotsArgs(**kwargs_from_llm)
+    except Exception as e:
+        logger.error(f"Ошибка валидации аргументов для get_free_slots_tool: {e}. Аргументы: {kwargs_from_llm}", exc_info=True)
+        return f"Ошибка: неверные или отсутствующие аргументы для получения слотов: {e}"
+    
+    tenant_id_from_kwargs = validated_args.tenant_id
+    api_token_from_kwargs = validated_args.api_token
 
-    employee_name_from_llm = kwargs_from_llm.get('employee_name')
-    service_names_from_llm = kwargs_from_llm.get('service_names')
-    filial_name_from_llm = kwargs_from_llm.get('filial_name')
-    date_time_from_llm = kwargs_from_llm.get('date_time')
+    logger.info(f"get_free_slots - Retrieved from validated_args - tenant_id: {tenant_id_from_kwargs}")
+    logger.info(f"get_free_slots - Retrieved from validated_args - api_token: {'******' if api_token_from_kwargs else None}")
 
-    logger.info(f"[get_free_slots_tool] Имена от LLM: employee='{employee_name_from_llm}', services='{service_names_from_llm}', filial='{filial_name_from_llm}'")
+    if not tenant_id_from_kwargs:
+        logger.error(f"CRITICAL (get_free_slots): tenant_id (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: ID тенанта не был предоставлен системе для вызова get_free_slots_tool."
 
+    if not api_token_from_kwargs: # Токен тоже важен
+        logger.error(f"CRITICAL (get_free_slots): api_token (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: API токен не был предоставлен системе для вызова get_free_slots_tool."
+
+    # Используем остальные поля из validated_args
+    employee_name_from_llm = validated_args.employee_name
+    service_names_from_llm = validated_args.service_names
+    filial_name_from_llm = validated_args.filial_name
+    date_time_from_llm = validated_args.date_time
+
+    logger.info(f"[get_free_slots_tool] Имена от LLM (из validated_args): employee='{employee_name_from_llm}', services='{service_names_from_llm}', filial='{filial_name_from_llm}'")
+
+    # Проверка обязательных полей, генерируемых LLM, остается
     if not all([employee_name_from_llm, service_names_from_llm, filial_name_from_llm, date_time_from_llm]):
         missing_fields = []
         if not employee_name_from_llm: missing_fields.append('employee_name')
         if not service_names_from_llm: missing_fields.append('service_names')
         if not filial_name_from_llm: missing_fields.append('filial_name')
         if not date_time_from_llm: missing_fields.append('date_time')
-        return f"Ошибка: отсутствуют обязательные поля от LLM: {', '.join(missing_fields)}"
+        return f"Ошибка: отсутствуют обязательные поля от LLM (после валидации): {', '.join(missing_fields)}"
 
     # Преобразование имен в ID
     logger.info(f"[get_free_slots_tool] Попытка получить ID для employee: '{employee_name_from_llm}'")
-    employee_id = get_id_by_name(tenant_id_from_config, 'employee', employee_name_from_llm)
+    employee_id = get_id_by_name(tenant_id_from_kwargs, 'employee', employee_name_from_llm)
     logger.info(f"[get_free_slots_tool] Попытка получить ID для filial: '{filial_name_from_llm}'")
-    filial_id = get_id_by_name(tenant_id_from_config, 'filial', filial_name_from_llm)
+    filial_id = get_id_by_name(tenant_id_from_kwargs, 'filial', filial_name_from_llm)
     
     service_ids = []
     if service_names_from_llm:
         for s_name in service_names_from_llm:
             logger.info(f"[get_free_slots_tool] Попытка получить ID для service: '{s_name}'")
-            s_id = get_id_by_name(tenant_id_from_config, 'service', s_name)
+            s_id = get_id_by_name(tenant_id_from_kwargs, 'service', s_name)
             service_ids.append(s_id)
 
     if not employee_id:
@@ -365,12 +393,12 @@ async def get_free_slots_tool(*, config=None, **kwargs_from_llm) -> str:
         return f"Не удалось найти ID для следующих услуг: {', '.join(problematic_services)}"
 
     handler_args = {
-        "tenant_id": tenant_id_from_config,
+        "tenant_id": tenant_id_from_kwargs, # Используем извлеченное значение
         "employee_id": employee_id,
         "service_ids": service_ids,
         "date_time": date_time_from_llm,
         "filial_id": filial_id,
-        "api_token": api_token_from_config
+        "api_token": api_token_from_kwargs # Используем извлеченное значение
     }
 
     try:
@@ -467,28 +495,39 @@ async def book_appointment_tool(*, config=None, **kwargs_from_llm) -> str:
         error_type = getattr(e, '__class__', Exception).__name__
         return f"Ошибка при обработке запроса на запись ({error_type}): {str(e)}"
 
-async def book_appointment_ai_payload_tool(*, config=None, **kwargs_from_llm) -> str:
-    configurable_params = config.get("configurable", {})
-    tenant_id_from_config = configurable_params.get('tenant_id')
-    api_token_from_config = configurable_params.get('api_token')
-    client_phone_number_from_config = configurable_params.get('phone_number')
-
-    if not tenant_id_from_config:
-        logger.error(f"tenant_id отсутствует в конфигурации для book_appointment_ai_payload_tool. Configurable: {configurable_params}")
-        return "Критическая ошибка: ID тенанта не был предоставлен системе для вызова book_appointment_ai_payload_tool."
-    
-    if not client_phone_number_from_config:
-        logger.error(f"client_phone_number отсутствует в конфигурации для book_appointment_ai_payload_tool. Configurable: {configurable_params}")
-        return "Критическая ошибка: Номер телефона клиента не был предоставлен системе для вызова book_appointment_ai_payload_tool. Пожалуйста, уточните номер телефона у клиента."
+async def book_appointment_ai_payload_tool(**kwargs_from_llm) -> str:
+    logger.info(f"ENTERING book_appointment_ai_payload_tool. Raw kwargs_from_llm: {kwargs_from_llm}")
 
     try:
+        # Валидируем все аргументы, включая системные, которые теперь часть модели
         validated_args = BookAppointmentAIPayloadArgs(**kwargs_from_llm)
     except Exception as e:
-        logger.error(f"Ошибка валидации аргументов от LLM для book_appointment_ai_payload_tool: {e}. Аргументы: {kwargs_from_llm}", exc_info=True)
+        logger.error(f"Ошибка валидации аргументов для book_appointment_ai_payload_tool: {e}. Аргументы: {kwargs_from_llm}", exc_info=True)
         return f"Ошибка: неверные или отсутствующие аргументы для создания записи: {e}"
 
-    filial_id = get_id_by_name(tenant_id_from_config, 'filial', validated_args.filial_name)
-    to_employee_id = get_id_by_name(tenant_id_from_config, 'employee', validated_args.employee_name)
+    # Извлекаем системные поля из validated_args
+    tenant_id_from_kwargs = validated_args.tenant_id
+    api_token_from_kwargs = validated_args.api_token
+    client_phone_number_from_kwargs = validated_args.client_phone_number
+
+    logger.info(f"book_appointment_ai_payload_tool - Retrieved from validated_args - tenant_id: {tenant_id_from_kwargs}")
+    logger.info(f"book_appointment_ai_payload_tool - Retrieved from validated_args - api_token: {'******' if api_token_from_kwargs else None}")
+    logger.info(f"book_appointment_ai_payload_tool - Retrieved from validated_args - client_phone_number: {client_phone_number_from_kwargs}")
+
+    if not tenant_id_from_kwargs:
+        logger.error(f"CRITICAL (book_appointment_ai_payload_tool): tenant_id (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: ID тенанта не был предоставлен системе для вызова book_appointment_ai_payload_tool."
+    
+    if not api_token_from_kwargs:
+        logger.error(f"CRITICAL (book_appointment_ai_payload_tool): api_token (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: API токен не был предоставлен системе для вызова book_appointment_ai_payload_tool."
+
+    if not client_phone_number_from_kwargs:
+        logger.error(f"CRITICAL (book_appointment_ai_payload_tool): client_phone_number (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: Номер телефона клиента не был предоставлен системе для вызова book_appointment_ai_payload_tool."
+
+    filial_id = get_id_by_name(tenant_id_from_kwargs, 'filial', validated_args.filial_name)
+    to_employee_id = get_id_by_name(tenant_id_from_kwargs, 'employee', validated_args.employee_name)
 
     if not filial_id:
         return f"Не удалось найти ID для филиала: '{validated_args.filial_name}'"
@@ -496,53 +535,117 @@ async def book_appointment_ai_payload_tool(*, config=None, **kwargs_from_llm) ->
         return f"Не удалось найти ID для сотрудника: '{validated_args.employee_name}'"
 
     processed_services_payload = []
-    for service_detail_from_llm in validated_args.services_details:
-        service_name_from_llm = service_detail_from_llm.get('serviceName')
-        count_service = service_detail_from_llm.get('countService')
-        row_number = service_detail_from_llm.get('rowNumber')
-        complex_service_id = service_detail_from_llm.get('complexServiceId')
+    if not validated_args.services_details:
+        # Это должно было быть поймано Pydantic, если min_length=1, но на всякий случай
+        logger.error(f"book_appointment_ai_payload_tool: validated_args.services_details пусто или отсутствует, хотя Pydantic модель требует его. Validated_args: {validated_args.model_dump_json(indent=2)}")
+        return "Ошибка: Список услуг (services_details) не был предоставлен или пуст."
 
-        if not service_name_from_llm:
-            return f"Ошибка: в одном из объектов services_details отсутствует 'serviceName'. Детали: {service_detail_from_llm}"
-        
-        service_id = get_id_by_name(tenant_id_from_config, 'service', service_name_from_llm)
-        parent_id_for_service = get_category_id_by_service_id(tenant_id_from_config, service_id)
+    for service_item_from_llm in validated_args.services_details:
+        # Доступ к полям через точечную нотацию, так как service_item_from_llm это Pydantic модель
+        service_name = service_item_from_llm.serviceName
+        category_name = service_item_from_llm.categoryName
+        count_service = service_item_from_llm.countService
+        row_number = service_item_from_llm.rowNumber
+        complex_service_id = service_item_from_llm.complexServiceId
+        price_from_llm = service_item_from_llm.price
+        duration_from_llm = service_item_from_llm.durationService
 
+        # Проверка на None остается актуальной, так как Pydantic может присвоить None опциональным полям, 
+        # если они не переданы, даже если в модели они не Optional (например, если LLM не передал)
+        # Однако, price и durationService у нас обязательны в ServiceDetailItemFromLLM, 
+        # поэтому Pydantic должен был бы выдать ошибку валидации раньше, если они None.
+        # Но для serviceName и rowNumber проверка все еще имеет смысл, т.к. они тоже обязательны.
+        if not service_name or row_number is None or price_from_llm is None or duration_from_llm is None:
+            missing_fields_in_item = []
+            if not service_name: missing_fields_in_item.append("'serviceName'")
+            if row_number is None: missing_fields_in_item.append("'rowNumber'")
+            if price_from_llm is None: missing_fields_in_item.append("'price'")
+            if duration_from_llm is None: missing_fields_in_item.append("'durationService'")
+            return f"Ошибка: неполные данные в одном из элементов services_details: {', '.join(missing_fields_in_item)} обязательны. Получено: {service_item_from_llm.model_dump_json(indent=2)}"
+
+        service_id = get_id_by_name(tenant_id_from_kwargs, 'service', service_name)
         if not service_id:
-            return f"Не удалось найти ID для услуги: '{service_name_from_llm}' в {tenant_id_from_config}"
-        if not parent_id_for_service:
-            return f"Не удалось найти categoryId (parentId) для услуги '{service_name_from_llm}' (serviceId: {service_id}) в {tenant_id_from_config}"
-        
-        current_service_for_payload = service_detail_from_llm.copy()
-        current_service_for_payload['serviceId'] = service_id
-        current_service_for_payload['parentId'] = parent_id_for_service # Устанавливаем parentId
-        # Удаляем исходные имена, если они там были и больше не нужны в таком виде
-        if 'serviceName' in current_service_for_payload: del current_service_for_payload['serviceName'] 
-        if 'categoryName' in current_service_for_payload: del current_service_for_payload['categoryName']
-        processed_services_payload.append(current_service_for_payload)
+            return f"Не удалось найти ID для услуги: '{service_name}'"
 
-    # Аргументы для вызова BookAppointmentAIPayload из clinic_functions
-    # category_id и tenant_id больше не передаются явно в конструктор BookAppointmentAIPayload
-    handler_args_for_clinic_func = {
+        # --- Определение parent_id (categoryId) ---
+        parent_id = get_category_id_by_service_id(tenant_id_from_kwargs, service_id)
+        
+        if not parent_id and category_name: # Если по service_id не нашли, и LLM передал category_name
+            logger.warning(f"Не удалось найти categoryId по serviceId='{service_id}'. Пытаемся найти по categoryName='{category_name}' от LLM.")
+            parent_id = get_id_by_name(tenant_id_from_kwargs, 'category', category_name)
+        
+        if not parent_id: # Если parent_id все еще не найден
+            # Попытка извлечь categoryId или categoryName из SERVICE_DETAILS_MAP_GLOBAL как последний шанс перед ошибкой
+            service_info_for_category_fallback = SERVICE_DETAILS_MAP_GLOBAL.get((tenant_id_from_kwargs, service_id))
+            if service_info_for_category_fallback:
+                map_category_id = service_info_for_category_fallback.get('categoryId')
+                if map_category_id:
+                    parent_id = map_category_id
+                    logger.info(f"Извлечен categoryId '{parent_id}' из SERVICE_DETAILS_MAP_GLOBAL для serviceId '{service_id}'.")
+                else:
+                    map_category_name = service_info_for_category_fallback.get('categoryName')
+                    if map_category_name:
+                        logger.warning(f"В SERVICE_DETAILS_MAP_GLOBAL для serviceId '{service_id}' есть categoryName '{map_category_name}', но нет categoryId. Пытаюсь найти ID для этого имени.")
+                        parent_id = get_id_by_name(tenant_id_from_kwargs, 'category', map_category_name)
+                        if parent_id:
+                            logger.info(f"Найден categoryId '{parent_id}' по categoryName из SERVICE_DETAILS_MAP_GLOBAL.")
+            
+            if not parent_id: # Если все еще не нашли
+                 return f"Не удалось определить ID категории для услуги '{service_name}' (serviceId: {service_id}). Пробовали по serviceId, по categoryName от LLM (если было), и по данным из SERVICE_DETAILS_MAP_GLOBAL."
+        
+        # service_info_from_map больше не используется для цены и длительности
+        # но может быть использован для получения канонического имени услуги, если оно отличается
+        service_info_from_map = SERVICE_DETAILS_MAP_GLOBAL.get((tenant_id_from_kwargs, service_id))
+        
+        api_service_name_for_payload = service_name # По умолчанию используем имя от LLM
+        if service_info_from_map and service_info_from_map.get('serviceName'):
+            api_service_name_for_payload = service_info_from_map.get('serviceName')
+            logger.info(f"Имя услуги для API взято из SERVICE_DETAILS_MAP_GLOBAL: '{api_service_name_for_payload}' (LLM передал: '{service_name}')")
+        else:
+            logger.info(f"Имя услуги для API будет использовано как передал LLM: '{service_name}' (SERVICE_DETAILS_MAP_GLOBAL не содержит альтернативного имени). ")
+
+        # Используем цену и длительность от LLM
+        api_price = float(price_from_llm)
+        api_duration_service = int(duration_from_llm)
+
+        item_for_api_payload = {
+            "rowNumber": row_number,
+            "serviceId": service_id,
+            "CategortyId": parent_id,  # <--- ИЗМЕНЕНО с parentId на CategortyId (с опечаткой как в API)
+            "countService": count_service,
+            "price": float(api_price),
+            "salePrice": float(api_price), # По умолчанию salePrice = price. Можно доработать, если есть отдельное поле.
+            "complexServiceId": complex_service_id,
+            "durationService": int(api_duration_service),
+            "serviceName": api_service_name_for_payload # Имя услуги, которое ожидает API
+        }
+        processed_services_payload.append(item_for_api_payload)
+    
+    if not processed_services_payload: # Дополнительная проверка, хотя validated_args.services_details должен был это покрыть
+        return "Критическая ошибка: не удалось обработать ни одну услугу из services_details."
+
+    # Аргументы для вызова BookAppointmentAIPayload
+    handler_args = {
         "lang_id": validated_args.lang_id,
-        "client_phone_number": client_phone_number_from_config, # <--- ДОБАВЛЕНО
-        "services_payload": processed_services_payload, 
+        "client_phone_number": client_phone_number_from_kwargs, 
+        "services_payload": processed_services_payload, # <--- Используем обработанный список
         "filial_id": filial_id, 
         "date_of_record": validated_args.date_of_record,
         "start_time": validated_args.start_time,
         "end_time": validated_args.end_time,
-        "duration_of_time": validated_args.duration_of_time,
+        "duration_of_time": validated_args.duration_of_time, # Это общая длительность от LLM
         "to_employee_id": to_employee_id, 
-        "total_price": validated_args.total_price,
-        "api_token": api_token_from_config, # tenant_id не передается сюда, т.к. BookAppointmentAIPayload его не ожидает
-        "color_code_record": validated_args.color_code_record,
-        "traffic_channel": 0, # <--- ЖЁСТКО ЗАДАНО
-        "traffic_channel_id": "9", # <--- ЖЁСТКО ЗАДАНО
+        "total_price": validated_args.total_price, # Это общая цена от LLM
+        "api_token": api_token_from_kwargs, 
+        "color_code_record": validated_args.color_code_record or "",
+        "traffic_channel": validated_args.traffic_channel or 0,
+        "traffic_channel_id": validated_args.traffic_channel_id or "9", # API может ожидать строку '9' по умолчанию
+        "tenant_id": tenant_id_from_kwargs # <--- ДОБАВЛЕНО: передаем tenant_id
     }
 
     try:
-        logger.debug(f"Создание экземпляра clinic_functions.BookAppointmentAIPayload с аргументами: {handler_args_for_clinic_func}")
-        handler = clinic_functions.BookAppointmentAIPayload(**handler_args_for_clinic_func)
+        logger.debug(f"Создание экземпляра BookAppointmentAIPayload с аргументами: {handler_args}")
+        handler = clinic_functions.BookAppointmentAIPayload(**handler_args)
         logger.debug(f"Вызов handler.process() для BookAppointmentAIPayload")
         return await handler.process()
     except Exception as e:
@@ -580,23 +683,32 @@ SYSTEM_PROMPT = """
 - Не давай медицинских советов, только информируй.
 
 **ВАЖНО: Процесс записи на услугу**
-1. Сначала всегда вызывай функцию получения свободных слотов (окон) сотрудника по услуге и филиалу (get_free_slots_tool).
-2. Покажи пользователю доступные времена для записи (start_time).
-3. После выбора времени — вызывай функцию записи (book_appointment_ai_payload_tool),
+1. Сначала всегда вызывай функцию получения свободных слотов (окон) сотрудника по услуге и филиалу (get_free_slots_tool). Убедись, что ты знаешь точное название услуги, для которой ищешь слоты.
+2. Покажи пользователю доступные времена для записи (start_time), полученные от get_free_slots_tool.
+3. После того как пользователь выберет конкретное время (start_time) из предложенных — вызывай функцию записи (book_appointment_ai_payload_tool),
    где:
-   - duration_of_time всегда равен 60 (жёстко задано).
-   - end_time = start_time + duration_of_time (вычисляй автоматически, start_time — это выбранное время из слотов).
-   - services_details: ОБЯЗАТЕЛЬНЫЙ список объектов, каждый из которых описывает одну услугу для записи. В каждом объекте должны быть поля 'rowNumber' (int, порядковый номер), 'serviceName' (ТОЧНОЕ название услуги, str), 'categoryName' (ТОЧНОЕ название категории, str) и 'countService' (int, количество, обычно 1).
-     Пример структуры для services_details (список): [
-       { "rowNumber": 1, "serviceName": "Ультразвуковая чистка лица", "categoryName": "Косметология", "countService": 1 }
-     ] 
+   - duration_of_time всегда равен 60 (минут, если иное не было уточнено ранее для конкретной услуги).
+   - end_time = start_time + duration_of_time (вычисляй автоматически, start_time — это выбранное пользователем время из слотов). Убедись, что end_time корректно рассчитан.
+   - services_details: ОБЯЗАТЕЛЬНЫЙ список объектов. ВСЕГДА включай это поле, даже если запись на одну услугу.
+     Каждый объект описывает одну услугу для записи и ДОЛЖЕН содержать:
+       - 'rowNumber' (int, порядковый номер, начиная с 1 для первой услуги).
+       - 'serviceName' (str, ТОЧНОЕ название услуги, которое было подтверждено с пользователем и для которого искались/были найдены слоты).
+       - 'categoryName' (Optional[str], НАЗВАНИЕ КАТЕГОРИИ. По возможности передайте его, если оно известно или было явно уточнено. Система в первую очередь попытается определить категорию автоматически по ID услуги, но это поле может служить уточнением или запасным вариантом). 
+       - 'countService' (int, количество данной услуги, обычно 1).
+       - 'price' (float, цена ИМЕННО ЭТОЙ УСЛУГИ. Ты должен определить это значение, при необходимости используя get_service_price_tool ПЕРЕД формированием аргументов для book_appointment_ai_payload_tool).
+       - 'durationService' (int, длительность ИМЕННО ЭТОЙ УСЛУГИ в минутах. Ты должен определить это значение, например, из описания услуги, полученного через RAG, или здравого смысла, если информация недоступна. Если длительность конкретной услуги неизвестна, уточни у пользователя или используй разумное значение по умолчанию для типа услуги, но старайся найти точное.).
+       - 'complexServiceId' (Optional[str], ID комплексной услуги, если эта услуга является частью комплекса. По умолчанию null или пустая строка).
+     Пример структуры для services_details (список из одной услуги):
+     [
+       { "rowNumber": 1, "serviceName": "Ультразвуковая чистка лица", "categoryName": "Косметология", "countService": 1, "price": 3000.0, "durationService": 45, "complexServiceId": null }
+     ]
+     Если пользователь хочет записаться на НЕСКОЛЬКО услуг ОДНОВРЕМЕННО к одному специалисту на одно и то же время (если это технически возможно и подтверждено предыдущими шагами), добавь объекты для КАЖДОЙ услуги в этот список `services_details`.
 4. Не проси пользователя вводить телефон — он подставляется автоматически.
+5. ОБЯЗАТЕЛЬНО предоставь `total_price` для `book_appointment_ai_payload_tool`. Рассчитай его на основе цен услуг, которые добавляешь в `services_details`. Если цена услуги неизвестна, используй `get_service_price_tool`, чтобы ее узнать ПЕРЕД вызовом `book_appointment_ai_payload_tool`.
 
 Примеры:
 - "Сколько стоит услуга?" — вызови функцию цены.
 - "Какие услуги делает Иванова?" — вызови функцию списка услуг сотрудника.
-- "Расскажи о процедуре X" — используй RAG.
-- "Записать на услугу" — сначала покажи окна, потом предложи выбрать время, только потом делай запись.
 
 RAG-поиск — только для:
 - Описаний услуг, специалистов, компании.
@@ -881,25 +993,11 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
             func_for_tool = tool_function # Используется прямая функция из matrixai.py
         elif tool_name == "book_appointment_ai_payload_tool": # <--- ДОБАВЛЕНА ОБРАБОТКА НОВОГО ИНСТРУМЕНТА
             current_args_schema = BookAppointmentAIPayloadArgs
-            func_for_tool = tool_function # Используется прямая функция из matrixai.py
-        # Обработка старых инструментов, которые используют wrapper и schema_map
+            func_for_tool = tool_function 
         elif tool_function in tool_func_to_schema_map:
             current_args_schema = tool_func_to_schema_map.get(tool_function)
             func_for_tool = create_tool_wrapper(tool_function, tenant_specific_docs, TENANT_RAW_DATA_MAP.get(tenant_id, []))
-        # Обработка инструментов без аргументов (например, list_filials_tool уже покрыт выше)
-        # или других старых инструментов, которые могли быть пропущены в schema_map, но требуют wrapper.
         else: 
-            # Этот блок для инструментов, которые не являются get_free_slots/book_appointment
-            # и не находятся в tool_func_to_schema_map (например, если у них нет аргументов
-            # и они не были явно добавлены в map с None).
-            # Все инструменты из TOOL_FUNCTIONS должны быть либо новыми, либо в schema_map.
-            # Если инструмент не попал в предыдущие условия, это может быть ошибкой конфигурации.
-            # Однако, list_filials_tool обрабатывается `elif tool_function in tool_func_to_schema_map`
-            # т.к. он там есть с args_schema=None.
-            # Для безопасности, если инструмент не опознан, логируем и пропускаем,
-            # но лучшe чтобы все инструменты были явно обработаны.
-            # На данный момент, предполагается, что все "старые" инструменты, требующие обертку,
-            # имеют запись в tool_func_to_schema_map (даже если схема None).
             logger.warning(f"Инструмент '{tool_name}' не был классифицирован для создания (не новый и не в schema_map). Использование стандартной обертки и schema=None.")
             current_args_schema = None 
             func_for_tool = create_tool_wrapper(tool_function, tenant_specific_docs, TENANT_RAW_DATA_MAP.get(tenant_id, []))
@@ -947,21 +1045,53 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
                               current_tool_args_for_invoke = {}
                           elif isinstance(tool_args, dict) and tool_args.get('args') is None and len(tool_args) == 1 and expects_args:
                               logger.warning(f"LLM передал {{'args': None}} для инструмента {tool_name}, который ожидает аргументы. Pydantic, вероятно, выдаст ошибку.")
-                          # --- Модификация для get_free_slots_tool, book_appointment_tool, get_employee_schedule_tool ---
-                          if tool_name in ["get_free_slots_tool", "book_appointment_tool", "get_employee_schedule_tool"]:
-                              current_tenant_id = configurable.get("tenant_id")
-                              current_client_api_token = configurable.get("client_api_token")
-                              if not current_tenant_id:
-                                  logger.error(f"Критическая ошибка: tenant_id не найден в 'configurable' ({configurable}) при попытке подготовить вызов {tool_name}.")
-                                  raise ValueError(f"tenant_id отсутствует в конфигурации для обязательного использования в инструменте {tool_name}")
-                              current_tool_args_for_invoke['tenant_id'] = current_tenant_id
-                              if current_client_api_token:
-                                  current_tool_args_for_invoke['api_token'] = current_client_api_token
+                          
+                          # --- Определение системных параметров ---
+                          # Эти параметры извлекаются из configurable для КАЖДОГО вызова инструмента
+                          cfg_tenant_id = configurable.get("tenant_id")
+                          cfg_client_api_token = configurable.get("client_api_token")
+                          cfg_phone_number = configurable.get("phone_number")
+
+                          logger.debug(f"Для инструмента '{tool_name}', системные параметры из configurable: tenant_id='{cfg_tenant_id}', client_api_token='{'SET' if cfg_client_api_token else 'NOT_SET'}', phone_number='{cfg_phone_number}'")
+
+                          # --- Подготовка АРГУМЕНТОВ для вызова инструмента (current_tool_args_for_invoke) ---
+                          # Некоторые инструменты ожидают tenant_id, api_token, client_phone_number как часть своих аргументов (kwargs_from_llm)
+                          if tool_name in ["get_free_slots_tool", "book_appointment_tool", "book_appointment_ai_payload_tool"]:
+                              if not cfg_tenant_id: # tenant_id обязателен для этих инструментов в аргументах
+                                  error_msg = f"Критическая ошибка: tenant_id не найден в configurable и обязателен для аргументов инструмента {tool_name}."
+                                  logger.error(error_msg)
+                                  raise ValueError(error_msg)
+                              current_tool_args_for_invoke['tenant_id'] = cfg_tenant_id
+                              
+                              if cfg_client_api_token:
+                                  current_tool_args_for_invoke['api_token'] = cfg_client_api_token
                               elif 'api_token' not in current_tool_args_for_invoke:
                                    current_tool_args_for_invoke['api_token'] = None
-                              logger.info(f"Обновленные аргументы для '{tool_name}' после добавления tenant_id/api_token: {current_tool_args_for_invoke}")
-                          # --- Конец модификации ---
-                          raw_output = await found_tool.ainvoke(current_tool_args_for_invoke, config=config)
+                              
+                              if tool_name == "book_appointment_ai_payload_tool":
+                                  if cfg_phone_number: # Это поле обязательное в модели, если оно тут None, Pydantic возбудит ошибку
+                                      current_tool_args_for_invoke['client_phone_number'] = cfg_phone_number
+                                  # Если cfg_phone_number is None, Pydantic сам вызовет ошибку при валидации
+                                  
+                              logger.info(f"Обновленные АРГУМЕНТЫ для '{tool_name}' после добавления системных полей: {current_tool_args_for_invoke}")
+                          
+                          # --- Подготовка КОНФИГУРАЦИИ (tool_config) для вызова инструмента ---
+                          # Эта конфигурация передается в параметр 'config' метода .ainvoke() инструмента.
+                          # Она может быть использована внутри инструмента, если он умеет работать с RunnableConfig.
+                          # ВСЕГДА передаем tenant_id, client_api_token, phone_number в tool_config, если они есть.
+                          tool_config_payload = {}
+                          if cfg_tenant_id:
+                              tool_config_payload["tenant_id"] = cfg_tenant_id
+                          if cfg_client_api_token:
+                              tool_config_payload["client_api_token"] = cfg_client_api_token
+                          if cfg_phone_number:
+                              tool_config_payload["phone_number"] = cfg_phone_number
+                          
+                          # Если tool_config_payload не пуст, используем его, иначе передаем оригинальный config
+                          final_tool_config_to_pass = {"configurable": tool_config_payload} if tool_config_payload else config
+                          logger.debug(f"Итоговый tool_config для передачи в .ainvoke() инструмента '{tool_name}': {final_tool_config_to_pass}")
+                          
+                          raw_output = await found_tool.ainvoke(current_tool_args_for_invoke, config=final_tool_config_to_pass)
                           if inspect.iscoroutine(raw_output):
                               logger.warning(f"Инструмент '{tool_name}' .ainvoke вернул короутину. Ожидаем ее явно.")
                               output = await raw_output
@@ -970,13 +1100,7 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
                           output_str = str(output)
                           tool_outputs.append(ToolMessage(content=output_str, tool_call_id=tool_call["id"]))
                           logger.info(f"Результат вызова инструмента '{tool_name}': {output_str[:100]}...")
-                          # --- Контекстный триггер: если был вызван get_service_price_tool и есть все параметры, инициировать запись ---
-                          if tool_name == 'get_service_price_tool' and should_auto_book_after_price(history_messages, tool_call):
-                              logger.info("Контекстный триггер: после получения цены автоматически инициируем запись!")
-                              # Здесь можно инициировать вызов book_appointment_ai_payload_tool с нужными параметрами
-                              # (реализация зависит от структуры истории и доступных данных)
-                              # Можно вызвать функцию или добавить ToolMessage для book_appointment_ai_payload_tool
-                              # ...
+                          
                       except Exception as e:
                            error_message = f"Ошибка при вызове инструмента '{tool_name}': {type(e).__name__} - {str(e)}"
                            logger.error(f"Ошибка вызова инструмента '{tool_name}' с аргументами {current_tool_args_for_invoke}: {e}", exc_info=True)

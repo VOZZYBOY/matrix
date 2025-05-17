@@ -5,7 +5,7 @@ import re
 from typing import Optional, List, Dict, Any, Set, Tuple
 from pydantic import BaseModel, Field
 from client_data_service import get_free_times_of_employee_by_services, add_record
-from clinic_index import  get_name_by_id
+from clinic_index import get_name_by_id, levenshtein_distance, normalize_text
 import asyncio
 from datetime import datetime
 
@@ -167,87 +167,186 @@ class GetServicePrice(BaseModel):
         if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
         logging.info(f"[FC Proc] Запрос цены (Услуга: {self.service_name}, Филиал: {self.filial_name})")
 
-        matches = []
-        norm_search_term = normalize_text(self.service_name, keep_spaces=True)
-        norm_filial_name = normalize_text(self.filial_name)
+        norm_search_service_name = normalize_text(self.service_name, keep_spaces=True)
+        norm_search_filial_name = normalize_text(self.filial_name) 
+
+        candidate_services = []
+        all_db_filials_norm_to_orig: Dict[str, str] = {}
 
         for item in _internal_clinic_data:
             s_name_raw = item.get('serviceName')
-            cat_name_raw = item.get('categoryName')
             f_name_raw = item.get('filialName')
             price_raw = item.get('price')
 
-            if price_raw is None or price_raw == '': continue
-
-            try: price = float(str(price_raw).replace(' ', '').replace(',', '.'))
-            except (ValueError, TypeError): continue
-
-            norm_item_f_name = normalize_text(f_name_raw)
-            if norm_filial_name and norm_item_f_name != norm_filial_name:
+            if not s_name_raw or price_raw is None or price_raw == '':
+                continue
+            
+            try:
+                price = float(str(price_raw).replace(' ', '').replace(',', '.'))
+            except (ValueError, TypeError):
                 continue
 
             norm_item_s_name = normalize_text(s_name_raw, keep_spaces=True)
-            norm_item_cat_name = normalize_text(cat_name_raw, keep_spaces=True)
+            norm_item_f_name = normalize_text(f_name_raw)
 
-            service_name_match = False
-            category_name_match = False
-            exact_match_flag = False
+            if f_name_raw and norm_item_f_name not in all_db_filials_norm_to_orig:
+                all_db_filials_norm_to_orig[norm_item_f_name] = f_name_raw
 
-            if norm_item_s_name and norm_search_term in norm_item_s_name:
-                 service_name_match = True
-                 exact_match_flag = (norm_search_term == norm_item_s_name)
+            filial_dist_for_ranking = 0
+            passes_filial_check = True
+            if norm_search_filial_name:
+                if not norm_item_f_name:
+                    passes_filial_check = False
+                else:
+                    filial_dist_raw = levenshtein_distance(norm_search_filial_name, norm_item_f_name)
+                    filial_threshold = 1 
+                    if filial_dist_raw > filial_threshold:
+                        passes_filial_check = False
+                    else:
+                        filial_dist_for_ranking = filial_dist_raw
+            
+            if not passes_filial_check:
+                continue
+            
+            # --- Логика сопоставления услуг ---
+            service_dist_raw = levenshtein_distance(norm_search_service_name, norm_item_s_name)
+            is_substring = norm_search_service_name in norm_item_s_name
+            
+            current_service_dist_for_ranking = service_dist_raw
 
-            if not service_name_match and norm_item_cat_name and norm_search_term in norm_item_cat_name:
-                 category_name_match = True
-                 exact_match_flag = (norm_search_term == norm_item_cat_name)
+            if is_substring:
+                if service_dist_raw == 0: # Точное совпадение
+                    current_service_dist_for_ranking = 0
+                else: # Подстрока, но не точное совпадение
+                    current_service_dist_for_ranking = 0.1 # Даем очень высокий приоритет
+            
+            # Порог для Левенштейна (применяется, если это НЕ подстрока)
+            levenshtein_threshold_for_service = 1
+            if len(norm_search_service_name) > 10: levenshtein_threshold_for_service = 3
+            elif len(norm_search_service_name) > 5: levenshtein_threshold_for_service = 2
 
-            if service_name_match or category_name_match:
-                display_name = s_name_raw if s_name_raw else cat_name_raw
-                if category_name_match and s_name_raw and cat_name_raw:
-                     display_name = f"{s_name_raw} (категория: {cat_name_raw})"
-
-                matches.append({
-                    'display_name': display_name, # Оригинальное имя
+            passes_service_match_criteria = False
+            if is_substring: # Если подстрока, всегда считаем совпадением
+                passes_service_match_criteria = True
+            elif service_dist_raw <= levenshtein_threshold_for_service: # Иначе проверяем порог Левенштейна
+                passes_service_match_criteria = True
+            
+            if passes_service_match_criteria:
+                candidate_services.append({
+                    'original_service_name': s_name_raw,
+                    'norm_service_name': norm_item_s_name,
                     'price': price,
-                    'filial_name': f_name_raw if f_name_raw else "Любой", # Оригинальное имя
-                    'exact_match': exact_match_flag,
-                    'match_type': 'service' if service_name_match else 'category'
+                    'original_filial_name': f_name_raw if f_name_raw else "Любой",
+                    'norm_filial_name': norm_item_f_name,
+                    'service_dist': current_service_dist_for_ranking, # Используем скорректированное расстояние
+                    'filial_dist': filial_dist_for_ranking
                 })
 
-        if not matches:
-             original_filial_req_name = get_original_filial_name(norm_filial_name) or self.filial_name
-             filial_search_text = f" в филиале '{original_filial_req_name}'" if self.filial_name else ""
-             return f"Цена на услугу, похожую на '{self.service_name}'{filial_search_text}, не найдена."
+        if not candidate_services:
+            filial_search_text = f" в филиале, похожем на '{self.filial_name}'," if self.filial_name else ""
+            return f"Цена на услугу, похожую на '{self.service_name}',{filial_search_text} не найдена."
 
-        matches.sort(key=lambda x: (not x['exact_match'], x['match_type'] == 'category', x['price']))
+        candidate_services.sort(key=lambda x: (
+            x['service_dist'],
+            x['filial_dist'],
+            x['price'],
+            len(x['norm_service_name'])
+        ))
 
-        # Проверка на неоднозначность
-        unique_display_names = {m['display_name'] for m in matches if not m['exact_match']}
-        if len(unique_display_names) > 3 and not matches[0]['exact_match']:
-             response_parts = [f"По запросу '{self.service_name}' найдено несколько похожих услуг/категорий. Уточните, пожалуйста:"]
-             limit = 5
-             shown_names = set()
-             for match in matches:
-                 if match['display_name'] not in shown_names and len(shown_names) < limit:
-                     price_str = f"{match['price']:.0f} руб."
-                     filial_info = f" (в '{match['filial_name']}')" if match['filial_name'] != "Любой" else ""
-                     response_parts.append(f"- {match['display_name']}{filial_info}: {price_str}")
-                     shown_names.add(match['display_name'])
-                 if len(shown_names) >= limit: break
-             response_parts.append("...")
-             return "\n".join(response_parts)
+        best_match = candidate_services[0]
 
-        best_match = matches[0]
-        original_filial_req_name = get_original_filial_name(norm_filial_name) or self.filial_name
-        filial_display = original_filial_req_name if self.filial_name else best_match['filial_name']
+        # Проверка на неоднозначность, если лучший результат не идеален (dist > 0 для услуги или филиала)
+        # Условие `best_match['service_dist'] > 0` теперь включает и наши подстроки с dist 0.1
+        if best_match['service_dist'] > 0 or (norm_search_filial_name and best_match['filial_dist'] > 0):
+            potential_ambiguity = []
+            # Собираем все варианты с таким же качеством совпадения, как у лучшего
+            for cand_s in candidate_services:
+                if cand_s['service_dist'] == best_match['service_dist'] and \
+                   cand_s['filial_dist'] == best_match['filial_dist']:
+                    # Добавляем, если это не тот же самый исходный элемент (разные оригинальные названия услуг ИЛИ филиалов)
+                    # Это чтобы избежать дублирования одного и того же сервиса из-за разных цен, если такое возможно
+                    is_different_service_name_orig = cand_s['original_service_name'] != best_match['original_service_name']
+                    is_different_filial_name_orig = norm_search_filial_name and \
+                                               cand_s['original_filial_name'] != best_match['original_filial_name']
 
-        filial_text = f" в филиале {filial_display}" if filial_display != "Любой" else ""
+                    # Условие для добавления в список неоднозначности:
+                    # если это другой сервис ИЛИ другой филиал (если филиал важен)
+                    # ИЛИ если это тот же сервис и тот же филиал, но другая цена (на случай если такое есть в данных)
+                    if is_different_service_name_orig or is_different_filial_name_orig or cand_s['price'] != best_match['price']:
+                        display_s_cand = cand_s['original_service_name']
+                        display_f_cand = cand_s['original_filial_name'] if norm_search_filial_name else "Любой"
+                        
+                        already_added_to_ambiguity = False
+                        for amb_item in potential_ambiguity:
+                            if amb_item['service'] == display_s_cand and amb_item['filial'] == display_f_cand and amb_item['price'] == cand_s['price']:
+                                already_added_to_ambiguity = True
+                                break
+                        if not already_added_to_ambiguity:
+                            potential_ambiguity.append({
+                                'service': display_s_cand, 
+                                'filial': display_f_cand, 
+                                'price': cand_s['price']
+                            })
+            
+            # Теперь добавляем сам best_match в начало списка неоднозначности, если его там еще нет
+            best_match_display_s = best_match['original_service_name']
+            best_match_display_f = best_match['original_filial_name'] if norm_search_filial_name else "Любой"
+            best_match_price = best_match['price']
+
+            best_match_in_ambiguity_list = False
+            for amb_item in potential_ambiguity:
+                if amb_item['service'] == best_match_display_s and amb_item['filial'] == best_match_display_f and amb_item['price'] == best_match_price:
+                    best_match_in_ambiguity_list = True
+                    break
+            if not best_match_in_ambiguity_list:
+                potential_ambiguity.insert(0, {
+                    'service': best_match_display_s,
+                    'filial': best_match_display_f,
+                    'price': best_match_price
+                })
+
+
+            if len(potential_ambiguity) > 1: 
+                response_parts = [f"По вашему запросу ('{self.service_name}'" +
+                                  (f" в '{self.filial_name}'" if self.filial_name else "") +
+                                  ") найдено несколько похожих вариантов. Уточните, пожалуйста:"]
+                limit = 3
+                for i, amb_match in enumerate(potential_ambiguity):
+                    if i >= limit: break
+                    filial_info_amb = f" (в '{amb_match['filial']}')" if amb_match['filial'] != "Любой" else ""
+                    response_parts.append(f"- {amb_match['service']}{filial_info_amb}: {amb_match['price']:.0f} руб.")
+                if len(potential_ambiguity) > limit:
+                    response_parts.append(f"... и еще {len(potential_ambiguity) - limit}.")
+                return "\n".join(response_parts)
+
+        display_service_name = best_match['original_service_name']
+        display_filial_name = self.filial_name 
+        if norm_search_filial_name:
+            if best_match['norm_filial_name'] == norm_search_filial_name and best_match['filial_dist'] == 0:
+                 original_filial_from_user_request = all_db_filials_norm_to_orig.get(norm_search_filial_name, self.filial_name)
+                 display_filial_name = original_filial_from_user_request
+            else: 
+                 display_filial_name = best_match['original_filial_name']
+        else: 
+            display_filial_name = best_match['original_filial_name']
+
+        filial_text = f" в филиале {display_filial_name}" if display_filial_name != "Любой" else ""
         price_text = f"{best_match['price']:.0f} руб."
-        clarification = ""
-        if not best_match['exact_match'] and best_match['display_name']:
-             clarification = f" (найдено для '{best_match['display_name']}')"
+        
+        service_clarification = ""
+        # Уточнение, если найденное имя услуги не полностью совпадает с запрошенным ИЛИ если service_dist > 0 (т.е. 0.1 для подстроки)
+        if best_match['service_dist'] > 0 or normalize_text(display_service_name, keep_spaces=True) != norm_search_service_name:
+            service_clarification = f" (наиболее похожее: '{display_service_name}')"
+        
+        filial_clarification = ""
+        if self.filial_name and (best_match['filial_dist'] > 0 or normalize_text(display_filial_name) != norm_search_filial_name):
+            if display_filial_name != "Любой":
+                 filial_clarification = f" (филиал уточнен до '{display_filial_name}')"
+            else: 
+                 filial_text = "" 
+                 filial_clarification = f" (в указанном филиале '{self.filial_name}' точная цена не найдена, но для услуги '{display_service_name}' есть цена без указания филиала)"
 
-        return f"Цена на '{self.service_name}'{clarification}{filial_text} составляет {price_text}".strip()
+        return f"Цена на '{self.service_name}'{service_clarification}{filial_text}{filial_clarification} составляет {price_text}".strip().replace("  ", " ")
 
 
 class ListFilials(BaseModel):
@@ -922,7 +1021,7 @@ class GetFreeSlots(BaseModel):
                         logger.info(f"Не найдено слотов в 'workDates' для сотрудника {employee_name_original} ({self.employee_id}) на {self.date_time} в филиале {filial_name_original} ({self.filial_id}).")
                         return f"К сожалению, у сотрудника {employee_name_original} нет свободных слотов на указанную дату в филиале {filial_name_original} по выбранным услугам."
                     
-                    response_message = f"Доступные слоты для сотрудника {employee_name_original} в филиале {filial_name_original}:\n" + "\\n".join(all_formatted_slots)
+                    response_message = f"Доступные слоты для сотрудника {employee_name_original} в филиале {filial_name_original}:\n" + "\n".join(all_formatted_slots)
                     return response_message
 
                 elif isinstance(api_data_content, list):
@@ -1035,7 +1134,9 @@ class BookAppointment(BaseModel):
 class BookAppointmentAIPayload(BaseModel):
     lang_id: str = "ru"
     client_phone_number: str
-    services_payload: List[Dict[str, Any]]
+    # services_payload будет List[ServiceDetailItemFromLLM] приходить из matrixai.py
+    # но для вызова add_record мы его конвертируем в List[Dict[str, Any]]
+    services_payload: List[Any] # Используем List[Any] для гибкости, конвертация ниже
     filial_id: str
     date_of_record: str
     start_time: str
@@ -1047,33 +1148,42 @@ class BookAppointmentAIPayload(BaseModel):
     color_code_record: Optional[str] = None
     traffic_channel: Optional[int] = None
     traffic_channel_id: Optional[str] = None
+    tenant_id: str # <--- ДОБАВЛЕНО ПОЛЕ tenant_id
 
     async def process(self, **kwargs) -> str:
         try:
-            # Формируем payload для API
-            payload = {
-                "langId": self.lang_id,
-                "clientPhoneNumber": self.client_phone_number,
-                "services": self.services_payload,
-                "filialId": self.filial_id,
-                "dateOfRecord": self.date_of_record,
-                "startTime": self.start_time,
-                "endTime": self.end_time,
-                "durationOfTime": self.duration_of_time,
-                "toEmployeeId": self.to_employee_id,
-                "totalPrice": self.total_price,
-            }
-            if self.color_code_record is not None:
-                payload["colorCodeRecord"] = self.color_code_record
-            if self.traffic_channel is not None:
-                payload["trafficChannel"] = self.traffic_channel
-            if self.traffic_channel_id is not None:
-                payload["trafficChannelId"] = self.traffic_channel_id
-            # Вызываем add_record
+            # Конвертируем List[ServiceDetailItemFromLLM] в List[Dict[str, Any]]
+            # если services_payload содержит Pydantic модели
+            services_as_dicts = []
+            for item in self.services_payload:
+                if hasattr(item, 'model_dump'): # Проверяем, является ли элемент Pydantic моделью
+                    services_as_dicts.append(item.model_dump())
+                elif isinstance(item, dict): # Если это уже словарь
+                    services_as_dicts.append(item)
+                else:
+                    # Обработка неожиданного типа элемента, если необходимо
+                    logger.error(f"Неожиданный тип элемента в services_payload: {type(item)}")
+                    # Можно либо пропустить, либо вызвать ошибку
+                    raise ValueError(f"Элемент в services_payload должен быть Pydantic моделью или словарем, получен: {type(item)}")
+
             result = await add_record(
-                **payload,
-                api_token=self.api_token
+                api_token=self.api_token,
+                tenant_id=self.tenant_id,  # <--- Используем self.tenant_id
+                client_phone_number=self.client_phone_number,
+                services_payload=services_as_dicts, # <--- Передаем конвертированный список словарей
+                filial_id=self.filial_id,
+                date_of_record=self.date_of_record,
+                start_time=self.start_time,
+                end_time=self.end_time,
+                duration_of_time=self.duration_of_time,
+                to_employee_id=self.to_employee_id,
+                total_price=self.total_price,
+                lang_id=self.lang_id,
+                color_code_record=self.color_code_record,
+                traffic_channel=self.traffic_channel,
+                traffic_channel_id=self.traffic_channel_id
             )
+            
             if result.get('code') == 200:
                 return "Запись успешно создана!"
             else:

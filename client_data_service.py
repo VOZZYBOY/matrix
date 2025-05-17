@@ -449,60 +449,55 @@ async def get_free_times_of_employee_by_services(
 
 async def add_record(
     tenant_id: str,
-    phone_number: str,
-    service_id: str,
-    employee_id: str,
+    client_phone_number: str,
+    services_payload: List[Dict[str, Any]],
     filial_id: str,
-    category_id: str,
-    service_original_name: str,
     date_of_record: str,
     start_time: str,
     end_time: str,
     duration_of_time: int,
+    to_employee_id: str,
+    total_price: float,
     lang_id: str = "ru",
     api_url: str = "https://back.matrixcrm.ru/api/v1/AI/addRecord",
-    api_token: str = None,
-    price: float = 0,
-    sale_price: float = 0,
-    complex_service_id: str = "",
-    color_code_record: str = "",
-    total_price: float = 0,
-    traffic_channel: int = 0,
-    traffic_channel_id: str = ""
+    api_token: Optional[str] = None,
+    color_code_record: Optional[str] = None,
+    traffic_channel: Optional[int] = None,
+    traffic_channel_id: Optional[str] = None
 ) -> dict:
     """
-    Создать запись клиента на услугу.
-    Ожидает ID для услуги, сотрудника, филиала, категории.
+    Создать запись клиента на одну или несколько услуг.
     """
-    payload = {
+    api_request_payload = {
         "tenantId": tenant_id,
-        "phoneNumber": phone_number,
-        "serviceId": service_id,
-        "employeeId": employee_id,
+        "clientPhoneNumber": client_phone_number,
+        "services": services_payload,
         "filialId": filial_id,
-        "categoryId": category_id,
-        "serviceOriginalName": service_original_name,
         "dateOfRecord": date_of_record,
         "startTime": start_time,
         "endTime": end_time,
         "durationOfTime": duration_of_time,
+        "toEmployeeId": to_employee_id,
         "langId": lang_id,
-        "price": price,
-        "salePrice": sale_price,
-        "complexServiceId": complex_service_id,
-        "colorCodeRecord": color_code_record,
         "totalPrice": total_price,
-        "trafficChannel": traffic_channel,
-        "trafficChannelId": traffic_channel_id
     }
-    headers = {}
+
+    # Добавляем опциональные поля, если они есть
+    if color_code_record is not None:
+        api_request_payload["colorCodeRecord"] = color_code_record
+    if traffic_channel is not None:
+        api_request_payload["trafficChannel"] = traffic_channel
+    if traffic_channel_id is not None:
+        api_request_payload["trafficChannelId"] = traffic_channel_id
+    
+    headers = {"Content-Type": "application/json"}
     if api_token:
         headers["Authorization"] = f"Bearer {api_token}"
 
     try:
         async with httpx.AsyncClient(verify=False) as client: # verify=False для отключения проверки SSL
-            logger.info(f"Отправка запроса на {api_url} с payload: {payload}")
-            response = await client.post(api_url, json=payload, headers=headers, timeout=20.0)
+            logger.info(f"Отправка запроса на {api_url} с payload: {api_request_payload}")
+            response = await client.post(api_url, json=api_request_payload, headers=headers, timeout=20.0)
             response.raise_for_status()
             response_data = response.json()
             logger.info(f"Ответ от API записи: Code {response_data.get('code')}, Data: {str(response_data.get('data', 'N/A'))[:200]}")

@@ -82,6 +82,18 @@ class MessageResponse(BaseModel):
     response: str
     user_id: str
 
+class BookAppointmentArgs(BaseModel):
+    phone_number: str
+    service_name: str
+    employee_name: str
+    filial_name: str
+    date_of_record: str
+    start_time: str
+    end_time: str
+    duration_of_time: int
+    # НЕ НУЖНО: category_id, service_id, employee_id, filial_id, service_original_name
+    # Эти поля вычисляются внутри функции-обертки!
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global agent
@@ -186,7 +198,8 @@ async def ask_assistant(
                     "session_id": composite_session_id,
                     "user_id": user_id_for_agent_chat_history,
                     "tenant_id": tenant_id,
-                    "client_api_token": request.client_api_token
+                    "client_api_token": request.client_api_token,
+                    "phone_number": request.phone_number
                  }
             }
         )
