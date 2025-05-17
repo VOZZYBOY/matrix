@@ -23,28 +23,43 @@ def levenshtein_distance(s1: str, s2: str) -> int:
     return previous_row[-1]
 
 
-def normalize_text(text: Optional[str], keep_spaces: bool = False) -> str:
+def normalize_text(text: Optional[str], keep_spaces: bool = False, sort_words: bool = False) -> str:
     """
     Приводит строку к нижнему регистру, удаляет дефисы и опционально пробелы.
+    Опционально сортирует слова в строке.
     Безопасно обрабатывает None, возвращая пустую строку.
     """
     if not text:
         return ""
+    # Сначала базовая нормализация (нижний регистр, замена дефисов)
     normalized = text.lower().replace("-", "")
-    if keep_spaces:
-        normalized = re.sub(r'\s+', ' ', normalized).strip()
+    
+    # Обработка пробелов
+    if keep_spaces or sort_words: # Если нужно сортировать слова, пробелы между ними важны на этом этапе
+        normalized = re.sub(r'\s+', ' ', normalized).strip() # Заменяем множество пробелов на один, убираем по краям
     else:
-        normalized = re.sub(r'\s+', '', normalized)
+        normalized = re.sub(r'\s+', '', normalized) # Удаляем все пробелы
+
+    # Сортировка слов, если флаг установлен
+    if sort_words:
+        words = normalized.split()
+        words.sort()
+        final_normalized = " ".join(words)
+        if not keep_spaces: # Если изначально не просили сохранять пробелы, но сортировали (что требует их временного сохранения)
+            final_normalized = re.sub(r'\s+', '', final_normalized) # Теперь удаляем пробелы после сортировки
+        return final_normalized
+    
     return normalized
 
 
 TENANT_INDEXES: Dict[str, Dict[str, Dict[str, str]]] = {}
 
 ENTITY_KEYS = [
-    ("serviceName", "serviceId", True),
-    ("employeeFullName", "employeeId", True),
-    ("filialName", "filialId", False),
-    ("categoryName", "categoryId", True),
+    # (name_key, id_key, keep_spaces_flag, sort_words_flag)
+    ("serviceName", "serviceId", True, False),
+    ("employeeFullName", "employeeId", True, True),  # <--- sort_words=True для имен сотрудников
+    ("filialName", "filialId", False, False),
+    ("categoryName", "categoryId", True, False),
 ]
 
 # --- Индекс соответствия serviceId -> categoryId для быстрого поиска ---
@@ -61,14 +76,14 @@ def build_indexes_for_tenant(tenant_id: str, raw_data: List[Dict[str, Any]]):
         logger.warning(f"Нет данных для построения индексов для тенанта {tenant_id}")
         return
     indexes = {}
-    for name_key, id_key, keep_spaces_flag in ENTITY_KEYS:
+    for name_key, id_key, keep_spaces_flag, sort_words_flag in ENTITY_KEYS:
         name_to_id = {}
         id_to_name = {}
         for item in raw_data:
             name = item.get(name_key)
             id_ = item.get(id_key)
             if name and id_:
-                normalized_name = normalize_text(name, keep_spaces=keep_spaces_flag)
+                normalized_name = normalize_text(name, keep_spaces=keep_spaces_flag, sort_words=sort_words_flag)
                 if normalized_name not in name_to_id:
                     name_to_id[normalized_name] = id_
                 if id_ not in id_to_name:
@@ -95,11 +110,16 @@ def get_id_by_name(tenant_id: str, entity: str, name: str) -> Optional[str]:
     entity: 'service', 'employee', 'filial', 'category'
     """
     keep_spaces_for_entity = False
-    # Для услуг, сотрудников и категорий сохраняем пробелы при нормализации, т.к. они могут быть частью названия
-    if entity == "service" or entity == "employee" or entity == "category":
-        keep_spaces_for_entity = True
+    sort_words_for_entity = False # <--- Добавляем флаг сортировки для поиска
     
-    normalized_name_to_search = normalize_text(name, keep_spaces=keep_spaces_for_entity)
+    if entity == "service" or entity == "category":
+        keep_spaces_for_entity = True
+    elif entity == "employee":
+        keep_spaces_for_entity = True
+        sort_words_for_entity = True # <--- Сортируем слова при поиске имени сотрудника
+    # Для filial keep_spaces остается False, sort_words False
+    
+    normalized_name_to_search = normalize_text(name, keep_spaces=keep_spaces_for_entity, sort_words=sort_words_for_entity)
     
     name_key_for_index = ""
     if entity == "service": name_key_for_index = "serviceName"
@@ -160,6 +180,12 @@ def get_id_by_name(tenant_id: str, entity: str, name: str) -> Optional[str]:
         # Для очень коротких (<=4) останется 1 по умолчанию из threshold = 1
 
         logger.info(f"Нечеткий поиск для '{normalized_name_to_search}' (длина {len(normalized_name_to_search)}) с порогом {threshold}...")
+        
+        # ---> НАЧАЛО НОВОГО ЛОГИРОВАНИЯ <---
+        if entity == "employee" and candidate_norm_names_for_fuzzy:
+            sample_candidates = [cand[0] for cand in candidate_norm_names_for_fuzzy[:10]] # Берем первые 10 нормализованных имен
+            logger.info(f"Пример нормализованных кандидатов для '{entity}' перед нечетким поиском ({len(candidate_norm_names_for_fuzzy)} всего): {sample_candidates}")
+        # ---> КОНЕЦ НОВОГО ЛОГИРОВАНИЯ <---
 
         for norm_name_candidate, item_id_candidate in candidate_norm_names_for_fuzzy:
             dist = levenshtein_distance(normalized_name_to_search, norm_name_candidate)
