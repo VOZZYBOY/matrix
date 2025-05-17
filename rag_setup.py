@@ -3,20 +3,20 @@
 import os
 import json
 import logging
-import shutil
+# import shutil # <--- Удалено
 import glob
 from typing import List, Dict, Any, Optional, Tuple
 import re
 
 # --- LangChain Imports ---
 from langchain_core.documents import Document
-from langchain_core.runnables import RunnableLambda, RunnableConfig
-from langchain_core.retrievers import BaseRetriever
+# from langchain_core.runnables import RunnableLambda, RunnableConfig # <--- Удалено
+# from langchain_core.retrievers import BaseRetriever # <--- Удалено
 from langchain_gigachat.embeddings import GigaChatEmbeddings
 from langchain_chroma import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.retrievers import BM25Retriever
-from langchain.retrievers.ensemble import EnsembleRetriever
+# from langchain.retrievers.ensemble import EnsembleRetriever # <--- Удалено
 import chromadb
 
 # Импортируем менеджер конфигураций тенантов

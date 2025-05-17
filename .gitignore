@@ -2,16 +2,28 @@
 __pycache__/
 *.py[cod]
 *$py.class
-venv/
+.venv/
 ENV/
+
+# Стандартные игнорирования Python
+*.log
+*.pot
+*.pyc
+dist/
+build/
+*.egg-info/
+pip-wheel-metadata/
+*.sqlite3
+*.db
 
 # Векторные базы и логи
 chroma_db_clinic_giga/
+api.log
 
 # IDE
 .idea/
 .vscode/
 *.swp
-ERROR
+
 # Конфиденциальные данные
 .env

@@ -38,7 +38,7 @@ except ImportError as e:
 from clinic_index import build_indexes_for_tenant, get_id_by_name, get_category_id_by_service_id # <--- ДОБАВЛЕНО get_category_id_by_service_id
 import pytz
 from datetime import datetime
-import inspect # <--- ДОБАВЛЕНО
+import inspect
 from langchain_core.runnables import RunnableLambda, RunnableConfig # <--- Убрали get_config_value
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s:%(name)s:%(lineno)d - %(message)s')
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ GIGA_VERIFY_SSL = os.getenv("GIGA_VERIFY_SSL", "False").lower() == "true"
 TENANT_COLLECTION_PREFIX = "tenant_" 
 try:
     chat_model = ChatOpenAI(
-        model="o3-mini",
+        model="gpt-4.1",
         max_tokens=16384, 
         api_key="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"
     )
@@ -274,7 +274,7 @@ class ServiceDetailItemFromLLM(BaseModel): # <--- НОВАЯ МОДЕЛЬ
     categoryName: Optional[str] = Field(default=None, description="НАЗВАНИЕ КАТЕГОРИИ. По возможности передайте, если известно или было явно уточнено. Система в первую очередь попытается определить категорию автоматически по ID услуги, но это поле может служить уточнением или запасным вариантом.")
     countService: int = Field(default=1, description="Количество данной услуги.")
     complexServiceId: Optional[str] = Field(default=None, description="ID комплексной услуги, если эта услуга является частью комплекса.")
-    price: float = Field(description="Цена ИМЕННО ЭТОЙ УСЛУГИ (за единицу, если countService > 1). LLM должен определить это значение, используя get_service_price_tool при необходимости.")
+    price: float = Field(description="Цена ИМЕННО ЭТОЙ УСЛУГИ (за единицу, если countService > 1). ВАЖНО: Ты ОБЯЗАН получить эту цену, вызвав инструмент get_service_price_tool ПЕРЕД формированием этого объекта. Не придумывай цену.")
     durationService: int = Field(description="Длительность ИМЕННО ЭТОЙ УСЛУГИ в минутах. LLM должен определить это значение (например, из описания услуги или общих знаний).")
 
 class BookAppointmentAIPayloadArgs(BaseModel):
@@ -289,13 +289,13 @@ class BookAppointmentAIPayloadArgs(BaseModel):
         min_length=1, 
         description=(
             "Список услуг для записи. ОБЯЗАТЕЛЬНО должен содержать хотя бы одну услугу. Каждая услуга - это ОБЪЕКТ со следующими полями: "
-            "'rowNumber' (int, порядковый номер), "
-            "'serviceName' (str, ТОЧНОЕ название услуги для поиска ее serviceId, цены и длительности), "
-            "'categoryName' (Optional[str], НАЗВАНИЕ КАТЕГОРИИ. По возможности передайте его, если оно известно или было явно уточнено. Система в первую очередь попытается определить категорию автоматически по ID услуги, но это поле может служить уточнением или запасным вариантом), "
-            "'countService' (int, количество), "
-            "'complexServiceId' (Optional[str], ID комплексной услуги, если эта услуга является частью комплекса), "
-            "'price' (float, цена ИМЕННО ЭТОЙ услуги), " # <--- ДОБАВЛЕНО В ОПИСАНИЕ
-            "'durationService' (int, длительность ИМЕННО ЭТОЙ услуги в минутах)." # <--- ДОБАВЛЕНО В ОПИСАНИЕ
+            "\'rowNumber\' (int, порядковый номер), "
+            "\'serviceName\' (str, ТОЧНОЕ название услуги для поиска ее serviceId, цены и длительности), "
+            "\'categoryName\' (Optional[str], НАЗВАНИЕ КАТЕГОРИИ. По возможности передайте его, если оно известно или было явно уточнено. Система в первую очередь попытается определить категорию автоматически по ID услуги, но это поле может служить уточнением или запасным вариантом), "
+            "\'countService\' (int, количество), "
+            "\'complexServiceId\' (Optional[str], ID комплексной услуги, если эта услуга является частью комплекса), "
+            "\'price\' (float, цена ИМЕННО ЭТОЙ услуги, ОБЯЗАТЕЛЬНО полученная через get_service_price_tool), " # <--- ИЗМЕНЕНО В ОПИСАНИЕ
+            "\'durationService\' (int, длительность ИМЕННО ЭТОЙ услуги в минутах)." # <--- ДОБАВЛЕНО В ОПИСАНИЕ
         )
     )
     total_price: float = Field(description="ОБЩАЯ цена всей записи.")
@@ -310,6 +310,11 @@ class BookAppointmentAIPayloadArgs(BaseModel):
     client_phone_number: str = Field(description="[СИСТЕМНОЕ ПОЛЕ] Телефон клиента. Не заполняется LLM, должен быть добавлен системой.")
 
 from clinic_functions import BookAppointmentAIPayload
+
+# --- ДОБАВЛЕНО: Схема для инструментов без аргументов ---
+class NoArgsSchema(BaseModel):
+    pass
+# --- КОНЕЦ ДОБАВЛЕНИЯ ---
 
 TOOL_CLASSES = [
     FindEmployeesArgs,
@@ -676,14 +681,20 @@ SYSTEM_PROMPT = """
 Ты — вежливый и информативный ассистент клиники.
 
 Главные правила:
-- Для описаний услуг, специалистов, общих справок о клинике — используй RAG-поиск.
-- Для всех конкретных данных (цены, списки, расписания, наличие, сравнения, фильтрация) — всегда вызывай соответствующую функцию (инструмент). Не пытайся отвечать на такие вопросы из RAG или памяти.
+- Для **ОБЩИХ ОПИСАНИЙ** услуг, специалистов (их квалификации, опыта, но НЕ того, какие конкретно услуги они где оказывают), общей справочной информации о клинике (адреса, общие правила) — используй RAG-поиск.
+- **ЗАПРЕЩЕНО ИСПОЛЬЗОВАТЬ RAG** для получения информации о том:
+    - какие конкретные услуги выполняет тот или иной специалист.
+    - в каких филиалах работает специалист.
+    - в каких филиалах доступна конкретная услуга.
+    - какие специалисты выполняют конкретную услугу в конкретном филиале.
+  Для ВСЕХ этих данных — **ВСЕГДА ВЫЗЫВАЙ СООТВЕТСТВУЮЩУЮ ФУНКЦИЮ (ИНСТРУМЕНТ)**. Не пытайся отвечать на такие вопросы из RAG или памяти.
+- Для всех остальных конкретных данных (цены, списки (кроме списков услуг/специалистов по филиалам), расписания, наличие, сравнения, фильтрация) — также всегда вызывай соответствующую функцию (инструмент).
 - Если не хватает параметров для функции — вежливо уточни у пользователя.
 - Не выдумывай данные и не сокращай списки, возвращай их полностью как выдала функция.
 - Не давай медицинских советов, только информируй.
 
 **ВАЖНО: Процесс записи на услугу**
-1. Сначала всегда вызывай функцию получения свободных слотов (окон) сотрудника по услуге и филиалу (get_free_slots_tool). Убедись, что ты знаешь точное название услуги, для которой ищешь слоты.
+1. Сначала всегда вызывай функцию получения свободных слотов (окон) сотрудника по услуге и филиалу (get_free_slots_tool). Убедись, что ты знаешь точное название услуги, для которой ищешь слоты, ФИО сотрудника и филиал. Используй инструменты для уточнения этой информации, если необходимо, **не полагайся на RAG**.
 2. Покажи пользователю доступные времена для записи (start_time), полученные от get_free_slots_tool.
 3. После того как пользователь выберет конкретное время (start_time) из предложенных — вызывай функцию записи (book_appointment_ai_payload_tool),
    где:
@@ -695,47 +706,28 @@ SYSTEM_PROMPT = """
        - 'serviceName' (str, ТОЧНОЕ название услуги, которое было подтверждено с пользователем и для которого искались/были найдены слоты).
        - 'categoryName' (Optional[str], НАЗВАНИЕ КАТЕГОРИИ. По возможности передайте его, если оно известно или было явно уточнено. Система в первую очередь попытается определить категорию автоматически по ID услуги, но это поле может служить уточнением или запасным вариантом). 
        - 'countService' (int, количество данной услуги, обычно 1).
-       - 'price' (float, цена ИМЕННО ЭТОЙ УСЛУГИ. Ты должен определить это значение, при необходимости используя get_service_price_tool ПЕРЕД формированием аргументов для book_appointment_ai_payload_tool).
-       - 'durationService' (int, длительность ИМЕННО ЭТОЙ УСЛУГИ в минутах. Ты должен определить это значение, например, из описания услуги, полученного через RAG, или здравого смысла, если информация недоступна. Если длительность конкретной услуги неизвестна, уточни у пользователя или используй разумное значение по умолчанию для типа услуги, но старайся найти точное.).
-       - 'complexServiceId' (Optional[str], ID комплексной услуги, если эта услуга является частью комплекса. По умолчанию null или пустая строка).
-     Пример структуры для services_details (список из одной услуги):
-     [
-       { "rowNumber": 1, "serviceName": "Ультразвуковая чистка лица", "categoryName": "Косметология", "countService": 1, "price": 3000.0, "durationService": 45, "complexServiceId": null }
-     ]
-     Если пользователь хочет записаться на НЕСКОЛЬКО услуг ОДНОВРЕМЕННО к одному специалисту на одно и то же время (если это технически возможно и подтверждено предыдущими шагами), добавь объекты для КАЖДОЙ услуги в этот список `services_details`.
-4. Не проси пользователя вводить телефон — он подставляется автоматически.
-5. ОБЯЗАТЕЛЬНО предоставь `total_price` для `book_appointment_ai_payload_tool`. Рассчитай его на основе цен услуг, которые добавляешь в `services_details`. Если цена услуги неизвестна, используй `get_service_price_tool`, чтобы ее узнать ПЕРЕД вызовом `book_appointment_ai_payload_tool`.
+       - 'complexServiceId' (Optional[str], ID комплексной услуги, если эта услуга является частью комплекса).
+       - 'price' (float, цена ИМЕННО ЭТОЙ услуги. ВАЖНО: Эту цену ты ОБЯЗАН получить, предварительно вызвав инструмент get_service_price_tool. Не выдумывай цену!).
+       - 'durationService' (int, длительность ИМЕННО ЭТОЙ услуги в минутах. LLM должен определить это значение, например, из описания услуги или из ее стандартной длительности, если она не была явно запрошена у get_service_price_tool. Если сомневаешься, уточни у пользователя или предположи стандартную длительность 60 минут).
+       # Убрал price и durationService из полей, которые LLM должен найти через get_service_price_tool, так как get_service_price_tool возвращает только цену.
+       # Для durationService - LLM определяет сам.
+   - total_price: ОБЩАЯ цена всей записи (сумма цен всех услуг из 'services_details'). Ты должен рассчитать это значение.
+   - client_phone_number: Телефон клиента будет добавлен автоматически системой. НЕ ПЫТАЙСЯ ЕГО УКАЗАТЬ ИЛИ ЗАПРОСИТЬ.
+   - filial_name, date_of_record, start_time, end_time, employee_name - должны быть точно определены перед вызовом.
 
-Примеры:
-- "Сколько стоит услуга?" — вызови функцию цены.
-- "Какие услуги делает Иванова?" — вызови функцию списка услуг сотрудника.
-
-RAG-поиск — только для:
-- Описаний услуг, специалистов, компании.
-- Общих вопросов ("что это?", "расскажите о...").
-
-Функции — для:
-- Цен, списков, расписаний, наличия, сравнения, фильтрации, поиска по критериям.
-
-Если не уверен — выбери функцию.
-
----
-
-Приветствие и персонализация:
-- Если есть имя клиента или история — используй их для персонализации, но не повторяй всю историю.
-- В начале диалога кратко упомяни недавние записи или предпочтения, если они есть.
-
----
-
-Важное:
-- Не придумывай параметры, если их нет — уточни у пользователя.
-- Не используй RAG для конкретных данных.
-- Не сокращай списки из функций.
-- Не давай медицинских советов.
-
----
-
-Если вопрос не требует функции или RAG — просто ответь вежливо.
+Дополнительные общие инструкции:
+- Приветствуй пользователя и предлагай помощь.
+- Обращайся к пользователю по имени, если оно известно из истории диалога.
+- Если пользователь спрашивает о доступных врачах или услугах без указания филиала, уточни филиал. **Для получения этой информации используй инструменты.**
+- Прежде чем предлагать запись, убедись, что известны: филиал, сотрудник, услуга, дата и время. **Для получения этой информации используй инструменты.**
+- Для дат используй формат YYYY-MM-DD, для времени HH:MM.
+- Если поиск по базе знаний (RAG) не дал результатов (для разрешенных RAG-запросов), сообщи об этом и предложи пользователю переформулировать запрос или запросить конкретные данные через функции.
+- Избегай неоднозначных ответов. Если информация не найдена или действие не может быть выполнено, четко сообщи об этом.
+- Старайся минимизировать количество последовательных вызовов функций. Если возможно, получай всю необходимую информацию за один вызов или сначала собери все данные от пользователя.
+- Не повторяй ту информацию, которую уже предоставил в предыдущих сообщениях, если пользователь не просит об этом явно.
+- Если пользователь просит "показать еще" или "дальше" для списка, который был ограничен (например, "показано 5 из 10"), используй параметр page_number соответствующего инструмента для отображения следующей страницы.
+- Если ты вызвал инструмент и он вернул ошибку, сообщи пользователю об ошибке корректно и не пытайся вызвать тот же инструмент с теми же аргументами снова, если только ошибка не была связана с временной недоступностью. Вместо этого, попроси пользователя проверить данные или переформулировать запрос.
+- Если пользователь здоровается или задает общий вопрос, ответь вежливо и спроси, чем можешь помочь. Не нужно сразу предлагать услуги или филиалы, если пользователь об этом не просил.
 """
 class TenantAwareRedisChatMessageHistory(BaseChatMessageHistory):
     """Хранилище истории сообщений в Redis с учетом tenant_id."""
@@ -796,16 +788,20 @@ from langchain_core.tools import Tool, StructuredTool
 
 async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str: # <--- ИЗМЕНЕНО на async def
     """
-    Функция, имитирующая выполнение основного агента или цепочки.
+    Функция, имитирующая выполнение основного агента или цепочки с ReAct-подобным циклом.
     Принимает словарь с 'input' (вопрос пользователя) и RunnableConfig.
     Извлекает tenant_id и session_id (user_id) из config.
-    Выполняет RAG-поиск, формирует промпт и вызывает LLM.
+    Выполняет RAG-поиск (один раз в начале), формирует промпт и вызывает LLM в цикле.
     Динамически создает инструменты для LLM.
     """
     question = input_dict.get("input")
     history_messages: List[BaseMessage] = input_dict.get("history", [])
     configurable = config.get("configurable", {})
     composite_session_id = configurable.get("session_id")
+
+    MAX_ITERATIONS = 7 # Максимальное количество циклов LLM-Tools
+    current_iteration = 0
+
     if not composite_session_id:
         raise ValueError("Отсутствует 'session_id' (composite_session_id) в конфигурации Runnable.")
     try:
@@ -814,24 +810,21 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
             raise ValueError("tenant_id или user_id пусты после разделения composite_session_id.")
     except ValueError as e:
         raise ValueError(f"Ошибка разбора composite_session_id '{composite_session_id}': {e}")
-    logger.info(f"run_agent_like_chain для Tenant: {tenant_id}, User: {user_id}, Вопрос: {question[:50]}...")
+
+    logger.info(f"run_agent_like_chain (ReAct) для Tenant: {tenant_id}, User: {user_id}, Вопрос: {question[:50]}...")
+
     if not CHROMA_CLIENT or not EMBEDDINGS_GIGA:
         logger.error(f"RAG компоненты (Chroma/Embeddings) не инициализированы.")
         return "Ошибка: Базовые компоненты RAG не готовы."
     if not tenant_id:
         logger.error("Tenant ID не найден в config.")
         return "Ошибка: Не удалось определить тенанта."
+
+    # --- Инициализация RAG компонентов для тенанта (как и раньше) ---
     bm25_retriever = BM25_RETRIEVERS_MAP.get(tenant_id)
     collection_name = f"{TENANT_COLLECTION_PREFIX}{tenant_id}"
-    if not CHROMA_CLIENT or not EMBEDDINGS_GIGA:
-        logger.error("Глобальный Chroma клиент или эмбеддинги не инициализированы.")
-        return "Ошибка: Глобальные компоненты RAG не готовы."
     try:
         embeddings_wrapper = ChromaGigaEmbeddingsWrapper(EMBEDDINGS_GIGA)
-    except ValueError as e:
-         logger.error(f"Ошибка создания обертки эмбеддингов: {e}")
-         return "Ошибка: Некорректный объект эмбеддингов."
-    try:
         chroma_collection = CHROMA_CLIENT.get_collection(
             name=collection_name,
             embedding_function=embeddings_wrapper
@@ -849,6 +842,7 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
     except Exception as e:
         logger.error(f"Не удалось получить Chroma коллекцию или ретривер '{collection_name}' для тенанта {tenant_id}: {e}", exc_info=True)
         return f"Ошибка: Не удалось получить доступ к базе знаний для филиала '{tenant_id}'."
+
     if not bm25_retriever:
         logger.warning(f"BM25 ретривер для тенанта {tenant_id} не найден. Поиск будет только векторным.")
         final_retriever = chroma_retriever
@@ -858,18 +852,20 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
             weights=[0.5, 0.5]
         )
         logger.info(f"Ensemble ретривер (BM25 + Chroma) создан для тенанта {tenant_id}.")
+
+    # --- Шаг 1: Определение необходимости RAG и формирование RAG-запроса (один раз) ---
     rag_context = ""
-    effective_rag_query = question
+    effective_rag_query = question # По умолчанию, если rag_query_llm не отработает или вернет пустой запрос
     try:
         rag_query_llm = chat_model.with_structured_output(RagQueryThought)
-        rag_prompt_messages: List[BaseMessage] = [
+        rag_prompt_messages_for_rag_llm: List[BaseMessage] = [
             SystemMessage(content=(
                 "Твоя задача - проанализировать последний запрос пользователя ('input') в контексте предыдущего диалога ('history'). "
                 "Определи главную сущность (услуга, врач, филиал, категория, общая информация о клинике), о которой спрашивает пользователь, "
                 "особенно если он использует ссылки на историю (номер пункта, местоимения 'он', 'она', 'это', 'они'). "
                 "Затем сформулируй оптимальный, самодостаточный поисковый запрос ('best_rag_query') для векторной базы знаний, "
                 "чтобы найти ОПИСАНИЕ или детали этой сущности. Используй полные названия. "
-                "Пример: Если история содержит '1. Услуга А\n2. Услуга Б', а пользователь спрашивает 'расскажи о 2', "
+                "Пример: Если история содержит '1. Услуга А\\n2. Услуга Б', а пользователь спрашивает 'расскажи о 2', "
                 "то best_rag_query должен быть что-то вроде 'Описание услуги Б'. "
                 "ВАЖНО: Если запрос пользователя является простым приветствием (например, 'Привет', 'Добрый день', 'Как дела?'), коротким общим вопросом, не требующим поиска информации, "
                 "или очевидным согласием/просьбой продолжить предыдущий ответ ассистента (например, 'да', 'дальше', 'продолжай', 'еще', 'следующая страница'), "
@@ -880,34 +876,38 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
                 "Поле 'analysis' должно содержать краткий анализ твоего решения, особенно пояснение, почему RAG-запрос нужен или не нужен."
             ))
         ]
-        if history_messages:
-             rag_prompt_messages.extend(history_messages)
-        rag_prompt_messages.append(HumanMessage(content=question))
+        if history_messages: # Используем общую историю для rag_query_llm
+             rag_prompt_messages_for_rag_llm.extend(history_messages)
+        rag_prompt_messages_for_rag_llm.append(HumanMessage(content=question))
+        
         logger.debug(f"[{tenant_id}:{user_id}] Вызов LLM для генерации RAG-запроса...")
-        rag_thought_result = await rag_query_llm.ainvoke(rag_prompt_messages, config=config) # <--- ИЗМЕНЕНО на await .ainvoke
+        rag_thought_result = await rag_query_llm.ainvoke(rag_prompt_messages_for_rag_llm, config=config)
+        
         if isinstance(rag_thought_result, RagQueryThought):
             rag_thought = rag_thought_result
             if rag_thought.best_rag_query and rag_thought.best_rag_query.strip():
                  effective_rag_query = rag_thought.best_rag_query
                  logger.info(f"[{tenant_id}:{user_id}] Сгенерирован RAG-запрос от LLM: '{effective_rag_query}' (Анализ: {rag_thought.analysis})")
-            elif hasattr(rag_thought, 'best_rag_query') and not rag_thought.best_rag_query.strip():
+            elif hasattr(rag_thought, 'best_rag_query') and not rag_thought.best_rag_query.strip(): # Явный пустой запрос
                 effective_rag_query = ""
-                logger.info(f"[{tenant_id}:{user_id}] LLM указал, что RAG-запрос должен быть пустым (вероятно, это вызов функции). Анализ: {rag_thought.analysis}")
-            else:
+                logger.info(f"[{tenant_id}:{user_id}] LLM указал, что RAG-запрос должен быть пустым. Анализ: {rag_thought.analysis}")
+            else: # Невалидный или отсутствующий best_rag_query
                 effective_rag_query = ""
                 logger.info(f"[{tenant_id}:{user_id}] LLM вернул RagQueryThought, но best_rag_query невалиден/пуст. RAG-запрос будет пустым. Анализ: {rag_thought.analysis if hasattr(rag_thought, 'analysis') else 'нет анализа'}")
         else:
-            effective_rag_query = ""
+            effective_rag_query = "" # Если вернулся не тот тип, RAG-запрос пустой
             logger.warning(f"[{tenant_id}:{user_id}] LLM для генерации RAG-запроса вернул неожиданный тип: {type(rag_thought_result)}. RAG-запрос будет пустым.")
-            if hasattr(rag_thought_result, 'analysis'):
-                 logger.warning(f"Анализ от LLM (при неожиданном типе returnValue): {rag_thought_result.analysis}")
+            if hasattr(rag_thought_result, 'analysis'): logger.warning(f"Анализ от LLM (при неожиданном типе): {rag_thought_result.analysis}")
+
     except Exception as e:
-        effective_rag_query = ""
+        effective_rag_query = "" # При любой ошибке RAG-запрос пустой
         logger.warning(f"[{tenant_id}:{user_id}] Исключение при улучшении RAG-запроса: {e}. RAG-запрос будет пустым.", exc_info=True)
+
+    # --- Шаг 2: Выполнение RAG-поиска, если необходимо (один раз) ---
     try:
         if effective_rag_query and effective_rag_query.strip():
             logger.info(f"[{tenant_id}:{user_id}] Выполнение RAG-поиска с запросом: '{effective_rag_query[:100]}...'")
-            relevant_docs = final_retriever.invoke(effective_rag_query, config=config)
+            relevant_docs = await final_retriever.ainvoke(effective_rag_query, config=config)
             rag_context = format_docs(relevant_docs)
             logger.info(f"RAG: Найдено {len(relevant_docs)} док-в для запроса: '{effective_rag_query[:50]}...'. Контекст: {len(rag_context)} симв.")
         else:
@@ -916,58 +916,52 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
     except Exception as e:
         logger.error(f"Ошибка выполнения RAG поиска для тенанта {tenant_id} с запросом '{effective_rag_query}': {e}", exc_info=True)
         rag_context = "[Ошибка получения информации из базы знаний]"
-    system_prompt = SYSTEM_PROMPT
-    # Добавляем инфо о дате/времени в начало system_prompt
+
+    # --- Подготовка к циклу ReAct ---
+    system_prompt_base = SYSTEM_PROMPT # Базовый системный промпт
+    # Добавляем инфо о дате/времени
     tz = pytz.timezone('Europe/Moscow')
     now = datetime.now(tz)
-    date_str = now.strftime('%d %B %Y')
-    weekday_str = now.strftime('%A')
-    time_str = now.strftime('%H:%M')
-    datetime_info = f"Сегодня: {date_str}, {weekday_str}, текущее время: {time_str} (Europe/Moscow)"
-    system_prompt = f"{datetime_info}\n\n" + system_prompt
-    prompt_addition = None
+    datetime_info = f"Сегодня: {now.strftime('%d %B %Y, %A, %H:%M')} (Europe/Moscow)"
+    final_system_prompt = f"{datetime_info}\\n\\n" + system_prompt_base
+    
     if tenant_config_manager:
         settings = tenant_config_manager.load_tenant_settings(tenant_id)
         prompt_addition = settings.get('prompt_addition')
         if prompt_addition:
-            system_prompt += f"\n\n[Дополнительные инструкции от администратора филиала {tenant_id}]:\n{prompt_addition}"
+            final_system_prompt += f"\\n\\n[Дополнительные инструкции от администратора филиала {tenant_id}]:\\n{prompt_addition}"
             logger.info(f"Добавлено дополнение к промпту для тенанта {tenant_id}.")
+
+    # --- Создание инструментов (один раз перед циклом) ---
     tenant_tools = []
     tenant_specific_docs: Optional[List[Document]] = TENANT_DOCUMENTS_MAP.get(tenant_id)
     if not tenant_specific_docs:
-         logger.warning(f"Не найдены загруженные документы для тенанта {tenant_id} в tenant_documents_map_global. Инструменты, требующие данные, не будут созданы или могут работать некорректно.")
-    logger.info(f"Создание динамических инструментов для тенанта {tenant_id}...")
+         logger.warning(f"Не найдены загруженные документы для тенанта {tenant_id} в tenant_documents_map_global. Некоторые инструменты могут работать некорректно.")
+    
     tool_func_to_schema_map = {
-        find_employees_tool: FindEmployeesArgs,
-        get_service_price_tool: GetServicePriceArgs,
-        list_filials_tool: None,
+        find_employees_tool: FindEmployeesArgs, get_service_price_tool: GetServicePriceArgs,
+        list_filials_tool: NoArgsSchema, # <--- ИЗМЕНЕНО с None
         get_employee_services_tool: GetEmployeeServicesArgs,
-        check_service_in_filial_tool: CheckServiceInFilialArgs,
-        compare_service_price_in_filials_tool: CompareServicePriceInFilialsArgs,
-        find_service_locations_tool: FindServiceLocationsArgs,
-        find_specialists_by_service_or_category_and_filial_tool: FindSpecialistsByServiceOrCategoryAndFilialArgs,
-        list_services_in_category_tool: ListServicesInCategoryArgs,
-        list_services_in_filial_tool: ListServicesInFilialArgs,
-        find_services_in_price_range_tool: FindServicesInPriceRangeArgs,
-        list_all_categories_tool: ListAllCategoriesArgs,
+        check_service_in_filial_tool: CheckServiceInFilialArgs, compare_service_price_in_filials_tool: CompareServicePriceInFilialsArgs,
+        find_service_locations_tool: FindServiceLocationsArgs, find_specialists_by_service_or_category_and_filial_tool: FindSpecialistsByServiceOrCategoryAndFilialArgs,
+        list_services_in_category_tool: ListServicesInCategoryArgs, list_services_in_filial_tool: ListServicesInFilialArgs,
+        find_services_in_price_range_tool: FindServicesInPriceRangeArgs, 
+        list_all_categories_tool: NoArgsSchema, # <--- ИЗМЕНЕНО с None
         list_employee_filials_tool: ListEmployeeFilialsArgs,
     }
-    def create_tool_wrapper(original_tool_func: callable, data_docs: Optional[List[Document]], raw_data: Optional[List[Dict]]):
+
+    def create_tool_wrapper_react(original_tool_func: callable, raw_data_for_tenant: Optional[List[Dict]]):
         def actual_wrapper(*args, **kwargs) -> str:
             tool_name = original_tool_func.__name__
-            logger.info(f"Вызов обертки для инструмента {tool_name} с args: {args}, kwargs: {kwargs}")
-            
-            # Устанавливаем данные клиники для текущего тенанта
-            clinic_functions.set_clinic_data(raw_data if raw_data is not None else [])
-            
+            logger.info(f"[ReAct Tool] Вызов обертки для {tool_name} с args: {args}, kwargs: {kwargs}")
+            clinic_functions.set_clinic_data(raw_data_for_tenant if raw_data_for_tenant is not None else [])
             try:
                 handler_class_name = ''.join(word.capitalize() for word in tool_name.replace('_tool', '').split('_'))
                 HandlerClass = getattr(clinic_functions, handler_class_name, None)
                 if not HandlerClass:
-                    logger.error(f"Не найден класс-обработчик '{handler_class_name}' в clinic_functions для функции {tool_name}")
+                    logger.error(f"Не найден класс-обработчик '{handler_class_name}' для {tool_name}")
                     return f"Ошибка: Некорректная конфигурация инструмента {tool_name}."
                 handler_instance = HandlerClass(**kwargs)
-                # Универсальный вызов process без лишних аргументов
                 if hasattr(handler_instance, 'process') and callable(getattr(handler_instance, 'process')):
                     return handler_instance.process()
                 else:
@@ -977,150 +971,179 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
                 logger.error(f"{tool_name}: {e}", exc_info=True)
                 return f"При выполнении инструмента {tool_name} произошла ошибка."
         return actual_wrapper
-    for tool_function in TOOL_FUNCTIONS:
+
+    for tool_function in TOOL_FUNCTIONS: # TOOL_FUNCTIONS из глобальной области видимости
         tool_name = tool_function.__name__
         tool_description = tool_function.__doc__ or f"Инструмент {tool_name}"
-        
         current_args_schema = None
         func_for_tool = None
 
-        # Обработка новых инструментов (get_free_slots_tool, book_appointment_tool)
         if tool_name == "get_free_slots_tool":
             current_args_schema = GetFreeSlotsArgs
-            func_for_tool = tool_function # Используется прямая функция из matrixai.py
+            func_for_tool = tool_function 
         elif tool_name == "book_appointment_tool":
             current_args_schema = BookAppointmentArgs
-            func_for_tool = tool_function # Используется прямая функция из matrixai.py
-        elif tool_name == "book_appointment_ai_payload_tool": # <--- ДОБАВЛЕНА ОБРАБОТКА НОВОГО ИНСТРУМЕНТА
+            func_for_tool = tool_function
+        elif tool_name == "book_appointment_ai_payload_tool":
             current_args_schema = BookAppointmentAIPayloadArgs
-            func_for_tool = tool_function 
+            func_for_tool = tool_function
         elif tool_function in tool_func_to_schema_map:
             current_args_schema = tool_func_to_schema_map.get(tool_function)
-            func_for_tool = create_tool_wrapper(tool_function, tenant_specific_docs, TENANT_RAW_DATA_MAP.get(tenant_id, []))
-        else: 
-            logger.warning(f"Инструмент '{tool_name}' не был классифицирован для создания (не новый и не в schema_map). Использование стандартной обертки и schema=None.")
-            current_args_schema = None 
-            func_for_tool = create_tool_wrapper(tool_function, tenant_specific_docs, TENANT_RAW_DATA_MAP.get(tenant_id, []))
+            func_for_tool = create_tool_wrapper_react(tool_function, TENANT_RAW_DATA_MAP.get(tenant_id, []))
+        else:
+            logger.warning(f"Инструмент '{tool_name}' не классифицирован. Использование стандартной обертки и schema=None.")
+            current_args_schema = None
+            func_for_tool = create_tool_wrapper_react(tool_function, TENANT_RAW_DATA_MAP.get(tenant_id, []))
 
-        if func_for_tool is None: # Дополнительная проверка на случай, если func_for_tool не был назначен
-            logger.error(f"Не удалось определить функцию для инструмента '{tool_name}'. Пропуск создания инструмента.")
+        if func_for_tool is None:
+            logger.error(f"Не удалось определить функцию для инструмента '{tool_name}'. Пропуск.")
             continue
             
+        # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+        is_async_func = inspect.iscoroutinefunction(func_for_tool)
         langchain_tool = StructuredTool.from_function(
-            func=func_for_tool,
-            name=tool_name,
-            description=tool_description,
-            args_schema=current_args_schema
+            func=func_for_tool, 
+            name=tool_name, 
+            description=tool_description, 
+            args_schema=current_args_schema,
+            coroutine=func_for_tool if is_async_func else None # Явно указываем корутину, если функция асинхронная
         )
+        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
         tenant_tools.append(langchain_tool)
-        logger.debug(f"Инструмент '{tool_name}' создан для тенанта {tenant_id}. Schema: {current_args_schema.__name__ if current_args_schema else 'None'}")
-    messages_for_llm = []
-    messages_for_llm.append(SystemMessage(content=system_prompt))
-    messages_for_llm.extend(history_messages)
-    rag_query_display = effective_rag_query if effective_rag_query and effective_rag_query.strip() else "не выполнялся"
-    rag_context_block = f"\n\n[Информация из базы знаний (поисковый запрос: '{rag_query_display}')]:\n{rag_context}\n[/Информация из базы знаний]"
-    messages_for_llm.append(HumanMessage(content=question + rag_context_block))
+        logger.debug(f"Инструмент '{tool_name}' создан. Schema: {current_args_schema.__name__ if current_args_schema else 'None'}. Async: {is_async_func}")
+
+    # --- Инициализация сообщений для LLM перед циклом ---
+    messages_for_llm_cycle: List[BaseMessage] = []
+    messages_for_llm_cycle.append(SystemMessage(content=final_system_prompt))
+    messages_for_llm_cycle.extend(history_messages) # Общая история диалога
+    
+    rag_query_display_initial = effective_rag_query if effective_rag_query and effective_rag_query.strip() else "не выполнялся"
+    rag_context_block_initial = f"\\n\\n[Информация из базы знаний (поисковый запрос: '{rag_query_display_initial}')]:\\n{rag_context}\\n[/Информация из базы знаний]"
+    messages_for_llm_cycle.append(HumanMessage(content=question + rag_context_block_initial))
+
     llm_with_tools = chat_model.bind_tools(tenant_tools)
-    logger.info(f"{chat_model.model_name} {len(tenant_tools)} {tenant_id}...")
-    try:
-        ai_response_message: AIMessage = await llm_with_tools.ainvoke(messages_for_llm, config=config) # <--- ИЗМЕНЕНО на await .ainvoke
-        tool_calls = ai_response_message.tool_calls
-        if tool_calls:
-             logger.info(f"{[tc['name'] for tc in tool_calls]}")
-             tool_outputs = []
-             for tool_call in tool_calls:
-                  tool_name = tool_call["name"]
-                  tool_args = tool_call["args"]
-                  logger.info(f"{tool_name} {tool_args}")
-                  found_tool = next((t for t in tenant_tools if t.name == tool_name), None)
-                  if found_tool:
-                      try:
-                          current_tool_args_for_invoke = tool_args
-                          expects_args = True
-                          if not found_tool.args_schema or not found_tool.args_schema.model_fields:
-                              expects_args = False
-                          if not expects_args:
-                              if tool_args is not None and tool_args != {}:
-                                  logger.info(f"Инструмент {tool_name} не ожидает аргументов, но LLM передал: {tool_args}. Используем {{}}.")
-                              current_tool_args_for_invoke = {}
-                          elif isinstance(tool_args, dict) and tool_args.get('args') is None and len(tool_args) == 1 and expects_args:
-                              logger.warning(f"LLM передал {{'args': None}} для инструмента {tool_name}, который ожидает аргументы. Pydantic, вероятно, выдаст ошибку.")
-                          
-                          # --- Определение системных параметров ---
-                          # Эти параметры извлекаются из configurable для КАЖДОГО вызова инструмента
-                          cfg_tenant_id = configurable.get("tenant_id")
-                          cfg_client_api_token = configurable.get("client_api_token")
-                          cfg_phone_number = configurable.get("phone_number")
+    final_answer_content = "Не удалось получить ответ от ассистента." # Ответ по умолчанию
 
-                          logger.debug(f"Для инструмента '{tool_name}', системные параметры из configurable: tenant_id='{cfg_tenant_id}', client_api_token='{'SET' if cfg_client_api_token else 'NOT_SET'}', phone_number='{cfg_phone_number}'")
+    # --- ReAct цикл ---
+    while current_iteration < MAX_ITERATIONS:
+        current_iteration += 1
+        logger.info(f"[{tenant_id}:{user_id}] ReAct Итерация: {current_iteration}/{MAX_ITERATIONS}")
 
-                          # --- Подготовка АРГУМЕНТОВ для вызова инструмента (current_tool_args_for_invoke) ---
-                          # Некоторые инструменты ожидают tenant_id, api_token, client_phone_number как часть своих аргументов (kwargs_from_llm)
-                          if tool_name in ["get_free_slots_tool", "book_appointment_tool", "book_appointment_ai_payload_tool"]:
-                              if not cfg_tenant_id: # tenant_id обязателен для этих инструментов в аргументах
-                                  error_msg = f"Критическая ошибка: tenant_id не найден в configurable и обязателен для аргументов инструмента {tool_name}."
-                                  logger.error(error_msg)
-                                  raise ValueError(error_msg)
-                              current_tool_args_for_invoke['tenant_id'] = cfg_tenant_id
-                              
-                              if cfg_client_api_token:
-                                  current_tool_args_for_invoke['api_token'] = cfg_client_api_token
-                              elif 'api_token' not in current_tool_args_for_invoke:
-                                   current_tool_args_for_invoke['api_token'] = None
-                              
-                              if tool_name == "book_appointment_ai_payload_tool":
-                                  if cfg_phone_number: # Это поле обязательное в модели, если оно тут None, Pydantic возбудит ошибку
-                                      current_tool_args_for_invoke['client_phone_number'] = cfg_phone_number
-                                  # Если cfg_phone_number is None, Pydantic сам вызовет ошибку при валидации
-                                  
-                              logger.info(f"Обновленные АРГУМЕНТЫ для '{tool_name}' после добавления системных полей: {current_tool_args_for_invoke}")
-                          
-                          # --- Подготовка КОНФИГУРАЦИИ (tool_config) для вызова инструмента ---
-                          # Эта конфигурация передается в параметр 'config' метода .ainvoke() инструмента.
-                          # Она может быть использована внутри инструмента, если он умеет работать с RunnableConfig.
-                          # ВСЕГДА передаем tenant_id, client_api_token, phone_number в tool_config, если они есть.
-                          tool_config_payload = {}
-                          if cfg_tenant_id:
-                              tool_config_payload["tenant_id"] = cfg_tenant_id
-                          if cfg_client_api_token:
-                              tool_config_payload["client_api_token"] = cfg_client_api_token
-                          if cfg_phone_number:
-                              tool_config_payload["phone_number"] = cfg_phone_number
-                          
-                          # Если tool_config_payload не пуст, используем его, иначе передаем оригинальный config
-                          final_tool_config_to_pass = {"configurable": tool_config_payload} if tool_config_payload else config
-                          logger.debug(f"Итоговый tool_config для передачи в .ainvoke() инструмента '{tool_name}': {final_tool_config_to_pass}")
-                          
-                          raw_output = await found_tool.ainvoke(current_tool_args_for_invoke, config=final_tool_config_to_pass)
-                          if inspect.iscoroutine(raw_output):
-                              logger.warning(f"Инструмент '{tool_name}' .ainvoke вернул короутину. Ожидаем ее явно.")
-                              output = await raw_output
-                          else:
-                              output = raw_output
-                          output_str = str(output)
-                          tool_outputs.append(ToolMessage(content=output_str, tool_call_id=tool_call["id"]))
-                          logger.info(f"Результат вызова инструмента '{tool_name}': {output_str[:100]}...")
-                          
-                      except Exception as e:
-                           error_message = f"Ошибка при вызове инструмента '{tool_name}': {type(e).__name__} - {str(e)}"
-                           logger.error(f"Ошибка вызова инструмента '{tool_name}' с аргументами {current_tool_args_for_invoke}: {e}", exc_info=True)
-                           tool_outputs.append(ToolMessage(content=error_message, tool_call_id=tool_call["id"]))
-                  else:
-                      logger.error(f"Инструмент '{tool_name}' не найден среди доступных для тенанта {tenant_id}. Доступные инструменты: {[t.name for t in tenant_tools]}.")
-                      tool_outputs.append(ToolMessage(content=f"Ошибка: Инструмент {tool_name} не найден.", tool_call_id=tool_call["id"]))
-             messages_for_llm.append(ai_response_message)
-             messages_for_llm.extend(tool_outputs)
-             logger.info("")
-             final_response_message = await llm_with_tools.ainvoke(messages_for_llm, config=config) # <--- ИЗМЕНЕНО на await .ainvoke
-             final_answer = final_response_message.content
-             logger.info(f"[{tenant_id}:{user_id}] Итоговый ответ (первые 100 симв): {final_answer[:100]}...")
-             return final_answer
-        else:
-             logger.info(f"[{tenant_id}:{user_id}] Итоговый ответ LLM без вызова инструментов (первые 100 симв): {ai_response_message.content[:100]}...")
-             return ai_response_message.content
-    except Exception as e:
-        logger.error(f"Критическая ошибка в run_agent_like_chain для тенанта {tenant_id}, пользователя {user_id}: {e}", exc_info=True)
-        return "Произошла ошибка при обработке вашего запроса."
+        try:
+            # Логгирование текущего состояния messages_for_llm_cycle перед вызовом
+            if logger.isEnabledFor(logging.DEBUG):
+                debug_messages = []
+                for msg_idx, msg in enumerate(messages_for_llm_cycle):
+                    content_preview = str(msg.content)[:200] + "..." if len(str(msg.content)) > 200 else str(msg.content)
+                    if isinstance(msg, AIMessage) and msg.tool_calls:
+                        tool_call_summary = f" (Tool Calls: {[tc['name'] for tc in msg.tool_calls]})"
+                        content_preview += tool_call_summary
+                    debug_messages.append(f"  Msg {msg_idx} ({msg.type}): {content_preview}")
+                logger.debug(f"Сообщения для LLM на итерации {current_iteration}:\\n" + "\\n".join(debug_messages))
+
+            ai_response_message: AIMessage = await llm_with_tools.ainvoke(messages_for_llm_cycle, config=config)
+            messages_for_llm_cycle.append(ai_response_message) # Добавляем ответ AI в историю цикла
+
+            tool_calls = ai_response_message.tool_calls
+            if not tool_calls:
+                logger.info(f"[{tenant_id}:{user_id}] LLM ответил без tool_calls на итерации {current_iteration}. Завершение цикла.")
+                final_answer_content = str(ai_response_message.content)
+                break 
+            
+            logger.info(f"[{tenant_id}:{user_id}] LLM запросил инструменты на итерации {current_iteration}: {[tc['name'] for tc in tool_calls]}")
+            tool_outputs = []
+            for tool_call in tool_calls:
+                tool_name = tool_call["name"]
+                tool_args = tool_call["args"]
+                logger.info(f"Вызов инструмента '{tool_name}' с аргументами: {tool_args}")
+                
+                found_tool = next((t for t in tenant_tools if t.name == tool_name), None)
+                if found_tool:
+                    try:
+                        current_tool_args_for_invoke = tool_args
+                        # Проверка, ожидает ли инструмент аргументы
+                        expects_args = bool(found_tool.args_schema and found_tool.args_schema.model_fields)
+                        if not expects_args and tool_args and tool_args != {}:
+                            logger.info(f"Инструмент {tool_name} не ожидает аргументов, но LLM передал: {tool_args}. Используем {{}}.")
+                            current_tool_args_for_invoke = {}
+                        
+                        # --- Системные параметры из configurable (как и раньше) ---
+                        cfg_tenant_id = configurable.get("tenant_id")
+                        cfg_client_api_token = configurable.get("client_api_token")
+                        cfg_phone_number = configurable.get("phone_number")
+
+                        # --- ДОБАВЛЕНО: Обработка плейсхолдера для номера телефона ---
+                        PLACEHOLDER_PHONE = "<to be added by system>"
+                        if cfg_phone_number == PLACEHOLDER_PHONE:
+                            logger.warning(f"Получен плейсхолдер '{PLACEHOLDER_PHONE}' в качестве номера телефона из конфигурации. Обрабатывается как отсутствующий номер (None).")
+                            cfg_phone_number = None
+                        # --- КОНЕЦ ДОБАВЛЕНИЯ ---
+
+                        if tool_name in ["get_free_slots_tool", "book_appointment_tool", "book_appointment_ai_payload_tool"]:
+                            if not cfg_tenant_id:
+                                raise ValueError(f"tenant_id обязателен для {tool_name}, но не найден в configurable.")
+                            current_tool_args_for_invoke['tenant_id'] = cfg_tenant_id
+                            current_tool_args_for_invoke.setdefault('api_token', cfg_client_api_token) # Устанавливаем, если нет
+                            if tool_name == "book_appointment_ai_payload_tool":
+                                logger.info(f"[ReAct System Override] Перед установкой client_phone_number для book_appointment_ai_payload_tool. cfg_phone_number = '{cfg_phone_number}'") # <--- ДОБАВЛЕН ЛОГ
+                                current_tool_args_for_invoke['client_phone_number'] = cfg_phone_number # <-- НОВЫЙ КОД: Принудительная установка
+                                if not current_tool_args_for_invoke.get('client_phone_number'): # Проверка после setdefault
+                                    # Pydantic возбудит ошибку, если client_phone_number обязателен и None
+                                    logger.warning(f"client_phone_number не был предоставлен для book_appointment_ai_payload_tool, Pydantic может вызвать ошибку, если поле обязательное.")
+
+
+                        # --- Подготовка КОНФИГУРАЦИИ (tool_config) для вызова инструмента ---
+                        tool_config_payload = {}
+                        if cfg_tenant_id: tool_config_payload["tenant_id"] = cfg_tenant_id
+                        if cfg_client_api_token: tool_config_payload["client_api_token"] = cfg_client_api_token
+                        if cfg_phone_number: tool_config_payload["phone_number"] = cfg_phone_number
+                        
+                        final_tool_config_to_pass = {"configurable": tool_config_payload} if tool_config_payload else config
+                        
+                        # Вызов асинхронного инструмента
+                        if inspect.iscoroutinefunction(found_tool.func):
+                            output = await found_tool.ainvoke(current_tool_args_for_invoke, config=final_tool_config_to_pass)
+                        else: # 
+                            output = await found_tool.ainvoke(current_tool_args_for_invoke, config=final_tool_config_to_pass)
+
+
+                        output_str = str(output)
+                        MAX_TOOL_OUTPUT_LENGTH = 3000
+                        if len(output_str) > MAX_TOOL_OUTPUT_LENGTH:
+                            output_str = output_str[:MAX_TOOL_OUTPUT_LENGTH] + "\\n[...Вывод инструмента был усечен...]"
+                            logger.warning(f"Вывод инструмента '{tool_name}' был усечен.")
+                        
+                        tool_outputs.append(ToolMessage(content=output_str, tool_call_id=tool_call["id"]))
+                        logger.info(f"Результат вызова '{tool_name}': {output_str[:100]}...")
+
+                    except Exception as e:
+                        error_message = f"Ошибка при вызове инструмента '{tool_name}': {type(e).__name__} - {str(e)}"
+                        logger.error(f"Ошибка вызова '{tool_name}' с аргументами {current_tool_args_for_invoke}: {e}", exc_info=True)
+                        tool_outputs.append(ToolMessage(content=error_message, tool_call_id=tool_call["id"]))
+                else:
+                    logger.error(f"Инструмент '{tool_name}' не найден. Доступные: {[t.name for t in tenant_tools]}.")
+                    tool_outputs.append(ToolMessage(content=f"Ошибка: Инструмент {tool_name} не найден.", tool_call_id=tool_call["id"]))
+            
+            messages_for_llm_cycle.extend(tool_outputs) # Добавляем результаты инструментов в историю цикла
+
+        except Exception as e:
+            logger.error(f"[{tenant_id}:{user_id}] Ошибка на итерации {current_iteration} ReAct цикла: {e}", exc_info=True)
+            final_answer_content = "Произошла ошибка при обработке вашего запроса во время выполнения."
+            break # Прерываем цикл при ошибке
+
+        if current_iteration == MAX_ITERATIONS:
+            logger.warning(f"[{tenant_id}:{user_id}] Достигнут лимит итераций ({MAX_ITERATIONS}). Завершение цикла.")
+            # Пытаемся взять последний ответ LLM, если он есть, или сообщение об ошибке/лимите.
+            if ai_response_message and ai_response_message.content and not tool_calls : # если последний ответ был финальным
+                 final_answer_content = str(ai_response_message.content)
+            elif ai_response_message and ai_response_message.content: # если были tool_calls, но есть какой-то content
+                 final_answer_content = str(ai_response_message.content) + "\\n[Достигнут лимит итераций обработки]"
+            else:
+                 final_answer_content = "Ассистент достиг лимита шагов обработки. Пожалуйста, попробуйте переформулировать запрос или разбить его на части."
+            break
+
+    logger.info(f"[{tenant_id}:{user_id}] Итоговый ответ ReAct (первые 100 симв): {final_answer_content[:100]}...")
+    return final_answer_content
 
 # --- Начало: Асинхронный триггер для переиндексации данных одного тенанта ---
 async def trigger_reindex_tenant_async(tenant_id: str) -> bool:
