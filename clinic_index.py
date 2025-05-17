@@ -30,10 +30,15 @@ ENTITY_KEYS = [
     ("categoryName", "categoryId", True),
 ]
 
+# --- Индекс соответствия serviceId -> categoryId для быстрого поиска ---
+SERVICEID_TO_CATEGORYID_INDEX: Dict[str, Dict[str, str]] = {}
+
+
 def build_indexes_for_tenant(tenant_id: str, raw_data: List[Dict[str, Any]]):
     """
     Строит индексы имя <-> id для всех сущностей по сырым данным тенанта.
     Использует normalize_text.
+    Дополнительно строит индекс serviceId -> categoryId для быстрого поиска категории по услуге.
     """
     if not raw_data:
         logger.warning(f"Нет данных для построения индексов для тенанта {tenant_id}")
@@ -54,7 +59,16 @@ def build_indexes_for_tenant(tenant_id: str, raw_data: List[Dict[str, Any]]):
         indexes[f"{name_key}_to_id"] = name_to_id
         indexes[f"{id_key}_to_name"] = id_to_name
     TENANT_INDEXES[tenant_id] = indexes
-    logger.info(f"Построены индексы для тенанта {tenant_id} с использованием normalize_text.")
+    # --- Строим индекс serviceId -> categoryId ---
+    serviceid_to_categoryid = {}
+    for item in raw_data:
+        service_id = item.get("serviceId")
+        category_id = item.get("categoryId")
+        if service_id and category_id:
+            serviceid_to_categoryid[service_id] = category_id
+    SERVICEID_TO_CATEGORYID_INDEX[tenant_id] = serviceid_to_categoryid
+    logger.info(f"Построены индексы для тенанта {tenant_id} с использованием normalize_text и индекс serviceId->categoryId.")
+
 
 def get_id_by_name(tenant_id: str, entity: str, name: str) -> Optional[str]:
     """
@@ -133,5 +147,11 @@ def get_name_by_id(tenant_id: str, entity: str, id_: str) -> Optional[str]:
         
     index_map_key = f"{id_key_for_index}_to_name"
     return TENANT_INDEXES.get(tenant_id, {}).get(index_map_key, {}).get(id_)
+
+def get_category_id_by_service_id(tenant_id: str, service_id: str) -> Optional[str]:
+    """
+    Быстро получить categoryId по serviceId для конкретного тенанта.
+    """
+    return SERVICEID_TO_CATEGORYID_INDEX.get(tenant_id, {}).get(service_id)
 
 

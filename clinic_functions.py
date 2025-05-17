@@ -4,8 +4,8 @@ import logging
 import re
 from typing import Optional, List, Dict, Any, Set, Tuple
 from pydantic import BaseModel, Field
-from client_data_service import get_free_times_of_employee_by_services, add_record, get_employee_schedule
-from clinic_index import get_id_by_name, get_name_by_id
+from client_data_service import get_free_times_of_employee_by_services, add_record
+from clinic_index import  get_name_by_id
 import asyncio
 from datetime import datetime
 
@@ -435,7 +435,7 @@ class CompareServicePriceInFilials(BaseModel):
             norm_f: {'req_name': req_name, 'db_name': all_filials_db_norm_map.get(norm_f), 'price': None, 'service_name': None, 'exact_match': False}
             for norm_f, req_name in valid_filials_to_compare.items()
         }
-        service_name_matches: Set[str] = set() # Оригинальные имена найденных услуг
+        service_name_matches: Set[str] = set() 
         exact_service_name_found_raw = None
 
         for item in _internal_clinic_data:
@@ -466,19 +466,19 @@ class CompareServicePriceInFilials(BaseModel):
 
                     if should_update:
                         current_data['price'] = price
-                        current_data['service_name'] = s_name_raw # Оригинальное имя услуги
+                        current_data['service_name'] = s_name_raw
                         current_data['exact_match'] = is_exact_match
                         service_name_matches.add(s_name_raw)
                         if is_exact_match and not exact_service_name_found_raw:
                              exact_service_name_found_raw = s_name_raw
 
-        # Формируем ответ
-        service_display_name_raw = self.service_name # По умолчанию используем имя из запроса
+        
+        service_display_name_raw = self.service_name 
         if service_name_matches:
              if exact_service_name_found_raw:
                   service_display_name_raw = exact_service_name_found_raw
              else:
-                  # Берем самое похожее из найденных (сортируем по нормализованному)
+                  
                   service_display_name_raw = sorted(list(service_name_matches), key=lambda s: normalize_text(s, keep_spaces=True))[0]
 
         clarification = ""
@@ -486,9 +486,9 @@ class CompareServicePriceInFilials(BaseModel):
              clarification = f" (по запросу '{self.service_name}')"
 
         response_parts = [f"Сравнение цен на услугу '{service_display_name_raw}'{clarification}:"]
-        valid_prices_found: Dict[str, float] = {} # original_req_name -> price
+        valid_prices_found: Dict[str, float] = {} 
 
-        # Сортируем филиалы по нормализованному имени для вывода
+       
         sorted_filial_norms = sorted(prices.keys())
 
         for norm_f in sorted_filial_norms:
@@ -514,7 +514,7 @@ class CompareServicePriceInFilials(BaseModel):
              response_parts.append(f"\nСамая низкая цена ({min_price:.0f} руб.) в: {', '.join(cheapest_filials)}.")
         elif len(valid_prices_found) == 1:
              response_parts.append("\nНедостаточно данных для сравнения (цена найдена только в одном филиале).")
-        else: # Услуга найдена, но цен нет
+        else: 
              response_parts.append("\nНе удалось найти цены для сравнения в указанных филиалах.")
 
 
@@ -529,7 +529,7 @@ class FindServiceLocations(BaseModel):
         if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
         logging.info(f"[FC Proc] Поиск филиалов для услуги: {self.service_name}")
 
-        locations: Dict[str, str] = {} # norm_filial -> original_filial_name
+        locations: Dict[str, str] = {} 
         service_found = False
         found_service_names_raw: Set[str] = set()
         norm_search_service = normalize_text(self.service_name, keep_spaces=True).strip()
@@ -589,7 +589,7 @@ class FindSpecialistsByServiceOrCategoryAndFilial(BaseModel):
         if not _internal_clinic_data: return "Ошибка: Данные клиники не загружены."
         logging.info(f"[FC Proc] Поиск специалистов (Запрос: '{self.query_term}', Филиал: '{self.filial_name}')")
 
-        matching_employees: Dict[str, str] = {} # emp_id -> original_emp_name
+        matching_employees: Dict[str, str] = {} 
         norm_query = normalize_text(self.query_term, keep_spaces=True)
         norm_filial = normalize_text(self.filial_name)
         original_filial_display_name = self.filial_name
@@ -644,7 +644,7 @@ class ListServicesInCategory(BaseModel):
                 if norm_search_category in norm_item_cat:
                     category_found = True
                     found_category_names_raw.add(cat_name_raw)
-                    # Ищем наиболее точное совпадение для имени категории
+                    
                     if exact_category_name_raw is None or norm_search_category == norm_item_cat:
                         exact_category_name_raw = cat_name_raw
 
@@ -679,7 +679,7 @@ class ListServicesInFilial(BaseModel):
         if not _internal_clinic_data: return "Ошибка: База данных клиники пуста."
         logging.info(f"[FC Proc] Запрос всех услуг в филиале: {self.filial_name}")
 
-        services_in_filial: Set[str] = set() # original service names
+        services_in_filial: Set[str] = set() 
         norm_search_filial = normalize_text(self.filial_name)
         original_filial_name = None
         all_filials_db_orig = set()
@@ -726,11 +726,11 @@ class FindServicesInPriceRange(BaseModel):
 
         if self.min_price > self.max_price: return "Ошибка: Минимальная цена больше максимальной."
 
-        matching_services: Dict[str, Dict] = {} # service_id -> {name_raw, price, filial_raw, category_raw}
+        matching_services: Dict[str, Dict] = {} 
         norm_category_name = normalize_text(self.category_name, keep_spaces=True)
         norm_filial_name = normalize_text(self.filial_name)
 
-        # Получаем оригинальные имена для сообщения "не найдено"
+       
         original_category_name_display = self.category_name
         if norm_category_name:
              found_cat_name = next((item.get("categoryName") for item in _internal_clinic_data if normalize_text(item.get("categoryName"), keep_spaces=True) == norm_category_name), None)
@@ -862,6 +862,15 @@ class ListEmployeeFilials(BaseModel):
             else:
                  return f"Сотрудник {best_match_name}{name_clarification} работает в следующих филиалах:\n*   " + "\n*   ".join(sorted_filials)
 
+class GetFreeSlotsArgs(BaseModel):
+    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
+    employee_name: str = Field(description="ФИО сотрудника (точно или частично)")
+    service_names: List[str] = Field(description="Список названий услуг (точно)")
+    date_time: Optional[str] = Field(default=None, description="Дата для поиска слотов (формат YYYY-MM-DD)")
+    filial_name: str = Field(description="Название филиала (точно)")
+    lang_id: str = Field(default="ru", description="Язык ответа")
+    api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
+
 class GetFreeSlots(BaseModel):
     tenant_id: str
     employee_id: str
@@ -872,6 +881,9 @@ class GetFreeSlots(BaseModel):
     api_token: Optional[str] = None
 
     async def process(self, **kwargs) -> str:
+        if not self.date_time:
+            self.date_time = datetime.now().strftime("%Y.%m.%d")
+            logger.info(f"Дата не указана, используется текущая: {self.date_time}")
         logger.info(f"Запрос свободных слотов: TenantID={self.tenant_id}, EmployeeID={self.employee_id}, ServiceIDs={self.service_ids}, Date={self.date_time}, FilialID={self.filial_id}")
         try:
             response_data = await get_free_times_of_employee_by_services(
@@ -889,7 +901,7 @@ class GetFreeSlots(BaseModel):
                 if isinstance(api_data_content, dict) and 'workDates' in api_data_content:
                     all_formatted_slots = []
                     employee_name_original = api_data_content.get('name', self.employee_id)
-                    # Используем get_name_by_id для получения оригинального имени филиала, если filial_id числовой
+                    
                     filial_name_original = get_name_by_id(self.tenant_id, 'filial', self.filial_id) or self.filial_id
 
 
@@ -898,11 +910,10 @@ class GetFreeSlots(BaseModel):
                         time_slots_for_day = work_day.get('timeSlots', [])
                         
                         if date_str and time_slots_for_day:
-                            # Форматируем дату из ГГГГ.М.Д в ДД.ММ.ГГГГ для вывода
                             try:
                                 formatted_date_str = datetime.strptime(date_str, "%Y.%m.%d").strftime("%d.%m.%Y")
                             except ValueError:
-                                formatted_date_str = date_str # Если формат другой, оставляем как есть
+                                formatted_date_str = date_str 
                             
                             day_slots_str = f"На {formatted_date_str}: {', '.join(time_slots_for_day)}"
                             all_formatted_slots.append(day_slots_str)
@@ -914,10 +925,10 @@ class GetFreeSlots(BaseModel):
                     response_message = f"Доступные слоты для сотрудника {employee_name_original} в филиале {filial_name_original}:\n" + "\\n".join(all_formatted_slots)
                     return response_message
 
-                elif isinstance(api_data_content, list): # Обработка старого формата, если data - это список
+                elif isinstance(api_data_content, list):
                     logger.info("API вернуло 'data' как список (старый формат). Обработка...")
                     processed_slots = []
-                    if not api_data_content: # Пустой список data
+                    if not api_data_content: 
                          logger.info(f"API вернуло пустой список в 'data' для сотрудника {self.employee_id} на {self.date_time} в филиале {self.filial_id}.")
                          return f"К сожалению, свободных слотов не найдено."
 
@@ -929,16 +940,16 @@ class GetFreeSlots(BaseModel):
                         logger.info(f"Не найдено ключей 'time' в элементах списка 'data' от API для {self.employee_id}.")
                         return "Свободные слоты не найдены (не удалось обработать ответ API)."
                     
-                    # Используем get_name_by_id для получения оригинальных имен
+                   
                     employee_name_display = get_name_by_id(self.tenant_id, 'employee', self.employee_id) or self.employee_id
                     filial_name_display = get_name_by_id(self.tenant_id, 'filial', self.filial_id) or self.filial_id
-                    date_display = self.date_time # Предполагаем, что self.date_time уже в нужном формате для вывода или его не нужно менять
+                    date_display = self.date_time 
 
                     return f"Для сотрудника {employee_name_display} в филиале {filial_name_display} на {date_display} доступны следующие слоты: {', '.join(processed_slots)}."
 
                 else: # Неожиданный формат data
                     logger.warning(f"Ожидался список или словарь с 'workDates' для 'data' от API, но получен {type(api_data_content)}. Содержимое: {str(api_data_content)[:500]}. Слоты не будут обработаны.")
-                    # Попытка извлечь имя сотрудника из ответа, если это возможно
+                   
                     employee_name_from_data = "неизвестного сотрудника"
                     if isinstance(api_data_content, dict) and 'name' in api_data_content:
                         employee_name_from_data = api_data_content['name']
@@ -965,6 +976,7 @@ class BookAppointment(BaseModel):
     employee_id: str
     filial_id: str
     category_id: str
+    service_original_name: str
     date_of_record: str
     start_time: str
     end_time: str
@@ -997,6 +1009,7 @@ class BookAppointment(BaseModel):
                 employee_id=self.employee_id,
                 filial_id=self.filial_id,
                 category_id=self.category_id,
+                service_original_name=self.service_original_name,
                 date_of_record=self.date_of_record,
                 start_time=self.start_time,
                 end_time=self.end_time,
@@ -1019,92 +1032,53 @@ class BookAppointment(BaseModel):
             logger.error(f"Ошибка в BookAppointment.process для tenant '{self.tenant_id}', service_id '{self.service_id}': {e}", exc_info=True)
             return f"Ошибка при создании записи: {type(e).__name__} - {e}"
 
-class GetEmployeeSchedule(BaseModel):
-    employee_id: str
-    filial_id: str
+class BookAppointmentAIPayload(BaseModel):
     lang_id: str = "ru"
+    client_phone_number: str
+    services_payload: List[Dict[str, Any]]
+    filial_id: str
+    date_of_record: str
+    start_time: str
+    end_time: str
+    duration_of_time: int
+    to_employee_id: str
+    total_price: float
     api_token: Optional[str] = None
+    color_code_record: Optional[str] = None
+    traffic_channel: Optional[int] = None
+    traffic_channel_id: Optional[str] = None
 
     async def process(self, **kwargs) -> str:
-        current_tenant_id_for_resolution = getattr(self, 'tenant_id', None)
-        if not current_tenant_id_for_resolution:
-             logger.warning("tenant_id отсутствует в экземпляре GetEmployeeSchedule, разрешение имен в ID может не работать корректно для логгирования/сообщений.")
-             # Можно вернуть ошибку или продолжить без разрешения имен для сообщений
-
         try:
-            if not self.employee_id:
-                return "ID сотрудника не предоставлен."
-            if not self.filial_id:
-                return "ID филиала не предоставлен."
-            if not self.api_token: # Токен теперь обязателен, т.к. tenant_id не передается
-                logger.error("API токен отсутствует. Невозможно получить расписание сотрудника без tenantId или токена.")
-                return "Критическая ошибка: API токен не предоставлен для получения расписания."
-
-            result = await get_employee_schedule(
-                tenant_id=current_tenant_id_for_resolution, # передаем для логгирования/консистентности, но API его не использует
-                employee_id=self.employee_id,
-                filial_id=self.filial_id,
+            # Формируем payload для API
+            payload = {
+                "langId": self.lang_id,
+                "clientPhoneNumber": self.client_phone_number,
+                "services": self.services_payload,
+                "filialId": self.filial_id,
+                "dateOfRecord": self.date_of_record,
+                "startTime": self.start_time,
+                "endTime": self.end_time,
+                "durationOfTime": self.duration_of_time,
+                "toEmployeeId": self.to_employee_id,
+                "totalPrice": self.total_price,
+            }
+            if self.color_code_record is not None:
+                payload["colorCodeRecord"] = self.color_code_record
+            if self.traffic_channel is not None:
+                payload["trafficChannel"] = self.traffic_channel
+            if self.traffic_channel_id is not None:
+                payload["trafficChannelId"] = self.traffic_channel_id
+            # Вызываем add_record
+            result = await add_record(
+                **payload,
                 api_token=self.api_token
             )
-
-            if not isinstance(result, dict):
-                logger.error(f"get_employee_schedule вернул не словарь: {type(result)} - '{str(result)[:200]}'")
-                return f"Ошибка API при получении расписания: {result}"
-
-            if result.get("code") != 200:
-                error_msg = result.get("message", "Неизвестная ошибка API")
-                logger.error(f"API расписания вернуло ошибку (код {result.get('code')}): {error_msg}")
-                return f"Не удалось получить расписание: {error_msg}"
-
-            schedule_data = result.get("data")
-            if not schedule_data or not isinstance(schedule_data, list):
-                # Пытаемся получить оригинальные имена для более информативного сообщения
-                employee_name_orig = get_name_by_id(current_tenant_id_for_resolution, 'employee', self.employee_id) if current_tenant_id_for_resolution else f"ID {self.employee_id}"
-                filial_name_orig = get_name_by_id(current_tenant_id_for_resolution, 'filial', self.filial_id) if current_tenant_id_for_resolution else f"ID {self.filial_id}"
-                logger.info(f"Данные о расписании для сотрудника '{employee_name_orig}' в филиале '{filial_name_orig}' отсутствуют или в неверном формате.")
-                return f"Расписание для сотрудника '{employee_name_orig}' в филиале '{filial_name_orig}' не найдено."
-
-            # Словарь для группировки дней по году и месяцу
-            schedule_by_month: Dict[Tuple[int, int], List[int]] = {}
-            month_names = [
-                "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-                "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
-            ]
-
-            for entry in schedule_data:
-                if not isinstance(entry, dict): continue
-                schedules_list = entry.get("schedules")
-                if not isinstance(schedules_list, list): continue
-                for schedule_item in schedules_list:
-                    if not isinstance(schedule_item, dict): continue
-                    year = schedule_item.get("year")
-                    month = schedule_item.get("month")
-                    days = schedule_item.get("days")
-                    if isinstance(year, int) and isinstance(month, int) and isinstance(days, list):
-                        month_key = (year, month)
-                        if month_key not in schedule_by_month:
-                            schedule_by_month[month_key] = []
-                        for day in days:
-                            if isinstance(day, int) and day not in schedule_by_month[month_key]:
-                                schedule_by_month[month_key].append(day)
-            
-            if not schedule_by_month:
-                employee_name_orig = get_name_by_id(current_tenant_id_for_resolution, 'employee', self.employee_id) if current_tenant_id_for_resolution else f"ID {self.employee_id}"
-                filial_name_orig = get_name_by_id(current_tenant_id_for_resolution, 'filial', self.filial_id) if current_tenant_id_for_resolution else f"ID {self.filial_id}"
-                return f"Не найдено рабочих дней в расписании для сотрудника '{employee_name_orig}' в филиале '{filial_name_orig}'."
-
-            output_lines = []
-            # Сортируем по году, затем по месяцу
-            for (year, month_num), days_list in sorted(schedule_by_month.items()):
-                month_name = month_names[month_num - 1] if 1 <= month_num <= 12 else f"Месяц {month_num}"
-                sorted_days = sorted(days_list)
-                output_lines.append(f"{month_name} {year}: {', '.join(map(str, sorted_days))}")
-            
-            employee_name_orig = get_name_by_id(current_tenant_id_for_resolution, 'employee', self.employee_id) if current_tenant_id_for_resolution else f"ID {self.employee_id}"
-            filial_name_orig = get_name_by_id(current_tenant_id_for_resolution, 'filial', self.filial_id) if current_tenant_id_for_resolution else f"ID {self.filial_id}"
-
-            return f"Сотрудник '{employee_name_orig}' доступен в филиале '{filial_name_orig}' в следующие дни:\n" + "\n".join(output_lines)
-
+            if result.get('code') == 200:
+                return "Запись успешно создана!"
+            else:
+                return f"Ошибка при создании записи: {result.get('message', 'Неизвестная ошибка')}"
         except Exception as e:
-            logger.error(f"Ошибка в GetEmployeeSchedule.process для tenant '{current_tenant_id_for_resolution}', employee_id '{self.employee_id}', filial_id '{self.filial_id}': {e}", exc_info=True)
-            return f"Ошибка при получении расписания сотрудника: {type(e).__name__} - {e}"
+            logger.error(f"Ошибка в BookAppointmentAIPayload.process: {e}", exc_info=True)
+            return f"Ошибка при создании записи (AI Payload): {type(e).__name__} - {e}"
+

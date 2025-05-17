@@ -36,7 +36,7 @@ try:
 except ImportError as e:
     logging.critical(f"Критическая ошибка: Не удалось импортировать 'redis_history'. Ошибка: {e}", exc_info=True)
     exit()
-from clinic_index import build_indexes_for_tenant, get_id_by_name # <--- ДОБАВЛЕНО get_id_by_name
+from clinic_index import build_indexes_for_tenant, get_id_by_name, get_category_id_by_service_id # <--- ДОБАВЛЕНО get_category_id_by_service_id
 import pytz
 from datetime import datetime
 import inspect # <--- ДОБАВЛЕНО
@@ -51,7 +51,7 @@ GIGA_VERIFY_SSL = os.getenv("GIGA_VERIFY_SSL", "False").lower() == "true"
 TENANT_COLLECTION_PREFIX = "tenant_" 
 try:
     chat_model = ChatOpenAI(
-        model="gpt-4.1",
+        model="o3-mini",
         max_tokens=16384, 
         api_key="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"
     )
@@ -267,12 +267,6 @@ class BookAppointmentArgs(BaseModel):
     traffic_channel: int = Field(default=0, description="Канал трафика (опционально)")
     traffic_channel_id: str = Field(default="", description="ID канала трафика (опционально)")
 
-class GetEmployeeScheduleArgs(BaseModel):
-    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
-    employee_name: str = Field(description="ФИО сотрудника (точно или частично)")
-    filial_name: str = Field(description="Название филиала (точно)")
-    api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
-
 # Pydantic модель для нового инструмента записи (AI Payload)
 class BookAppointmentAIPayloadArgs(BaseModel):
     # client_phone_number будет извлечен из конфигурации автоматически
@@ -304,6 +298,8 @@ class BookAppointmentAIPayloadArgs(BaseModel):
     traffic_channel: Optional[int] = Field(default=None, description="ID канала трафика (опционально).")
     traffic_channel_id: Optional[str] = Field(default=None, description="Строковый ID канала трафика (опционально).")
 
+from clinic_functions import BookAppointmentAIPayload
+
 TOOL_CLASSES = [
     FindEmployeesArgs,
     GetServicePriceArgs,
@@ -319,8 +315,8 @@ TOOL_CLASSES = [
     ListEmployeeFilialsArgs,
     GetFreeSlotsArgs,  # Новый класс-аргументы
     BookAppointmentArgs,  # Новый класс-аргументы
-    GetEmployeeScheduleArgs, # <--- НОВЫЙ ИНСТРУМЕНТ
     BookAppointmentAIPayloadArgs, # <--- ДОБАВЛЕН НОВЫЙ ИНСТРУМЕНТ
+    BookAppointmentAIPayload, # <--- ДОБАВЛЕНА РЕГИСТРАЦИЯ КЛАССА-ОБЁРТКИ
 ]
 logger.info(f"Определено {len(TOOL_CLASSES)} Pydantic классов для аргументов инструментов.")
 
@@ -471,56 +467,6 @@ async def book_appointment_tool(*, config=None, **kwargs_from_llm) -> str:
         error_type = getattr(e, '__class__', Exception).__name__
         return f"Ошибка при обработке запроса на запись ({error_type}): {str(e)}"
 
-async def get_employee_schedule_tool(*, config=None, **kwargs_from_llm) -> str:
-    tenant_id_from_config = kwargs_from_llm.get('tenant_id') # Этот ID нужен для get_id_by_name
-    api_token_from_config = kwargs_from_llm.get('api_token')
-
-    if not tenant_id_from_config: # Проверка остается, т.к. нужен для get_id_by_name
-        logger.error(f"tenant_id отсутствует в аргументах ({kwargs_from_llm}) для GetEmployeeSchedule.")
-        return "Критическая ошибка: ID тенанта не был предоставлен для разрешения имен."
-    
-    if not api_token_from_config: # Теперь токен критичен для API вызова
-        logger.error(f"api_token отсутствует в аргументах ({kwargs_from_llm}) для GetEmployeeSchedule.")
-        return "Критическая ошибка: API токен не был предоставлен для вызова GetEmployeeSchedule."
-
-    employee_name_from_llm = kwargs_from_llm.get('employee_name')
-    filial_name_from_llm = kwargs_from_llm.get('filial_name')
-
-    logger.info(f"[get_employee_schedule_tool] Имена от LLM: employee='{employee_name_from_llm}', filial='{filial_name_from_llm}'")
-
-    if not employee_name_from_llm or not filial_name_from_llm:
-        missing_fields = []
-        if not employee_name_from_llm: missing_fields.append('employee_name')
-        if not filial_name_from_llm: missing_fields.append('filial_name')
-        return f"Ошибка: отсутствуют обязательные поля от LLM: {', '.join(missing_fields)} для получения расписания."
-
-    logger.info(f"[get_employee_schedule_tool] Попытка получить ID для employee: '{employee_name_from_llm}'")
-    employee_id = get_id_by_name(tenant_id_from_config, 'employee', employee_name_from_llm)
-    logger.info(f"[get_employee_schedule_tool] Попытка получить ID для filial: '{filial_name_from_llm}'")
-    filial_id = get_id_by_name(tenant_id_from_config, 'filial', filial_name_from_llm)
-
-    if not employee_id:
-        return f"Не удалось найти ID для сотрудника: '{employee_name_from_llm}'"
-    if not filial_id:
-        return f"Не удалось найти ID для филиала: '{filial_name_from_llm}'"
-
-    handler_args = {
-        "tenant_id": tenant_id_from_config, # Передаем tenant_id для get_original_name в clinic_functions
-        "employee_id": employee_id,
-        "filial_id": filial_id,
-        "api_token": api_token_from_config # Это основной аутентификатор для API
-    }
-
-    try:
-        logger.debug(f"Создание экземпляра GetEmployeeSchedule с аргументами (ID): {handler_args}")
-        handler = clinic_functions.GetEmployeeSchedule(**handler_args)
-        logger.debug(f"Вызов handler.process() для GetEmployeeSchedule")
-        return await handler.process()
-    except Exception as e:
-        logger.error(f"Ошибка при создании или обработке GetEmployeeSchedule: {e}", exc_info=True)
-        error_type = getattr(e, '__class__', Exception).__name__
-        return f"Ошибка при обработке запроса на расписание сотрудника ({error_type}): {str(e)}"
-
 async def book_appointment_ai_payload_tool(*, config=None, **kwargs_from_llm) -> str:
     configurable_params = config.get("configurable", {})
     tenant_id_from_config = configurable_params.get('tenant_id')
@@ -552,39 +498,27 @@ async def book_appointment_ai_payload_tool(*, config=None, **kwargs_from_llm) ->
     processed_services_payload = []
     for service_detail_from_llm in validated_args.services_details:
         service_name_from_llm = service_detail_from_llm.get('serviceName')
-        category_name_from_llm = service_detail_from_llm.get('categoryName')
         count_service = service_detail_from_llm.get('countService')
         row_number = service_detail_from_llm.get('rowNumber')
         complex_service_id = service_detail_from_llm.get('complexServiceId')
 
         if not service_name_from_llm:
             return f"Ошибка: в одном из объектов services_details отсутствует 'serviceName'. Детали: {service_detail_from_llm}"
-        if not category_name_from_llm:
-            return f"Ошибка: в одном из объектов services_details отсутствует 'categoryName' (необходимо для parentId). Детали: {service_detail_from_llm}"
-            # Если categoryName не предоставлен, можно решить, что делать: 
-            # 1. Вернуть ошибку (как сейчас)
-            # 2. Попытаться получить parentId как-то иначе (например, если услуга уже имеет parentId)
-            # 3. Пропустить parentId (если API это позволяет, но payload примера его требует)
-            return f"Ошибка: в одном из объектов services_details отсутствует 'categoryName' (необходимо для parentId). Детали: {service_detail_from_llm}"
         
         service_id = get_id_by_name(tenant_id_from_config, 'service', service_name_from_llm)
-        parent_id_for_service = get_id_by_name(tenant_id_from_config, 'category', category_name_from_llm) # Категория услуги становится ее parentId
+        parent_id_for_service = get_category_id_by_service_id(tenant_id_from_config, service_id)
 
         if not service_id:
             return f"Не удалось найти ID для услуги: '{service_name_from_llm}' в {tenant_id_from_config}"
         if not parent_id_for_service:
-            # Можно также разрешить parentId: null или пустую строку, если API это поддерживает
-            # Сейчас требуем, чтобы категория была найдена
-            return f"Не удалось найти ID для категории (parentId) '{category_name_from_llm}' для услуги '{service_name_from_llm}' в {tenant_id_from_config}"
+            return f"Не удалось найти categoryId (parentId) для услуги '{service_name_from_llm}' (serviceId: {service_id}) в {tenant_id_from_config}"
         
         current_service_for_payload = service_detail_from_llm.copy()
         current_service_for_payload['serviceId'] = service_id
         current_service_for_payload['parentId'] = parent_id_for_service # Устанавливаем parentId
-        
         # Удаляем исходные имена, если они там были и больше не нужны в таком виде
         if 'serviceName' in current_service_for_payload: del current_service_for_payload['serviceName'] 
         if 'categoryName' in current_service_for_payload: del current_service_for_payload['categoryName']
-        
         processed_services_payload.append(current_service_for_payload)
 
     # Аргументы для вызова BookAppointmentAIPayload из clinic_functions
@@ -602,8 +536,8 @@ async def book_appointment_ai_payload_tool(*, config=None, **kwargs_from_llm) ->
         "total_price": validated_args.total_price,
         "api_token": api_token_from_config, # tenant_id не передается сюда, т.к. BookAppointmentAIPayload его не ожидает
         "color_code_record": validated_args.color_code_record,
-        "traffic_channel": validated_args.traffic_channel,
-        "traffic_channel_id": validated_args.traffic_channel_id
+        "traffic_channel": 0, # <--- ЖЁСТКО ЗАДАНО
+        "traffic_channel_id": "9", # <--- ЖЁСТКО ЗАДАНО
     }
 
     try:
@@ -632,128 +566,64 @@ TOOL_FUNCTIONS = [
     list_employee_filials_tool,
     get_free_slots_tool, 
     book_appointment_tool,  
-    get_employee_schedule_tool, # <--- НОВЫЙ ИНСТРУМЕНТ
     book_appointment_ai_payload_tool, # <--- ДОБАВЛЕН НОВЫЙ ИНСТРУМЕНТ
 ]
 logger.info(f"Определено {len(TOOL_FUNCTIONS)} функций-инструментов для динамической привязки.")
-SYSTEM_PROMPT = """Ты - вежливый, ОЧЕНЬ ВНИМАТЕЛЬНЫЙ и информативный ИИ-ассистент.
-Твоя главная задача - помогать пользователям, отвечая на их вопросы об услугах, ценах, специалистах и филиалах , И ПОДДЕРЖИВАТЬ ЕСТЕСТВЕННЫЙ ДИАЛОГ.
-ИСПОЛЬЗУЙ RAG ПОИСК ТОЛЬКО ДЛЯ ОПИСАНИЙ УСЛУГ И СПЕЦИАЛИСТОВ, А НЕ ДЛЯ КОНКРЕТНЫХ ДАННЫХ (ЦЕНЫ, СПИСКИ СОТРУДНИКОВ, ФИЛИАЛОВ И Т.Д.). СТАРАЙСЯ ВСЕ РЕШАТЬ ЧЕРЕЗ ВЫЗОВ ФУНКЦИЙ (ИНСТРУМЕНТОВ).
+SYSTEM_PROMPT = """
+Ты — вежливый и информативный ассистент клиники.
 
-КЛЮЧЕВЫЕ ПРАВИЛА РАБОТЫ:
+Главные правила:
+- Для описаний услуг, специалистов, общих справок о клинике — используй RAG-поиск.
+- Для всех конкретных данных (цены, списки, расписания, наличие, сравнения, фильтрация) — всегда вызывай соответствующую функцию (инструмент). Не пытайся отвечать на такие вопросы из RAG или памяти.
+- Если не хватает параметров для функции — вежливо уточни у пользователя.
+- Не выдумывай данные и не сокращай списки, возвращай их полностью как выдала функция.
+- Не давай медицинских советов, только информируй.
 
-АНАЛИЗ ИСТОРИИ И ВЫБОР ДЕЙСТВИЯ:
-- Внимательно проанализируй ПОЛНУЮ ИСТОРИЮ ДИАЛОГА (chat_history).
-- ИСПОЛЬЗУЙ КОНТЕКСТ ИСТОРИИ! Не переспрашивай.
-- ЗАПОМИНАЙ ИМЯ ПОЛЬЗОВАТЕЛЯ, если он представился.
-Всегда используй функции для уточнения информации кроме случаяв когда клиент просит что-то посветовать или рассказать о чем-то
+**ВАЖНО: Процесс записи на услугу**
+1. Сначала всегда вызывай функцию получения свободных слотов (окон) сотрудника по услуге и филиалу (get_free_slots_tool).
+2. Покажи пользователю доступные времена для записи (start_time).
+3. После выбора времени — вызывай функцию записи (book_appointment_ai_payload_tool),
+   где:
+   - duration_of_time всегда равен 60 (жёстко задано).
+   - end_time = start_time + duration_of_time (вычисляй автоматически, start_time — это выбранное время из слотов).
+   - services_details: ОБЯЗАТЕЛЬНЫЙ список объектов, каждый из которых описывает одну услугу для записи. В каждом объекте должны быть поля 'rowNumber' (int, порядковый номер), 'serviceName' (ТОЧНОЕ название услуги, str), 'categoryName' (ТОЧНОЕ название категории, str) и 'countService' (int, количество, обычно 1).
+     Пример структуры для services_details (список): [
+       { "rowNumber": 1, "serviceName": "Ультразвуковая чистка лица", "categoryName": "Косметология", "countService": 1 }
+     ] 
+4. Не проси пользователя вводить телефон — он подставляется автоматически.
 
-ПЕРСОНАЛИЗАЦИЯ НА ОСНОВЕ РЕЗЮМЕ ПРЕДПОЧТЕНИЙ КЛИЕНТА:
-- Если в истории диалога или в информации, добавленной к текущему запросу пользователя, присутствует блок "Резюме предпочтений клиента:", ОБЯЗАТЕЛЬНО используй эту информацию для персонализации общения.
-- Это резюме может содержать:
-    - Имя клиента (если он был идентифицирован).
-    - Краткую историю последних записей.
-    - Информацию о часто используемых услугах.
-    - Информацию о часто посещаемых специалистах (с пометкой "[часто]", если визитов много).
-    - Информацию о всех посещенных филиалах с указанием количества визитов (отсортированы по частоте).
-- Как использовать эту информацию:
-    - Если есть имя клиента, обращайся к нему по имени (например, "Здравствуйте, Анна!").
-    - Если есть информация о частых услугах или специалистах, ты можешь тактично упомянуть это и предложить, например, повторную запись:
-        - "Анна, я вижу, вы часто пользуетесь услугой 'Название Услуги' (X раз(а)). Не хотели бы записаться на нее снова?"
-        - "Заметил(а), что вы часто посещаете специалиста 'Имя Специалиста' (Y раз(а)). Могу предложить вам доступное время для записи к нему."
-    - Если есть информация о предпочтительном филиале, учитывай это при предложениях или ответах на вопросы о доступности услуг/специалистов.
-    - Если в резюме указано несколько посещенных филиалов, ты можешь уточнить у клиента, какой из них для него наиболее удобен или актуален для текущего запроса. Например: "Вижу, вы посещали филиалы X (3 раза) и Y (2 раза). Какой из них вас интересует сейчас?"
-    - Не повторяй дословно всю информацию из резюме. Используй ее для того, чтобы сделать диалог более естественным и релевантным для клиента.
-    - Если клиент задает вопрос, который можно связать с его предпочтениями (например, "посоветуйте процедуру"), его прошлые услуги могут быть хорошей отправной точкой для рекомендации.
+Примеры:
+- "Сколько стоит услуга?" — вызови функцию цены.
+- "Какие услуги делает Иванова?" — вызови функцию списка услуг сотрудника.
+- "Расскажи о процедуре X" — используй RAG.
+- "Записать на услугу" — сначала покажи окна, потом предложи выбрать время, только потом делай запись.
 
-ПРИВЕТСТВИЕ И ИНФОРМАЦИЯ:
-- Если ты получаешь информацию о предыдущих записях клиента (блок "Предыдущие записи клиента...") ИЛИ "Резюме предпочтений клиента", И это начало диалога (например, первое сообщение от пользователя или история чата пуста/короткая), начни свой ПЕРВЫЙ ответ с краткого и дружелюбного упоминания этой информации.
-- Например: "Здравствуйте, [Имя клиента, если известно]! Вижу у вас есть недавние записи: [кратко 1-2 последние записи]. Чем могу помочь сегодня?"
-- Или, если есть только резюме: "Приветствую! Заметил, вы часто пользуетесь [услуга] и посещаете [специалист/филиал]. Что вас интересует сегодня?"
-- СДЕЛАЙ ЭТО ТОЛЬКО ОДИН РАЗ В НАЧАЛЕ ДИАЛОГА. В последующих сообщениях отвечай на вопросы пользователя как обычно.
-- Если информации о клиенте или его записях нет, просто начни диалог стандартным приветствием.
+RAG-поиск — только для:
+- Описаний услуг, специалистов, компании.
+- Общих вопросов ("что это?", "расскажите о...").
 
-ВЫБОР МЕЖДУ RAG, FUNCTION CALLING, ПАМЯТЬЮ ДИАЛОГА ИЛИ ПРЯМЫМ ОТВЕТОМ:
-- ПАМЯТЬ ДИАЛОГА: Для ответов на вопросы, связанные с предыдущим контекстом (местоимения "он/она/это", короткие вопросы "где?", "цена?", "кто?") , и для вопросов о самом пользователе.
-- RAG (Поиск по базе знаний): Используй ТОЛЬКО для ЗАПРОСОВ **ОПИСАНИЯ** услуг, врачей ИЛИ **ОБЩЕЙ ИНФОРМАЦИИ О КЛИНИКЕ** (например, "расскажи о компании", "какой у вас подход?", "сколько филиалов?"). Я предоставлю контекст. Синтезируй ответ на его основе.
-    - **НОВИНКА: Информация о показаниях и противопоказаниях**: Для некоторых услуг в RAG-контексте теперь может содержаться информация о ПОКАЗАНИЯХ и ПРОТИВОПОКАЗАНИЯХ.
-        - Если пользователь спрашивает общее описание услуги, ты можешь кратко упомянуть о наличии таких деталей (например, "...также у процедуры есть свои показания и противопоказания.") и предложить рассказать подробнее, если ему интересно.
-        - Если пользователь ЦЕЛЕНАПРАВЛЕННО спрашивает о показаниях или противопоказаниях к услуге, используй информацию из RAG-контекста для ответа.
-        - **ВАЖНО: НЕ ДАВАЙ МЕДИЦИНСКИХ СОВЕТОВ!** Не говори "вам это подойдет" или "вам это нельзя". Формулируй нейтрально: "Среди показаний к [Услуга] указываются...", "Противопоказаниями являются...". Всегда подчеркивай, что окончательное решение принимает врач.
-- FUNCTION CALLING (Вызов Инструментов): Используй ТОЛЬКО для запросов КОНКРЕТНЫХ ДАННЫХ: цены, списки врачей/услуг/филиалов, проверка наличия, сравнение цен, ПОЛНЫЙ список филиалов сотрудника. Используй правильный инструмент.
-- ПРЯМОЙ ОТВЕТ: Для приветствий, прощаний, простых уточнений или вопросов не по теме.
+Функции — для:
+- Цен, списков, расписаний, наличия, сравнения, фильтрации, поиска по критериям.
 
-ПРАВИЛА FUNCTION CALLING:
-- **Приоритет над RAG для списков и конкретных данных:** Если запрос касается получения СПИСКА (услуг сотрудника, филиалов сотрудника, цен, списка сотрудников по критерию и т.д.) или КОНКРЕТНЫХ ДАННЫХ, ВЫЗОВ СООТВЕТСТВУЮЩЕГО ИНСТРУМЕНТА ЯВЛЯЕТСЯ ОБЯЗАТЕЛЬНЫМ, ДАЖЕ ЕСЛИ RAG-КОНТЕКСТ СОДЕРЖИТ ПОХОЖУЮ ИНФОРМАЦИЮ. Это гарантирует использование актуальных данных и форматирования из инструмента.
-- **Обязательность вызова для списков:** Если пользователь спрашивает список (услуг, врачей, филиалов, категорий) или просит найти что-то по критериям, ТЫ ОБЯЗАН ВЫЗВАТЬ СООТВЕТСТВУЮЩИЙ ИНСТРУМЕНТ. Особенно:
-    - Для вопроса о ВСЕХ филиалах сотрудника ('где еще работает?', 'в каких филиалах?') -> ОБЯЗАТЕЛЬНО вызывай `list_employee_filials_tool`.
-    - Для вопроса о ВСЕХ услугах сотрудника (например, "какие услуги выполняет ХХХ?", "чем занимается YYY?") -> ОБЯЗАТЕЛЬНО вызывай `get_employee_services_tool`. Даже если RAG-контекст содержит упоминания или частичный список услуг этого сотрудника (например, в его общем описании), для получения ПОЛНОГО и ТОЧНОГО списка услуг используй ИСКЛЮЧИТЕЛЬНО этот инструмент.
-    - Для вопроса о ЦЕНЕ КОНКРЕТНОЙ услуги -> ОБЯЗАТЕЛЬНО вызывай `get_service_price_tool`.
-    - **Для вопроса о СПЕЦИАЛИСТАХ в КОНКРЕТНОМ ФИЛИАЛЕ (например, "кто работает в X?", "какие врачи есть в Y?") -> ОБЯЗАТЕЛЬНО вызывай `find_employees_tool` ТОЛЬКО с параметром `filial_name`.**
-    - **Для запроса РАБОЧИХ ДНЕЙ КОНКРЕТНОГО СОТРУДНИКА В КОНКРЕТНОМ ФИЛИАЛЕ (например, "когда работает ХХХ в филиале YYY?", "по каким дням принимает ZZZ в AAA?") -> ОБЯЗАТЕЛЬНО вызывай `get_employee_schedule_tool`.**
-- Точность Параметров: Извлекай параметры ТОЧНО из запроса и ИСТОРИИ.
-- Не Выдумывай Параметры: Если обязательного параметра нет, НЕ ВЫЗЫВАЙ функцию, а вежливо попроси уточнить.
-    - **ОСОБЕННО ВАЖНО для `find_specialists_by_service_or_category_and_filial_tool`**: Этот инструмент ТРЕБУЕТ указания `filial_name`. Если пользователь спрашивает, например, "Кто делает [Услуга/Категория]?" и НЕ УКАЗЫВАЕТ ФИЛИАЛ (и его нет в недавней истории диалога), ТЫ ОБЯЗАН СНАЧАЛА УТОЧНИТЬ у пользователя: "В каком филиале вас интересуют специалисты по [Услуга/Категория]?" и только ПОСЛЕ ПОЛУЧЕНИЯ ответа на этот вопрос вызывать инструмент с указанным филиалом.
-    - **УТОЧНЕНИЕ ДАТЫ ПЕРЕД ПОИСКОМ СЛОТОВ:** Если пользователь просит записаться или узнать свободные слоты, но НЕ УКАЗЫВАЕТ КОНКРЕТНУЮ ДАТУ (или диапазон дат), ТЫ ОБЯЗАН СНАЧАЛА использовать инструмент `get_employee_schedule_tool` для получения общих рабочих дней сотрудника в указанном филиале. Затем, покажи эти рабочие дни пользователю и уточни, на какую из этих дат он хотел бы посмотреть свободные слоты. Только ПОСЛЕ получения от пользователя КОНКРЕТНОЙ ДАТЫ из его расписания, используй инструмент `get_free_slots_tool` с этой датой. НЕ ПРЕДПОЛАГАЙ ДАТУ самостоятельно для `get_free_slots_tool`, если пользователь ее явно не назвал.
-- **Если результат вызова функции содержит информацию о страницах (например, "Показаны 1-15 из 100. Страница 1 из 7."), ОБЯЗАТЕЛЬНО СООБЩИ пользователю об общем количестве и спроси, хочет ли он увидеть следующую страницу.**
-    - **Если пользователь ПОСЛЕ получения пагинированного ответа (например, ответа, содержащего "Страница X из Y") пишет что-то вроде "дальше", "следующая", "еще", "давай", "продолжай", "покажи остальных" и т.п., это означает запрос на СЛЕДУЮЩУЮ СТРАНИЦУ того же списка.**
-        - **Твои действия в этом случае:**
-            1. **Идентифицируй ТОЧНО ТУ ЖЕ ФУНКЦИЮ (инструмент), которая вернула этот пагинированный список.**
-            2. **Вспомни (или найди в истории диалога в твоем предыдущем сообщении AIMessage с tool_calls) ВСЕ АРГУМЕНТЫ, которые ты использовал для вызова этой функции в прошлый раз (кроме `page_number`).**
-            3. **Определи ТЕКУЩИЙ НОМЕР СТРАНИЦЫ (X) из ответа функции (например, из "Страница X из Y").**
-            4. **Вызови эту ЖЕ ФУНКЦИЮ СНОВА, используя ВСЕ ТЕ ЖЕ САМЫЕ АРГУМЕНТЫ, что и в прошлый раз, НО установи `page_number` равным X + 1.**
-            5. **НЕ ПЫТАЙСЯ выполнить RAG-поиск, НЕ вызывай другую функцию, и НЕ меняй другие аргументы функции.** Твоя единственная задача - показать следующую страницу того же списка.
-    - Если ты ожидаешь, что список будет длинным, можешь сразу вызвать функцию с `page_number=1` и стандартным `page_size`, а затем сообщить пользователю об общем количестве найденных элементов и страниц.
-- ОБРАБОТКА НЕУДАЧНЫХ ВЫЗОВОВ: Если инструмент вернул ошибку или 'не найдено', НЕ ПЫТАЙСЯ вызвать его с теми же аргументами. Сообщи пользователю или предложи альтернативу.
-- Интерпретация Результатов: Представляй результаты функций в понятной, человеческой форме. **ВАЖНО: Если функция вернула список (например, услуг, врачей, филиалов с пагинацией), ты ДОЛЖЕН показать этот список ПОЛНОСТЬЮ, как он был возвращен функцией, включая всю информацию о страницах. НЕ СОКРАЩАЙ и НЕ СУММИРУЙ такие списки.**
+Если не уверен — выбери функцию.
 
-ОБЩИЕ ПРАВИЛА:
-- Точность: НЕ ПРИДУМЫВАЙ.
-- Краткость и Ясность.
-- Вежливость.
-- Медицинские Советы: НЕ ДАВАЙ. Напоминай, что консультация со специалистом необходима.
+---
 
-ВАЖНО: Всегда сначала анализируй историю и цель пользователя. Реши, нужен ли ответ из памяти, RAG, вызов функции или простой ответ. Действуй соответственно.
+Приветствие и персонализация:
+- Если есть имя клиента или история — используй их для персонализации, но не повторяй всю историю.
+- В начале диалога кратко упомяни недавние записи или предпочтения, если они есть.
 
-ПРОЦЕСС ЗАПИСИ НА ПРИЕМ (БУКИРОВАНИЕ):
-1.  Убедись, что у тебя есть ВСЯ необходимая информация от пользователя или из истории:
-    *   Номер телефона клиента (`client_phone_number`). Если его нет, ОБЯЗАТЕЛЬНО спроси.
-    *   Конкретная(ые) услуга(и) (`serviceName` для каждой).
-    *   Категория для каждой услуги (`categoryName`). Эту информацию ты часто можешь получить из ответа инструмента `get_service_price_tool`.
-    *   ФИО сотрудника (`employee_name`).
-    *   Название филиала (`filial_name`).
-    *   Дата записи (`date_of_record`).
-    *   Время начала (`start_time`).
-2.  После того как пользователь подтвердил дату и время (например, выбрав из списка свободных слотов, полученных через `get_free_slots_tool`):
-    *   Если цена или длительность услуги еще не известны или не подтверждены, используй `get_service_price_tool` для их получения. Ответ этого инструмента также может содержать `categoryName` и `durationService` для услуги.
-    *   Рассчитай ОБЩУЮ длительность (`duration_of_time`) и ОБЩУЮ цену (`total_price`) для всей записи (особенно если услуг несколько). Для одной услуги это будут ее длительность и цена.
-    *   Рассчитай время окончания (`end_time`) на основе `start_time` и `duration_of_time`.
-3.  **Формирование `services_details` и вызов инструмента:**
-    a.  **СНАЧАЛА**: На основе информации, собранной на шаге 1 (особенно `serviceName` и `categoryName` для каждой услуги), ТЫ ОБЯЗАН СФОРМИРОВАТЬ поле `services_details`.
-        *   `services_details` ДОЛЖНО БЫТЬ СПИСКОМ словарей. Каждый словарь представляет одну услугу.
-        *   Для КАЖДОЙ услуги в списке `services_details` укажи:
-            *   `serviceName` (ТОЧНОЕ название услуги).
-            *   `categoryName` (ТОЧНОЕ название КАТЕГОРИИ).
-            *   `countService` (int, обычно 1).
-            *   `rowNumber` (int, порядковый номер услуги в записи, начиная с 1).
-            *   `complexServiceId` (Optional[str], если применимо, иначе `null` или не передавай).
-        *   Пример ОДНОЙ услуги в `services_details`: `[{ "rowNumber": 1, "serviceName": "Soprano Пальцы для женщин", "categoryName": "Soprano", "countService": 1, "complexServiceId": null }]`
-        *   Если услуг несколько, добавь соответствующие словари в список `services_details`.
-        *   Помни: `serviceId`, `parentId`, индивидуальные `price`, `salePrice`, `durationService` для каждой услуги будут добавлены автоматически системой позже, тебе нужно предоставить только указанные выше поля (`serviceName`, `categoryName` и т.д.) для каждой услуги в `services_details`.
-    b.  **ЗАТЕМ**: Собери все остальные данные, включая ТОЛЬКО ЧТО СФОРМИРОВАННЫЙ список `services_details`, и вызови инструмент `book_appointment_ai_payload_tool`.
-        *   Убедись, что ты передаешь:
-            *   `services_details` (сформированный тобой список).
-            *   `filial_name`
-            *   `date_of_record`
-            *   `start_time`
-            *   `end_time`
-            *   `duration_of_time` (общую)
-            *   `employee_name`
-            *   `total_price` (общую)
-            *   Опционально: `lang_id`, `color_code_record`, `traffic_channel`, `traffic_channel_id`.
-        *   Номер телефона клиента (`client_phone_number`), ID тенанта (`tenant_id`) и API токен (`api_token`) будут добавлены автоматически системой.
-    c.  **ВАЖНО**: Если на шаге 3.a ты не смог сформировать `services_details` (например, не хватает `serviceName` или `categoryName` для какой-либо из услуг), НЕ ПЕРЕХОДИ к шагу 3.b. Вместо этого, вернись к шагу 4.
-4.  Если чего-то не хватает для вызова `book_appointment_ai_payload_tool` (из того, что ТЫ должен предоставить, ОСОБЕННО `serviceName` и `categoryName` для КАЖДОЙ услуги в `services_details` для формирования поля `services_details`), ВЕЖЛИВО УТОЧНИ у пользователя недостающую информацию ПЕРЕД вызовом инструмента.
+---
+
+Важное:
+- Не придумывай параметры, если их нет — уточни у пользователя.
+- Не используй RAG для конкретных данных.
+- Не сокращай списки из функций.
+- Не давай медицинских советов.
+
+---
+
+Если вопрос не требует функции или RAG — просто ответь вежливо.
 """
 class TenantAwareRedisChatMessageHistory(BaseChatMessageHistory):
     """Хранилище истории сообщений в Redis с учетом tenant_id."""
@@ -1009,9 +879,6 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         elif tool_name == "book_appointment_tool":
             current_args_schema = BookAppointmentArgs
             func_for_tool = tool_function # Используется прямая функция из matrixai.py
-        elif tool_name == "get_employee_schedule_tool": # <--- НОВЫЙ ИНСТРУМЕНТ
-            current_args_schema = GetEmployeeScheduleArgs
-            func_for_tool = tool_function # Используется прямая функция из matrixai.py
         elif tool_name == "book_appointment_ai_payload_tool": # <--- ДОБАВЛЕНА ОБРАБОТКА НОВОГО ИНСТРУМЕНТА
             current_args_schema = BookAppointmentAIPayloadArgs
             func_for_tool = tool_function # Используется прямая функция из matrixai.py
@@ -1071,55 +938,45 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
                   if found_tool:
                       try:
                           current_tool_args_for_invoke = tool_args
-
                           expects_args = True
                           if not found_tool.args_schema or not found_tool.args_schema.model_fields:
                               expects_args = False
-
                           if not expects_args:
-                              if tool_args is not None and tool_args != {}: # Логируем, если LLM прислал что-то для инструмента без аргументов
+                              if tool_args is not None and tool_args != {}:
                                   logger.info(f"Инструмент {tool_name} не ожидает аргументов, но LLM передал: {tool_args}. Используем {{}}.")
                               current_tool_args_for_invoke = {}
                           elif isinstance(tool_args, dict) and tool_args.get('args') is None and len(tool_args) == 1 and expects_args:
-                              # Этот случай (LLM вернул {'args': None} для инструмента, ожидающего аргументы) приведет к ошибке Pydantic.
-                              # Оставляем current_tool_args_for_invoke как есть ({'args': None}), чтобы Pydantic обработал.
                               logger.warning(f"LLM передал {{'args': None}} для инструмента {tool_name}, который ожидает аргументы. Pydantic, вероятно, выдаст ошибку.")
-                          # В остальных случаях (expects_args is True и tool_args это корректный словарь или None, который Pydantic обработает)
-                          # current_tool_args_for_invoke остается равным tool_args.
-
-                          # --- Начало модификации для get_free_slots_tool, book_appointment_tool, get_employee_schedule_tool ---
+                          # --- Модификация для get_free_slots_tool, book_appointment_tool, get_employee_schedule_tool ---
                           if tool_name in ["get_free_slots_tool", "book_appointment_tool", "get_employee_schedule_tool"]:
-                              if not isinstance(current_tool_args_for_invoke, dict):
-                                  logger.error(f"Ожидался dict для tool_args у {tool_name}, получено: {type(current_tool_args_for_invoke)}. Формирование вызова невозможно.")
-                                  raise ValueError(f"Аргументы для {tool_name} должны быть словарем, получено {type(current_tool_args_for_invoke)}")
-
                               current_tenant_id = configurable.get("tenant_id")
                               current_client_api_token = configurable.get("client_api_token")
-
                               if not current_tenant_id:
                                   logger.error(f"Критическая ошибка: tenant_id не найден в 'configurable' ({configurable}) при попытке подготовить вызов {tool_name}.")
                                   raise ValueError(f"tenant_id отсутствует в конфигурации для обязательного использования в инструменте {tool_name}")
-                              
                               current_tool_args_for_invoke['tenant_id'] = current_tenant_id
                               if current_client_api_token:
                                   current_tool_args_for_invoke['api_token'] = current_client_api_token
                               elif 'api_token' not in current_tool_args_for_invoke:
                                    current_tool_args_for_invoke['api_token'] = None
-                              
                               logger.info(f"Обновленные аргументы для '{tool_name}' после добавления tenant_id/api_token: {current_tool_args_for_invoke}")
                           # --- Конец модификации ---
-
-                          raw_output = await found_tool.ainvoke(current_tool_args_for_invoke, config=config) # Используем current_tool_args_for_invoke
-                          
+                          raw_output = await found_tool.ainvoke(current_tool_args_for_invoke, config=config)
                           if inspect.iscoroutine(raw_output):
                               logger.warning(f"Инструмент '{tool_name}' .ainvoke вернул короутину. Ожидаем ее явно.")
                               output = await raw_output
                           else:
                               output = raw_output
-                              
                           output_str = str(output)
                           tool_outputs.append(ToolMessage(content=output_str, tool_call_id=tool_call["id"]))
                           logger.info(f"Результат вызова инструмента '{tool_name}': {output_str[:100]}...")
+                          # --- Контекстный триггер: если был вызван get_service_price_tool и есть все параметры, инициировать запись ---
+                          if tool_name == 'get_service_price_tool' and should_auto_book_after_price(history_messages, tool_call):
+                              logger.info("Контекстный триггер: после получения цены автоматически инициируем запись!")
+                              # Здесь можно инициировать вызов book_appointment_ai_payload_tool с нужными параметрами
+                              # (реализация зависит от структуры истории и доступных данных)
+                              # Можно вызвать функцию или добавить ToolMessage для book_appointment_ai_payload_tool
+                              # ...
                       except Exception as e:
                            error_message = f"Ошибка при вызове инструмента '{tool_name}': {type(e).__name__} - {str(e)}"
                            logger.error(f"Ошибка вызова инструмента '{tool_name}' с аргументами {current_tool_args_for_invoke}: {e}", exc_info=True)
