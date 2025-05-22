@@ -68,6 +68,8 @@ class FindEmployees(BaseModel):
     employee_name: Optional[str] = Field(default=None, description="Часть или полное ФИО сотрудника")
     service_name: Optional[str] = Field(default=None, description="Точное или частичное название услуги")
     filial_name: Optional[str] = Field(default=None, description="Точное название филиала")
+    page_number: int = Field(default=1, description="Номер страницы результатов")
+    page_size: int = Field(default=10, description="Количество результатов на странице")
 
     def process(self) -> str:
         if not _clinic_data: return "Ошибка: База данных клиники пуста."
@@ -86,21 +88,23 @@ class FindEmployees(BaseModel):
                 return f"Филиал с названием, похожим на '{self.filial_name}', не найден."
             logger.info(f"Найден ID филиала '{target_filial_id}' для имени '{self.filial_name}'.")
 
+        # Нормализуем запросы для поиска
+        norm_emp_name = normalize_text(self.employee_name, keep_spaces=True) if self.employee_name else ""
+        norm_service_name = normalize_text(self.service_name, keep_spaces=True) if self.service_name else ""
+
         filtered_data = []
         for item in _clinic_data:
             item_emp_name_raw = item.get('employeeFullName')
             item_service_name_raw = item.get('serviceName')
-            # item_filial_name_raw = item.get('filialName') # Не нужен для прямого сравнения
+
             item_filial_id_raw = item.get('filialId')
 
-            norm_item_emp = normalize_text(item_emp_name_raw, keep_spaces=True)
-            norm_item_service = normalize_text(item_service_name_raw, keep_spaces=True)
-            # norm_item_filial = normalize_text(item_filial_name_raw) # Не нужен
+            norm_item_emp = normalize_text(item_emp_name_raw, keep_spaces=True) if item_emp_name_raw else ""
+            norm_item_service = normalize_text(item_service_name_raw, keep_spaces=True) if item_service_name_raw else ""
+
 
             emp_match = (not norm_emp_name or (norm_item_emp and norm_emp_name in norm_item_emp))
             
-            # filial_match = (not norm_filial_name or (norm_item_filial and norm_filial_name == norm_item_filial)) # Старая логика
-            # Новая логика для filial_match:
             if target_filial_id: # Если искали конкретный филиал
                 filial_match = (item_filial_id_raw == target_filial_id)
             else: # Если филиал не был указан, то совпадение по филиалу всегда True
@@ -150,7 +154,12 @@ class FindEmployees(BaseModel):
         count = 0
         found_count = 0
         # Сортируем по нормализованному имени для консистентности
-        sorted_employees = sorted(employees_info.values(), key=lambda x: normalize_text(x.get('name'), keep_spaces=True))
+        sorted_employees = sorted(employees_info.items(), key=lambda x: normalize_text(x[1].get('name', ''), keep_spaces=True))
+        
+        # Применяем пагинацию к отсортированному списку ID сотрудников
+        start_idx = (self.page_number - 1) * self.page_size
+        end_idx = start_idx + self.page_size
+        paginated_employee_ids = [emp_id for emp_id, _ in sorted_employees[start_idx:end_idx]]
 
         for emp_id in paginated_employee_ids:
             emp_data = employees_info[emp_id]
@@ -158,18 +167,12 @@ class FindEmployees(BaseModel):
             if not name: continue
 
             # Получаем и сортируем оригинальные имена услуг и филиалов
-            services = sorted(list(emp.get('services', set())), key=lambda s: normalize_text(s, keep_spaces=True))
-            filials = sorted(list(emp.get('filials', set())), key=normalize_text)
+            services = sorted(list(emp_data.get('services', set())), key=lambda s: normalize_text(s, keep_spaces=True))
+            filials = sorted(list(emp_data.get('filials', set())), key=normalize_text)
 
             # Пропускаем, если обязательные фильтры не дали результатов для этого сотрудника
             if norm_service_name and not services: continue
             if target_filial_id and not filials: # Если искали филиал и его нет у сотрудника после всех фильтров
-                 # Это условие может быть избыточным, так как filtered_data уже должно содержать только нужный филиал
-                 # Однако, если сотрудник мог быть в filtered_data по другим причинам, но его филиал не тот, что искали - пропускаем.
-                 # Но лучше убедиться, что filials содержит ТОЛЬКО target_filial_id (или пусто, если не совпало)
-                 # На самом деле, если target_filial_id есть, то в filials должен быть только ОДИН филиал (или ни одного).
-                 # employees_info[e_id]['filials'].add(f_name) уже учитывает это.
-                 # Поэтому, если target_filial_id задан, а filials пуст, значит, сотрудник не работает в этом филиале по данным.
                 continue
 
             found_count += 1
@@ -601,35 +604,56 @@ class GetServicePrice(BaseModel):
         target_filial_name = self.filial_name
         display_filial_name = target_filial_name
         
-        # Ищем филиал напрямую по названию (без ID)
+        # Ищем филиал по имени, используя функцию get_id_by_name
+        filial_id = None
         if target_filial_name:
-            normalized_filial_query = normalize_text(target_filial_name, keep_spaces=True).lower()
-            filial_found = False
-            
-            for item in _clinic_data:
-                filial_name = item.get("filialName")
-                if not filial_name:
-                    continue
+            # Используем системную функцию, которая правильно нормализует название
+            if _tenant_id_for_clinic_data:
+                filial_id = get_id_by_name(_tenant_id_for_clinic_data, 'filial', target_filial_name)
                 
-                normalized_filial_name = normalize_text(filial_name, keep_spaces=True).lower()
+            if filial_id:
+                logger.info(f"[GetServicePrice] Найден филиал '{target_filial_name}' с ID '{filial_id}'")
+                # Получаем точное имя филиала из индекса для отображения
+                exact_filial_name = get_name_by_id(_tenant_id_for_clinic_data, 'filial', filial_id)
+                if exact_filial_name:
+                    display_filial_name = exact_filial_name
+            else:
+                # Если не нашли через индекс, пробуем старый способ прямого поиска по названию
+                normalized_filial_query = normalize_text(target_filial_name, keep_spaces=True).lower()
+                filial_found = False
                 
-                if normalized_filial_name == normalized_filial_query or normalized_filial_query in normalized_filial_name:
-                    filial_found = True
-                    display_filial_name = filial_name
-                    break
+                for item in _clinic_data:
+                    filial_name = item.get("filialName")
+                    if not filial_name:
+                        continue
                     
-            if not filial_found:
-                logger.warning(f"[GetServicePrice] Филиал '{self.filial_name}' не найден при поиске цены на '{self.service_name}'")
-                return f"Филиал с названием, похожим на '{self.filial_name}', не найден при поиске цены на '{display_service_name}'."
+                    normalized_filial_name = normalize_text(filial_name, keep_spaces=True).lower()
+                    
+                    if normalized_filial_name == normalized_filial_query or normalized_filial_query in normalized_filial_name:
+                        filial_found = True
+                        display_filial_name = filial_name
+                        # Запомним ID филиала для дальнейшего сравнения
+                        filial_id = item.get("filialId")
+                        break
+                        
+                if not filial_found:
+                    logger.warning(f"[GetServicePrice] Филиал '{self.filial_name}' не найден при поиске цены на '{self.service_name}'")
+                    return f"Филиал с названием, похожим на '{self.filial_name}', не найден при поиске цены на '{display_service_name}'."
                 
             logger.info(f"[GetServicePrice] Найден филиал '{display_filial_name}'")
         
         # Собираем цены для найденных услуг
         candidate_prices = []
+        logger.info(f"[GetServicePrice] Начинаем поиск цен для {len(filtered_services)} услуг" + 
+                   (f" в филиале '{display_filial_name}' (ID: {filial_id})" if filial_id else ""))
+        
         for item in filtered_services:
             service_name = item.get('serviceName')
             price_raw = item.get('price')
             item_filial_name = item.get('filialName')
+            item_filial_id = item.get('filialId')
+            
+            logger.debug(f"[GetServicePrice] Проверяем услугу '{service_name}' в филиале '{item_filial_name}' (ID: {item_filial_id}), цена: {price_raw}")
             
             if price_raw is None or price_raw == '':
                 logger.debug(f"[GetServicePrice] Для услуги '{service_name}' не найдена цена")
@@ -647,12 +671,20 @@ class GetServicePrice(BaseModel):
                 if not item_filial_name:
                     continue
                 
-                normalized_filial = normalize_text(item_filial_name, keep_spaces=True).lower()
-                normalized_target_filial = normalize_text(target_filial_name, keep_spaces=True).lower()
-                
-                if normalized_filial != normalized_target_filial and normalized_target_filial not in normalized_filial:
-                    logger.debug(f"[GetServicePrice] Филиал '{item_filial_name}' не соответствует запрошенному '{target_filial_name}'")
-                    continue
+                # Если у нас есть ID филиала, сравниваем по нему (точное совпадение)
+                if filial_id:
+                    item_filial_id = item.get("filialId")
+                    if item_filial_id != filial_id:
+                        logger.debug(f"[GetServicePrice] ID филиала '{item_filial_id}' не соответствует запрошенному ID '{filial_id}'")
+                        continue
+                else:
+                    # Запасной вариант - сравнение по нормализованным названиям
+                    normalized_filial = normalize_text(item_filial_name, keep_spaces=True).lower()
+                    normalized_target_filial = normalize_text(target_filial_name, keep_spaces=True).lower()
+                    
+                    if normalized_filial != normalized_target_filial and normalized_target_filial not in normalized_filial:
+                        logger.debug(f"[GetServicePrice] Филиал '{item_filial_name}' не соответствует запрошенному '{target_filial_name}'")
+                        continue
             
             candidate_prices.append({
                 'price': price,
@@ -663,6 +695,23 @@ class GetServicePrice(BaseModel):
         if not candidate_prices:
             filial_context = f" в филиале '{display_filial_name}'" if target_filial_name else ""
             logger.warning(f"[GetServicePrice] Не найдены цены для услуги '{display_service_name}'{filial_context}")
+            
+            # Добавим подробную диагностику
+            if target_filial_name and filial_id:
+                logger.warning(f"[GetServicePrice] Диагностика: Филиал с ID '{filial_id}' найден, но услуга в нем не найдена")
+                
+                # Поищем эту услугу в других филиалах для диагностики
+                service_in_other_filials = []
+                for item in _clinic_data:
+                    if item.get('serviceId') == filtered_services[0].get('serviceId') and item.get('price') is not None:
+                        other_filial_name = item.get('filialName', 'Неизвестный филиал')
+                        other_filial_id = item.get('filialId', 'Нет ID')
+                        if other_filial_id != filial_id:
+                            service_in_other_filials.append(f"'{other_filial_name}' (ID: {other_filial_id})")
+                
+                if service_in_other_filials:
+                    logger.info(f"[GetServicePrice] Услуга '{display_service_name}' найдена в других филиалах: {', '.join(service_in_other_filials)}")
+            
             return f"Цена на услугу '{display_service_name}'{filial_context} не найдена."
 
         # Если был запрос для конкретного филиала и нашлись цены
@@ -855,6 +904,9 @@ class GetEmployeeServices(BaseModel):
 
         # Сначала соберем все уникальные услуги (serviceName) для данного сотрудника
         all_services_for_employee: Set[str] = set()
+        employee_services: Dict[str, List[str]] = {} # Услуги по филиалам
+        filials_of_employee: Set[str] = set() # Филиалы, где работает сотрудник
+        
         for item in _clinic_data:
             if item.get('employeeId') == employee_id_found:
                 service_name = item.get('serviceName')
