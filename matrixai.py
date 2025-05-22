@@ -150,9 +150,10 @@ def find_employees_tool(employee_name: Optional[str] = None, service_name: Optio
 class GetServicePriceArgs(BaseModel):
     service_name: str = Field(description="Точное или максимально близкое название услуги (например, 'Soprano Пальцы для женщин')")
     filial_name: Optional[str] = Field(default=None, description="Точное название филиала (например, 'Москва-сити'), если нужно уточнить цену в конкретном месте")
-def get_service_price_tool(service_name: str, filial_name: Optional[str] = None) -> str:
+    in_booking_process: bool = Field(default=False, description="Флаг, указывающий, что запрос цены происходит в процессе записи на прием")
+def get_service_price_tool(service_name: str, filial_name: Optional[str] = None, in_booking_process: bool = False) -> str:
     """Возвращает цену на КОНКРЕТНУЮ услугу клиники."""
-    handler = clinic_functions.GetServicePrice(service_name=service_name, filial_name=filial_name)
+    handler = clinic_functions.GetServicePrice(service_name=service_name, filial_name=filial_name, in_booking_process=in_booking_process)
     return handler.process()
 def list_filials_tool() -> str:
     """Возвращает список всех доступных филиалов клиники."""
@@ -169,22 +170,25 @@ def get_employee_services_tool(employee_name: str) -> str:
 class CheckServiceInFilialArgs(BaseModel):
     service_name: str = Field(description="Точное или максимально близкое название услуги")
     filial_name: str = Field(description="Точное название филиала")
-def check_service_in_filial_tool(service_name: str, filial_name: str) -> str:
+    in_booking_process: bool = Field(default=False, description="Флаг, указывающий, что запрос происходит в процессе записи на прием")
+def check_service_in_filial_tool(service_name: str, filial_name: str, in_booking_process: bool = False) -> str:
     """Проверяет, доступна ли КОНКРЕТНАЯ услуга в КОНКРЕТНОМ филиале."""
-    handler = clinic_functions.CheckServiceInFilial(service_name=service_name, filial_name=filial_name)
+    handler = clinic_functions.CheckServiceInFilial(service_name=service_name, filial_name=filial_name, in_booking_process=in_booking_process)
     return handler.process()
 class CompareServicePriceInFilialsArgs(BaseModel):
     service_name: str = Field(description="Точное или максимально близкое название услуги")
     filial_names: List[str] = Field(min_length=2, description="Список из ДВУХ или БОЛЕЕ названий филиалов")
-def compare_service_price_in_filials_tool(service_name: str, filial_names: List[str]) -> str:
+    in_booking_process: bool = Field(default=False, description="Флаг, указывающий, что запрос происходит в процессе записи на прием")
+def compare_service_price_in_filials_tool(service_name: str, filial_names: List[str], in_booking_process: bool = False) -> str:
     """Сравнивает цену КОНКРЕТНОЙ услуги в НЕСКОЛЬКИХ филиалах."""
-    handler = clinic_functions.CompareServicePriceInFilials(service_name=service_name, filial_names=filial_names)
+    handler = clinic_functions.CompareServicePriceInFilials(service_name=service_name, filial_names=filial_names, in_booking_process=in_booking_process)
     return handler.process()
 class FindServiceLocationsArgs(BaseModel):
     service_name: str = Field(description="Точное или максимально близкое название услуги")
-def find_service_locations_tool(service_name: str) -> str:
+    in_booking_process: bool = Field(default=False, description="Флаг, указывающий, что запрос происходит в процессе записи на прием")
+def find_service_locations_tool(service_name: str, in_booking_process: bool = False) -> str:
     """Ищет все филиалы, где доступна КОНКРЕТНАЯ услуга."""
-    handler = clinic_functions.FindServiceLocations(service_name=service_name)
+    handler = clinic_functions.FindServiceLocations(service_name=service_name, in_booking_process=in_booking_process)
     return handler.process()
 class FindSpecialistsByServiceOrCategoryAndFilialArgs(BaseModel):
     query_term: str = Field(description="Название услуги ИЛИ категории")
@@ -274,7 +278,7 @@ class ServiceDetailItemFromLLM(BaseModel): # <--- НОВАЯ МОДЕЛЬ
     categoryName: Optional[str] = Field(default=None, description="НАЗВАНИЕ КАТЕГОРИИ. По возможности передайте, если известно или было явно уточнено. Система в первую очередь попытается определить категорию автоматически по ID услуги, но это поле может служить уточнением или запасным вариантом.")
     countService: int = Field(default=1, description="Количество данной услуги.")
     complexServiceId: Optional[str] = Field(default=None, description="ID комплексной услуги, если эта услуга является частью комплекса.")
-    price: float = Field(description="Цена ИМЕННО ЭТОЙ УСЛУГИ (за единицу, если countService > 1). ВАЖНО: Ты ОБЯЗАН получить эту цену, вызвав инструмент get_service_price_tool ПЕРЕД формированием этого объекта. Не придумывай цену.")
+    price: float = Field(description="Цена ИМЕННО ЭТОЙ УСЛУГИ (за единицу, если countService > 1). ВАЖНО: Ты ОБЯЗАН получить эту цену, вызвав инструмент get_service_price_tool с параметром in_booking_process=True ПЕРЕД формированием этого объекта. Не придумывай цену.")
     durationService: int = Field(description="Длительность ИМЕННО ЭТОЙ УСЛУГИ в минутах. LLM должен определить это значение (например, из описания услуги или общих знаний).")
 
 class BookAppointmentAIPayloadArgs(BaseModel):
@@ -294,7 +298,7 @@ class BookAppointmentAIPayloadArgs(BaseModel):
             "\'categoryName\' (Optional[str], НАЗВАНИЕ КАТЕГОРИИ. По возможности передайте его, если оно известно или было явно уточнено. Система в первую очередь попытается определить категорию автоматически по ID услуги, но это поле может служить уточнением или запасным вариантом), "
             "\'countService\' (int, количество), "
             "\'complexServiceId\' (Optional[str], ID комплексной услуги, если эта услуга является частью комплекса), "
-            "\'price\' (float, цена ИМЕННО ЭТОЙ услуги, ОБЯЗАТЕЛЬНО полученная через get_service_price_tool), " # <--- ИЗМЕНЕНО В ОПИСАНИЕ
+            "\'price\' (float, цена ИМЕННО ЭТОЙ услуги, ОБЯЗАТЕЛЬНО полученная через get_service_price_tool с параметром in_booking_process=True), " # <--- ИЗМЕНЕНО В ОПИСАНИЕ
             "\'durationService\' (int, длительность ИМЕННО ЭТОЙ услуги в минутах)." # <--- ДОБАВЛЕНО В ОПИСАНИЕ
         )
     )
@@ -382,25 +386,108 @@ async def get_free_slots_tool(**kwargs_from_llm) -> str:
     logger.info(f"[get_free_slots_tool] Попытка получить ID для filial: '{filial_name_from_llm}'")
     filial_id = get_id_by_name(tenant_id_from_kwargs, 'filial', filial_name_from_llm)
     
+    # Создаем переменные для отслеживания нечетких совпадений
+    ambiguous_services = []
     service_ids = []
+    
+    # Используем модуль service_disambiguation для поиска услуг
+    import service_disambiguation
+    
     if service_names_from_llm:
         for s_name in service_names_from_llm:
             logger.info(f"[get_free_slots_tool] Попытка получить ID для service: '{s_name}'")
             s_id = get_id_by_name(tenant_id_from_kwargs, 'service', s_name)
+            
+            # Если ID не найден, ищем похожие услуги
+            if not s_id:
+                # Сначала проверим, есть ли похожие услуги в указанном филиале
+                if filial_id:
+                    message, similar_services = service_disambiguation.suggest_services_in_filial(
+                        tenant_id_from_kwargs, s_name, filial_id, TENANT_RAW_DATA_MAP.get(tenant_id_from_kwargs, [])
+                    )
+                    # Если в филиале нет похожих услуг, ищем везде
+                    if not similar_services:
+                        message, similar_services = service_disambiguation.suggest_services(
+                            tenant_id_from_kwargs, s_name, TENANT_RAW_DATA_MAP.get(tenant_id_from_kwargs, [])
+                        )
+                else:
+                    # Если филиал не определен, ищем везде
+                    message, similar_services = service_disambiguation.suggest_services(
+                        tenant_id_from_kwargs, s_name, TENANT_RAW_DATA_MAP.get(tenant_id_from_kwargs, [])
+                    )
+                
+                if similar_services and len(similar_services) <= 5:  # Ограничиваем количество предложений
+                    ambiguous_services.append({
+                        "query": s_name,
+                        "suggestions": similar_services,
+                        "message": message
+                    })
+                elif not similar_services:
+                    ambiguous_services.append({
+                        "query": s_name,
+                        "suggestions": [],
+                        "message": f"Услуга '{s_name}' не найдена."
+                    })
+                else:
+                    ambiguous_services.append({
+                        "query": s_name,
+                        "suggestions": similar_services[:5],  # Ограничиваем до 5 предложений
+                        "message": f"Найдено слишком много ({len(similar_services)}) похожих услуг для '{s_name}'. Уточните запрос."
+                    })
             service_ids.append(s_id)
 
     if not employee_id:
         return f"Не удалось найти ID для сотрудника: '{employee_name_from_llm}'"
+    
     if not filial_id:
         return f"Не удалось найти ID для филиала: '{filial_name_from_llm}'"
+    
+    # Если для некоторых услуг не найдены ID и есть предложения
+    if ambiguous_services:
+        response_parts = ["Необходимо уточнить некоторые услуги:"]
+        for amb_service in ambiguous_services:
+            response_parts.append(amb_service["message"])
+        return "\n\n".join(response_parts)
+    
+    # Если ID для каких-то услуг не найдены, но нет предложений
     if not all(service_ids):
         problematic_services = [s_name for s_name, s_id in zip(service_names_from_llm, service_ids) if not s_id]
         return f"Не удалось найти ID для следующих услуг: {', '.join(problematic_services)}"
 
+    # Проверяем совместимость услуг с филиалом
+    import service_disambiguation
+    valid_service_ids, invalid_services = service_disambiguation.validate_services_for_filial(
+        tenant_id_from_kwargs, [s_id for s_id in service_ids if s_id], filial_id, TENANT_RAW_DATA_MAP.get(tenant_id_from_kwargs, [])
+    )
+    
+    # Если есть несовместимые услуги
+    if invalid_services:
+        response_parts = ["Некоторые выбранные услуги недоступны в указанном филиале:"]
+        
+        for invalid_service in invalid_services:
+            service_name = invalid_service["serviceName"]
+            available_filials = invalid_service["availableFilials"]
+            
+            if available_filials:
+                response_parts.append(f"- Услуга '{service_name}' доступна в следующих филиалах: {', '.join(available_filials)}")
+            else:
+                response_parts.append(f"- Услуга '{service_name}' не найдена ни в одном филиале")
+        
+        response_parts.append("\nПожалуйста, выберите другую услугу или другой филиал.")
+        return "\n".join(response_parts)
+    
+    # Проверяем, выполняет ли сотрудник эти услуги в указанном филиале
+    for service_id in valid_service_ids:
+        success, message = service_disambiguation.verify_service_employee_filial_compatibility(
+            tenant_id_from_kwargs, service_id, employee_id, filial_id, TENANT_RAW_DATA_MAP.get(tenant_id_from_kwargs, [])
+        )
+        if not success:
+            return message
+
     handler_args = {
         "tenant_id": tenant_id_from_kwargs, # Используем извлеченное значение
         "employee_id": employee_id,
-        "service_ids": service_ids,
+        "service_ids": valid_service_ids,  # Используем только валидные ID услуг
         "date_time": date_time_from_llm,
         "filial_id": filial_id,
         "api_token": api_token_from_kwargs # Используем извлеченное значение
@@ -707,7 +794,7 @@ SYSTEM_PROMPT = """
        - 'categoryName' (Optional[str], НАЗВАНИЕ КАТЕГОРИИ. По возможности передайте его, если оно известно или было явно уточнено. Система в первую очередь попытается определить категорию автоматически по ID услуги, но это поле может служить уточнением или запасным вариантом). 
        - 'countService' (int, количество данной услуги, обычно 1).
        - 'complexServiceId' (Optional[str], ID комплексной услуги, если эта услуга является частью комплекса).
-       - 'price' (float, цена ИМЕННО ЭТОЙ услуги. ВАЖНО: Эту цену ты ОБЯЗАН получить, предварительно вызвав инструмент get_service_price_tool. Не выдумывай цену!).
+       - 'price' (float, цена ИМЕННО ЭТОЙ услуги. ВАЖНО: Эту цену ты ОБЯЗАН получить, предварительно вызвав инструмент get_service_price_tool с параметром in_booking_process=True. Не выдумывай цену!).
        - 'durationService' (int, длительность ИМЕННО ЭТОЙ услуги в минутах. LLM должен определить это значение, например, из описания услуги или из ее стандартной длительности, если она не была явно запрошена у get_service_price_tool. Если сомневаешься, уточни у пользователя или предположи стандартную длительность 60 минут).
        # Убрал price и durationService из полей, которые LLM должен найти через get_service_price_tool, так как get_service_price_tool возвращает только цену.
        # Для durationService - LLM определяет сам.

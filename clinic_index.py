@@ -71,13 +71,19 @@ def build_indexes_for_tenant(tenant_id: str, raw_data: List[Dict[str, Any]]):
     Строит индексы имя <-> id для всех сущностей по сырым данным тенанта.
     Использует normalize_text.
     Дополнительно строит индекс serviceId -> categoryId для быстрого поиска категории по услуге.
+    
+    Новая версия поддерживает многозначный индекс name_to_ids для обработки случаев,
+    когда разные ID могут иметь одинаковое нормализованное имя (например, одинаковые услуги в разных филиалах).
     """
     if not raw_data:
         logger.warning(f"Нет данных для построения индексов для тенанта {tenant_id}")
         return
     indexes = {}
     for name_key, id_key, keep_spaces_flag, sort_words_flag in ENTITY_KEYS:
+        # Обычный индекс для обратной совместимости
         name_to_id = {}
+        # Многозначный индекс (новый)
+        name_to_ids = {}
         id_to_name = {}
         for item in raw_data:
             name = item.get(name_key)
@@ -85,9 +91,31 @@ def build_indexes_for_tenant(tenant_id: str, raw_data: List[Dict[str, Any]]):
             if name and id_:
                 normalized_name = normalize_text(name, keep_spaces=keep_spaces_flag, sort_words=sort_words_flag)
                 
+                # Добавляем в многозначный индекс name_to_ids
+                if normalized_name not in name_to_ids:
+                    name_to_ids[normalized_name] = [id_]
+                elif id_ not in name_to_ids[normalized_name]:
+                    name_to_ids[normalized_name].append(id_)
+                    logger.info(
+                        f"Tenant '{tenant_id}': Добавлен дополнительный ID '{id_}' для нормализованного имени '{normalized_name}' "
+                        f"(из оригинала: '{name}') в многозначном индексе. Всего ID для этого имени: {len(name_to_ids[normalized_name])}"
+                    )
+                
+                # Логика для обычного name_to_id (сохраняем для обратной совместимости)
+                
                 # Логика для name_to_id
                 if normalized_name not in name_to_id:
                     name_to_id[normalized_name] = id_
+                elif name_to_id[normalized_name] != id_: 
+                     logger.warning(
+                        f"Tenant '{tenant_id}': Обнаружена коллизия нормализованных имен для сущности '{name_key}'. "
+                        f"Нормализованное имя '{normalized_name}' (из оригинала: '{name}') пытается сопоставиться с ID '{id_}', "
+                        f"но уже сопоставлено с ID '{name_to_id[normalized_name]}' в обычном индексе. "
+                        f"Сохраняется первое сопоставление (с ID '{name_to_id[normalized_name]}'), "
+                        f"но все ID доступны в многозначном индексе."
+                    )
+
+                # Логика для id_to_name
                 elif name_to_id[normalized_name] != id_: 
                      logger.warning(
                         f"Tenant '{tenant_id}': Обнаружена коллизия нормализованных имен для сущности '{name_key}'. "
@@ -117,9 +145,30 @@ def build_indexes_for_tenant(tenant_id: str, raw_data: List[Dict[str, Any]]):
                             f"Сохраняется первое ('{id_to_name[id_]}'). Это может указывать на несоответствие данных."
                         )
                         
+        indexes[f"{name_key}_to_id"] = name_to_id  # Обычный индекс (однозначный, для обратной совместимости)
+        indexes[f"{name_key}_to_ids"] = name_to_ids  # Новый многозначный индекс
+                    id_to_name[id_] = name # Сохраняем оригинальное имя
+                elif id_to_name[id_] != name: 
+                    # Особое внимание для филиалов, так как это текущая проблема
+                    if id_key == "filialId":
+                        logger.warning(
+                            f"Tenant '{tenant_id}': Обнаружено несоответствие данных для filialId '{id_}'. "
+                            f"Этот ID уже сопоставлен с оригинальным именем филиала '{id_to_name[id_]}', "
+                            f"но другая запись пытается сопоставить его с именем '{name}'. "
+                            f"Для функции get_name_by_id будет сохранено первое сопоставленное имя ('{id_to_name[id_]}'). "
+                            f"Это НАСТОЯТЕЛЬНО УКАЗЫВАЕТ на то, что в исходном файле данных один и тот же filialId используется для разных названий филиалов."
+                        )
+                    else: # Общее предупреждение для других сущностей
+                        logger.warning(
+                            f"Tenant '{tenant_id}': Дублирующийся ID '{id_}' для сущности '{name_key}'. "
+                            f"Существующее оригинальное имя: '{id_to_name[id_]}', новое оригинальное имя: '{name}'. "
+                            f"Сохраняется первое ('{id_to_name[id_]}'). Это может указывать на несоответствие данных."
+                        )
+                        
         indexes[f"{name_key}_to_id"] = name_to_id
         indexes[f"{id_key}_to_name"] = id_to_name
     TENANT_INDEXES[tenant_id] = indexes
+    
     
     serviceid_to_categoryid = {}
     for item in raw_data:
@@ -128,6 +177,7 @@ def build_indexes_for_tenant(tenant_id: str, raw_data: List[Dict[str, Any]]):
         if service_id and category_id:
             serviceid_to_categoryid[service_id] = category_id
     SERVICEID_TO_CATEGORYID_INDEX[tenant_id] = serviceid_to_categoryid
+    logger.info(f"Построены индексы для тенанта {tenant_id} с использованием normalize_text и индекс serviceId->categoryId. Проверьте предупреждения выше на возможные несоответствия данных.")
     logger.info(f"Построены индексы для тенанта {tenant_id} с использованием normalize_text и индекс serviceId->categoryId. Проверьте предупреждения выше на возможные несоответствия данных.")
 
 
@@ -140,11 +190,13 @@ def get_id_by_name(tenant_id: str, entity: str, name: str) -> Optional[str]:
     """
     keep_spaces_for_entity = False
     sort_words_for_entity = False 
+    sort_words_for_entity = False 
     
     if entity == "service" or entity == "category":
         keep_spaces_for_entity = True
     elif entity == "employee":
         keep_spaces_for_entity = True
+        sort_words_for_entity = True 
         sort_words_for_entity = True 
     
     normalized_name_to_search = normalize_text(name, keep_spaces=keep_spaces_for_entity, sort_words=sort_words_for_entity)
@@ -273,6 +325,58 @@ def get_name_by_id(tenant_id: str, entity: str, id_: str) -> Optional[str]:
         
     index_map_key = f"{id_key_for_index}_to_name"
     return TENANT_INDEXES.get(tenant_id, {}).get(index_map_key, {}).get(id_)
+
+def get_all_ids_by_name(tenant_id: str, entity: str, name: str) -> List[str]:
+    """
+    Получает все возможные ID для данного имени сущности, используя многозначный индекс.
+    Полезно для случаев, когда одно и то же нормализованное имя может соответствовать
+    нескольким ID (например, одинаковые услуги в разных филиалах).
+    
+    Args:
+        tenant_id: ID тенанта
+        entity: Тип сущности ('service', 'employee', 'filial', 'category')
+        name: Имя сущности для поиска
+        
+    Returns:
+        Список ID, соответствующих данному имени, или пустой список, если ничего не найдено
+    """
+    if not tenant_id or not entity or not name:
+        logger.warning(f"Один из обязательных параметров пуст: tenant_id={tenant_id}, entity={entity}, name={name}")
+        return []
+    
+    name_key_for_index = ""
+    if entity == "service": name_key_for_index = "serviceName"
+    elif entity == "employee": name_key_for_index = "employeeFullName"
+    elif entity == "filial": name_key_for_index = "filialName"
+    elif entity == "category": name_key_for_index = "categoryName"
+    else:
+        logger.error(f"Неизвестный тип сущности '{entity}' при поиске всех ID по имени для тенанта {tenant_id}")
+        return []
+    
+    # Определение флагов для нормализации на основе типа сущности
+    keep_spaces_flag = True  # По умолчанию
+    sort_words_flag = False  # По умолчанию
+    
+    for nk, ik, ks, sw in ENTITY_KEYS:
+        if nk == name_key_for_index:
+            keep_spaces_flag = ks
+            sort_words_flag = sw
+            break
+    
+    normalized_name_to_search = normalize_text(name, keep_spaces=keep_spaces_flag, sort_words=sort_words_flag)
+    
+    # Пытаемся найти в многозначном индексе
+    name_to_ids_map_key = f"{name_key_for_index}_to_ids"
+    name_to_ids_map = TENANT_INDEXES.get(tenant_id, {}).get(name_to_ids_map_key, {})
+    
+    if normalized_name_to_search in name_to_ids_map:
+        return name_to_ids_map[normalized_name_to_search]
+    
+    # Если не нашли по точному совпадению, можно добавить нечеткий поиск здесь
+    # (по аналогии с get_id_by_name, но возвращая все подходящие ID)
+    
+    logger.warning(f"Не найдено ID для тенанта '{tenant_id}', сущности '{entity}', нормализованного имени '{normalized_name_to_search}' (исходное: '{name}') в многозначном индексе.")
+    return []
 
 def get_category_id_by_service_id(tenant_id: str, service_id: str) -> Optional[str]:
     """

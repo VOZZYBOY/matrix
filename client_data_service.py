@@ -442,10 +442,23 @@ async def get_free_times_of_employee_by_services(
     headers = {"accept": "*/*", "Content-Type": "application/json"}
     if api_token:
         headers["Authorization"] = f"Bearer {api_token}"
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(api_url, json=payload, headers=headers, timeout=15.0)
-        resp.raise_for_status()
-        return resp.json()
+        
+    logger.info(f"Отправка запроса к API getFreeTimesOfEmployeeByChoosenServices: URL={api_url}, Параметры={payload}")
+    
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(api_url, json=payload, headers=headers, timeout=15.0)
+            resp.raise_for_status()
+            response_data = resp.json()
+            
+            # Логируем ответ API (только первые 200 символов, если ответ большой)
+            response_snippet = str(response_data)[:200] + "..." if len(str(response_data)) > 200 else str(response_data)
+            logger.info(f"Получен ответ от API getFreeTimesOfEmployeeByChoosenServices: {response_snippet}")
+            
+            return response_data
+    except Exception as e:
+        logger.error(f"Ошибка при вызове API getFreeTimesOfEmployeeByChoosenServices: {e}", exc_info=True)
+        raise
 
 async def add_record(
     tenant_id: str,
