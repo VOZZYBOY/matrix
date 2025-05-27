@@ -6,7 +6,7 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Слова-маркеры для удаления (без учета регистра)
-GARBAGE_MARKERS = ["Сабина Ахмедова Салмановна","Селима Муталиева  Андарбековна","Юлия Пигуль Сергеевна","Юрий Бобров Александрович"]
+GARBAGE_MARKERS = ["Bluewaters","Сабина Ахмедова Салмановна","Селима Муталиева  Андарбековна","Юлия Пигуль Сергеевна","Юрий Бобров Александрович","7a0c5e24-309d-11eb-bbe0-0050568303be"]
 
 
 FILE_PATH = "/home/erik/matrixai/base/medyumed.2023-04-24.json" 

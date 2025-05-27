@@ -1295,4 +1295,3 @@ class ChromaGigaEmbeddingsWrapper(EmbeddingFunction):
         return embeddings
     def embed_query(self, text: str) -> List[float]:
         return self._gigachat_embeddings.embed_query(text)
-

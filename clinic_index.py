@@ -23,6 +23,31 @@ def levenshtein_distance(s1: str, s2: str) -> int:
     return previous_row[-1]
 
 
+def normalize_employee_name(name: str) -> str:
+    """
+    Специальная нормализация для ФИО сотрудников.
+    Обрабатывает различные форматы ФИО (фамилия-имя-отчество, имя-фамилия-отчество).
+    """
+    if not name:
+        return ""
+    
+    # Базовая нормализация
+    normalized = name.lower().replace("-", "")
+    
+    # Убираем множественные пробелы и разбиваем на слова
+    words = re.sub(r'\s+', ' ', normalized).strip().split()
+    
+    # Если меньше 2 слов, возвращаем как есть
+    if len(words) < 2:
+        return " ".join(words)
+    
+    # Сортируем слова для унификации порядка
+    # Это позволит найти "Соня Сеферова Магамедовна" по запросу "Сеферова Соня Магамедовна"
+    words.sort()
+    
+    return " ".join(words)
+
+
 def normalize_text(text: Optional[str], keep_spaces: bool = False, sort_words: bool = False) -> str:
     """
     Приводит строку к нижнему регистру, удаляет дефисы и опционально пробелы.
@@ -352,5 +377,59 @@ def get_category_id_by_service_id(tenant_id: str, service_id: str) -> Optional[s
     Быстро получить categoryId по serviceId для конкретного тенанта.
     """
     return SERVICEID_TO_CATEGORYID_INDEX.get(tenant_id, {}).get(service_id)
+
+def get_category_id_by_service_name(tenant_id: str, service_name: str, filial_name: Optional[str] = None) -> Optional[str]:
+    """
+    Получить ID категории по названию услуги и опциональному филиалу.
+    Сначала получает service_id, затем находит categoryId через индекс.
+    """
+    try:
+        # Сначала получаем service_id
+        service_id = get_id_by_name(tenant_id, "service", service_name)
+        if not service_id:
+            logger.warning(f"Не найден service_id для услуги '{service_name}' в тенанте '{tenant_id}'")
+            return None
+        
+        # Затем получаем category_id через индекс
+        category_id = get_category_id_by_service_id(tenant_id, service_id)
+        if not category_id:
+            logger.warning(f"Не найден category_id для service_id '{service_id}' в тенанте '{tenant_id}'")
+            return None
+            
+        return category_id
+    except Exception as e:
+        logger.error(f"Ошибка при получении category_id по service_name '{service_name}': {e}")
+        return None
+
+def get_service_id_by_name(tenant_id: str, service_name: str, filial_name: Optional[str] = None) -> Optional[str]:
+    """
+    Получить ID услуги по её названию и опциональному филиалу.
+    """
+    try:
+        service_id = get_id_by_name(tenant_id, "service", service_name)
+        if not service_id:
+            logger.warning(f"Не найден service_id для услуги '{service_name}' в тенанте '{tenant_id}'")
+            return None
+        return service_id
+    except Exception as e:
+        logger.error(f"Ошибка при получении service_id по названию '{service_name}': {e}")
+        return None
+
+def get_default_tenant_id() -> str:
+    """
+    Возвращает ID тенанта по умолчанию.
+    В данной реализации предполагаем, что используется первый доступный тенант.
+    """
+    if TENANT_INDEXES:
+        # Берём первый доступный tenant_id из индекса
+        first_tenant = next(iter(TENANT_INDEXES.keys()), None)
+        if first_tenant:
+            logger.info(f"Возвращен default tenant_id: {first_tenant}")
+            return first_tenant
+    
+    # Fallback - возвращаем известный tenant_id из константы
+    default_tenant = "medyumed.2023-04-24"
+    logger.warning(f"Не найдено тенантов в индексе, возвращен fallback tenant_id: {default_tenant}")
+    return default_tenant
 
 

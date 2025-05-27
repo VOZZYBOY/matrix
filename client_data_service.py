@@ -5,6 +5,7 @@ from pydantic import BaseModel
 import datetime
 from clinic_index import get_id_by_name
 import json
+import aiohttp # Ensure aiohttp is imported
 
 logger = logging.getLogger(__name__)
 
@@ -528,3 +529,88 @@ async def add_record(
     except Exception as e:
         logger.error(f"Неизвестная ошибка при вызове API записи: {e}", exc_info=True)
         return {"code": 500, "message": f"Внутренняя ошибка: {e}"}
+
+async def get_filial_id_by_name_api(
+    filial_name: str,
+    api_token: str,
+    tenant_id: str
+) -> Optional[str]:
+    """Получает ID филиала по его имени через API."""
+    if not filial_name or not api_token:
+        logger.warning(f"[Tenant: {tenant_id}] Отсутствует filial_name или api_token для get_filial_id_by_name_api.")
+        return None
+
+    url = f"{CLIENT_API_BASE_URL}/AI/getFilialIdByName"
+    params = {"filialName": filial_name}
+    headers = {"Authorization": f"Bearer {api_token}", "accept": "*/*"}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, headers=headers) as response:
+                if response.status == 200:
+                    try:
+                        json_response = await response.json()
+                        if json_response.get("code") == 200 and json_response.get("data") is not None:
+                            logger.info(f"[Tenant: {tenant_id}] Успешно получен filial_id для '{filial_name}': {json_response['data']}")
+                            return str(json_response["data"])
+                        else:
+                            logger.warning(f"[Tenant: {tenant_id}] API запрос на получение filial_id для '{filial_name}' вернул код {json_response.get('code')} или null данные. Ответ: {json_response}")
+                            return None
+                    except aiohttp.ContentTypeError:
+                        logger.error(f"[Tenant: {tenant_id}] API запрос на получение filial_id для '{filial_name}' вернул не JSON ответ. Статус: {response.status}, Тело: {await response.text()}")
+                        return None
+                    except Exception as e:
+                        logger.error(f"[Tenant: {tenant_id}] Ошибка парсинга JSON ответа для get_filial_id для '{filial_name}': {e}. Ответ: {await response.text()}", exc_info=True)
+                        return None
+                else:
+                    logger.error(f"[Tenant: {tenant_id}] API запрос на получение filial_id для '{filial_name}' завершился ошибкой со статусом {response.status}. Ответ: {await response.text()}")
+                    return None
+    except aiohttp.ClientError as e:
+        logger.error(f"[Tenant: {tenant_id}] Сетевая ошибка при вызове get_filial_id для '{filial_name}': {e}", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"[Tenant: {tenant_id}] Непредвиденная ошибка в get_filial_id_by_name_api для '{filial_name}': {e}", exc_info=True)
+        return None
+
+async def get_service_id_by_name_api(
+    service_name: str,
+    filial_name: str,
+    api_token: str,
+    tenant_id: str
+) -> Optional[str]:
+    """Получает ID услуги по ее имени и имени филиала через API."""
+    if not service_name or not filial_name or not api_token:
+        logger.warning(f"[Tenant: {tenant_id}] Отсутствует service_name, filial_name или api_token для get_service_id_by_name_api.")
+        return None
+
+    url = f"{CLIENT_API_BASE_URL}/AI/getServiceIdByName"
+    params = {"serviceName": service_name, "filialName": filial_name}
+    headers = {"Authorization": f"Bearer {api_token}", "accept": "*/*"}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, headers=headers) as response:
+                if response.status == 200:
+                    try:
+                        json_response = await response.json()
+                        if json_response.get("code") == 200 and json_response.get("data") is not None:
+                            logger.info(f"[Tenant: {tenant_id}] Успешно получен service_id для '{service_name}' в филиале '{filial_name}': {json_response['data']}")
+                            return str(json_response["data"])
+                        else:
+                            logger.warning(f"[Tenant: {tenant_id}] API запрос на получение service_id для '{service_name}' в филиале '{filial_name}' вернул код {json_response.get('code')} или null данные. Ответ: {json_response}")
+                            return None
+                    except aiohttp.ContentTypeError:
+                        logger.error(f"[Tenant: {tenant_id}] API запрос на получение service_id для '{service_name}' вернул не JSON ответ. Статус: {response.status}, Тело: {await response.text()}")
+                        return None
+                    except Exception as e:
+                        logger.error(f"[Tenant: {tenant_id}] Ошибка парсинга JSON ответа для get_service_id для '{service_name}': {e}. Ответ: {await response.text()}", exc_info=True)
+                        return None
+                else:
+                    logger.error(f"[Tenant: {tenant_id}] API запрос на получение service_id для '{service_name}' в филиале '{filial_name}' завершился ошибкой со статусом {response.status}. Ответ: {await response.text()}")
+                    return None
+    except aiohttp.ClientError as e:
+        logger.error(f"[Tenant: {tenant_id}] Сетевая ошибка при вызове get_service_id для '{service_name}': {e}", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"[Tenant: {tenant_id}] Непредвиденная ошибка в get_service_id_by_name_api для '{service_name}': {e}", exc_info=True)
+        return None
