@@ -11,6 +11,87 @@ logger = logging.getLogger(__name__)
 
 CLIENT_API_BASE_URL = "https://back.matrixcrm.ru/api/v1"
 
+# --- New API endpoint for getMultipleData ---
+async def get_multiple_data_from_api(
+    api_token: str,
+    filial_id: Optional[str] = None,
+    employee_id: Optional[str] = None,
+    service_id: Optional[str] = None,
+    tenant_id: Optional[str] = None # Optional, primarily for logging context
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    Вызывает эндпоинт /api/v1/AI/getMultipleData для получения связанных данных.
+    Принимает опциональные filial_id, employee_id, service_id.
+    Требует api_token.
+    Возвращает список словарей с данными или None при ошибке/нет данных.
+    """
+    if not api_token:
+        logger.error(f"[Tenant: {tenant_id}] api_token не предоставлен для вызова getMultipleData.")
+        return None
+
+    url = f"{CLIENT_API_BASE_URL}/AI/getMultipleData"
+    
+    payload = {
+        "filialId": filial_id or "",
+        "employeeId": employee_id or "",
+        "serviceId": service_id or ""
+    }
+
+    # Проверяем, заданы ли какие-то фильтры
+    has_filters = bool(filial_id or employee_id or service_id)
+    
+    if not has_filters:
+         logger.warning(f"[Tenant: {tenant_id}] getMultipleData вызван без фильтров (filial_id, employee_id, service_id). Будет возвращен весь список. URL: {url}")
+    else:
+         logger.info(f"[Tenant: {tenant_id}] Вызов getMultipleData с фильтрами: {payload}. URL: {url}")
+
+
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "Content-Type": "application/json",
+        "accept": "*/*"
+    }
+
+    try:
+        async with httpx.AsyncClient(verify=False) as client: # verify=False для отключения проверки SSL
+            # Логируем детали запроса
+            logger.info(f"[Tenant: {tenant_id}] Отправка GET запроса с JSON телом на {url}")
+            logger.info(f"[Tenant: {tenant_id}] Headers: {headers}")
+            logger.info(f"[Tenant: {tenant_id}] JSON payload: {payload}")
+            
+            # Используем GET запрос с JSON телом (нестандартно, но API так работает)
+            response = await client.request("GET", url, json=payload, headers=headers, timeout=20.0)
+            
+            # Логируем ответ
+            logger.info(f"[Tenant: {tenant_id}] Response status: {response.status_code}")
+            logger.info(f"[Tenant: {tenant_id}] Response headers: {dict(response.headers)}")
+            logger.info(f"[Tenant: {tenant_id}] Response body: {response.text[:500]}...")
+            
+            response.raise_for_status() # Поднимет исключение для 4xx/5xx статусов
+
+            response_data = response.json()
+            
+            # Ожидаемый формат ответа: {"code": 200, "data": [...], "message": "..."}
+            if response_data.get("code") == 200 and isinstance(response_data.get("data"), list):
+                logger.info(f"[Tenant: {tenant_id}] Успешно получен ответ от getMultipleData. Найдено записей: {len(response_data['data'])}")
+                return response_data["data"]
+            else:
+                logger.warning(f"[Tenant: {tenant_id}] API getMultipleData вернуло код {response_data.get('code')} или данные не в формате списка. Ответ: {response_data.get('message', 'Без сообщения')}. Полный ответ: {str(response_data)[:500]}...")
+                return None # Возвращаем None, если ответ не соответствует ожидаемому успешному формату
+
+    except httpx.HTTPStatusError as e:
+        error_content = e.response.text
+        logger.error(f"[Tenant: {tenant_id}] Ошибка HTTP Status {e.response.status_code} при вызове getMultipleData: {error_content}", exc_info=True)
+        return None
+    except httpx.RequestError as e:
+        logger.error(f"[Tenant: {tenant_id}] Ошибка запроса при вызове getMultipleData: {e}", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"[Tenant: {tenant_id}] Неизвестная ошибка при вызове getMultipleData: {e}", exc_info=True)
+        return None
+
+# --- End new API endpoint function ---
+
 
 class ClientApiError(BaseModel):
     code: int

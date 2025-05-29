@@ -23,7 +23,7 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_DB = int(os.getenv("REDIS_DB", 0))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
 REDIS_KEY_PREFIX = "chat_history"
-DEFAULT_TTL_SECONDS = 3600 * 24 # 24 часа
+DEFAULT_TTL_SECONDS = 3600 # 1 час
 
 # Инициализация клиента Redis
 try:

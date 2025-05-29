@@ -161,12 +161,11 @@ def list_filials_tool() -> str:
     return handler.process()
 class GetEmployeeServicesArgs(BaseModel):
     employee_name: str = Field(description="Точное или максимально близкое ФИО сотрудника")
-    filial_name: Optional[str] = Field(default=None, description="Точное название филиала (опционально, для фильтрации услуг по филиалу)")
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=20, description="Количество услуг на странице для пагинации")
-def get_employee_services_tool(employee_name: str, filial_name: Optional[str] = None) -> str:
-    """Возвращает список услуг КОНКРЕТНОГО сотрудника. Если указан filial_name, фильтрует услуги по конкретному филиалу. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 20), если ожидается много результатов или пользователь просит показать все/дальше."""
-    handler = clinic_functions.GetEmployeeServices(employee_name=employee_name, filial_name=filial_name)
+def get_employee_services_tool(employee_name: str) -> str:
+    """Возвращает список услуг КОНКРЕТНОГО сотрудника. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 20), если ожидается много результатов или пользователь просит показать все/дальше."""
+    handler = clinic_functions.GetEmployeeServices(employee_name=employee_name)
     return handler.process()
 class CheckServiceInFilialArgs(BaseModel):
     service_name: str = Field(description="Точное или максимально близкое название услуги")
@@ -223,19 +222,16 @@ class FindServicesInPriceRangeArgs(BaseModel):
     filial_name: Optional[str] = Field(default=None, description="Опционально: филиал")
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=20, description="Количество услуг на странице для пагинации")
-
-class ListCategoriesArgs(BaseModel):
-    page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
-    page_size: Optional[int] = Field(default=30, description="Количество категорий на странице для пагинации")
-
 def find_services_in_price_range_tool(min_price: float, max_price: float, category_name: Optional[str] = None, filial_name: Optional[str] = None) -> str:
     """Ищет услуги в ЗАДАННОМ ЦЕНОВОМ ДИАПАЗОНЕ. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 20), если ожидается много результатов или пользователь просит показать все/дальше."""
     handler = clinic_functions.FindServicesInPriceRange(min_price=min_price, max_price=max_price, category_name=category_name, filial_name=filial_name)
     return handler.process()
-
-def list_categories_tool(page_number: int = 1, page_size: int = 30) -> str:
+class ListAllCategoriesArgs(BaseModel):
+    page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
+    page_size: Optional[int] = Field(default=30, description="Количество категорий на странице для пагинации")
+def list_all_categories_tool() -> str:
     """Возвращает список ВСЕХ категорий услуг. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 30), если ожидается много результатов или пользователь просит показать все/дальше."""
-    handler = clinic_functions.ListCategories(page_number=page_number, page_size=page_size)
+    handler = clinic_functions.ListAllCategories()
     return handler.process()
 class ListEmployeeFilialsArgs(BaseModel):
     employee_name: str = Field(description="Точное или близкое ФИО сотрудника")
@@ -286,6 +282,7 @@ class ServiceDetailItemFromLLM(BaseModel): # <--- НОВАЯ МОДЕЛЬ
     durationService: int = Field(description="Длительность ИМЕННО ЭТОЙ УСЛУГИ в минутах. LLM должен определить это значение (например, из описания услуги или общих знаний).")
 
 class BookAppointmentAIPayloadArgs(BaseModel):
+    # client_phone_number будет извлечен из конфигурации автоматически (Устаревшее утверждение, теперь он часть модели)
     filial_name: str = Field(description="ТОЧНОЕ название филиала для записи.")
     date_of_record: str = Field(description="Дата записи в формате YYYY-MM-DD.")
     start_time: str = Field(description="Время начала записи в формате HH:MM.")
@@ -334,13 +331,12 @@ TOOL_CLASSES = [
     ListServicesInCategoryArgs,
     ListServicesInFilialArgs,
     FindServicesInPriceRangeArgs,
-    clinic_functions.ListCategories,
+    ListAllCategoriesArgs,
     ListEmployeeFilialsArgs,
     GetFreeSlotsArgs,  # Новый класс-аргументы
     BookAppointmentArgs,  # Новый класс-аргументы
     BookAppointmentAIPayloadArgs, # <--- ДОБАВЛЕН НОВЫЙ ИНСТРУМЕНТ
     BookAppointmentAIPayload, # <--- ДОБАВЛЕНА РЕГИСТРАЦИЯ КЛАССА-ОБЁРТКИ
-    clinic_functions.GetServicesByCategory,  # <--- ДОБАВЛЕН НОВЫЙ КЛАСС
 ]
 logger.info(f"Определено {len(TOOL_CLASSES)} Pydantic классов для аргументов инструментов.")
 
@@ -387,17 +383,8 @@ async def get_free_slots_tool(**kwargs_from_llm) -> str:
     # Преобразование имен в ID
     logger.info(f"[get_free_slots_tool] Попытка получить ID для employee: '{employee_name_from_llm}'")
     employee_id = get_id_by_name(tenant_id_from_kwargs, 'employee', employee_name_from_llm)
-    
-    # Попытка получить filial_id через API, с откатом на локальный поиск
-    logger.info(f"[get_free_slots_tool] Попытка получить ID для filial через API: '{filial_name_from_llm}'")
-    filial_id = None
-    if api_token_from_kwargs:
-        from client_data_service import get_filial_id_by_name_api
-        filial_id = await get_filial_id_by_name_api(filial_name_from_llm, api_token_from_kwargs, tenant_id_from_kwargs)
-    
-    if not filial_id:
-        logger.info(f"[get_free_slots_tool] API не вернуло filial_id, используем локальный поиск для: '{filial_name_from_llm}'")
-        filial_id = get_id_by_name(tenant_id_from_kwargs, 'filial', filial_name_from_llm)
+    logger.info(f"[get_free_slots_tool] Попытка получить ID для filial: '{filial_name_from_llm}'")
+    filial_id = get_id_by_name(tenant_id_from_kwargs, 'filial', filial_name_from_llm)
     
     # Создаем переменные для отслеживания нечетких совпадений
     ambiguous_services = []
@@ -409,17 +396,7 @@ async def get_free_slots_tool(**kwargs_from_llm) -> str:
     if service_names_from_llm:
         for s_name in service_names_from_llm:
             logger.info(f"[get_free_slots_tool] Попытка получить ID для service: '{s_name}'")
-            
-            # Попытка получить service_id через API, если есть filial_name и api_token
-            s_id = None
-            if api_token_from_kwargs and filial_name_from_llm:
-                from client_data_service import get_service_id_by_name_api
-                s_id = await get_service_id_by_name_api(s_name, filial_name_from_llm, api_token_from_kwargs, tenant_id_from_kwargs)
-            
-            # Если API не вернуло ID, используем локальный поиск
-            if not s_id:
-                logger.info(f"[get_free_slots_tool] API не вернуло service_id для '{s_name}', используем локальный поиск")
-                s_id = get_id_by_name(tenant_id_from_kwargs, 'service', s_name)
+            s_id = get_id_by_name(tenant_id_from_kwargs, 'service', s_name)
             
             # Если ID не найден, ищем похожие услуги
             if not s_id:
@@ -641,17 +618,7 @@ async def book_appointment_ai_payload_tool(**kwargs_from_llm) -> str:
         logger.error(f"CRITICAL (book_appointment_ai_payload_tool): client_phone_number (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
         return "Критическая ошибка: Номер телефона клиента не был предоставлен системе для вызова book_appointment_ai_payload_tool."
 
-    # Попытка получить filial_id через API, с откатом на локальный поиск
-    logger.info(f"[book_appointment_ai_payload_tool] Попытка получить ID для filial через API: '{validated_args.filial_name}'")
-    filial_id = None
-    if api_token_from_kwargs:
-        from client_data_service import get_filial_id_by_name_api
-        filial_id = await get_filial_id_by_name_api(validated_args.filial_name, api_token_from_kwargs, tenant_id_from_kwargs)
-    
-    if not filial_id:
-        logger.info(f"[book_appointment_ai_payload_tool] API не вернуло filial_id, используем локальный поиск для: '{validated_args.filial_name}'")
-        filial_id = get_id_by_name(tenant_id_from_kwargs, 'filial', validated_args.filial_name)
-    
+    filial_id = get_id_by_name(tenant_id_from_kwargs, 'filial', validated_args.filial_name)
     to_employee_id = get_id_by_name(tenant_id_from_kwargs, 'employee', validated_args.employee_name)
 
     if not filial_id:
@@ -688,18 +655,7 @@ async def book_appointment_ai_payload_tool(**kwargs_from_llm) -> str:
             if duration_from_llm is None: missing_fields_in_item.append("'durationService'")
             return f"Ошибка: неполные данные в одном из элементов services_details: {', '.join(missing_fields_in_item)} обязательны. Получено: {service_item_from_llm.model_dump_json(indent=2)}"
 
-        # Попытка получить service_id через API, если есть filial_name и api_token
-        logger.info(f"[book_appointment_ai_payload_tool] Попытка получить ID для service через API: '{service_name}'")
-        service_id = None
-        if api_token_from_kwargs and validated_args.filial_name:
-            from client_data_service import get_service_id_by_name_api
-            service_id = await get_service_id_by_name_api(service_name, validated_args.filial_name, api_token_from_kwargs, tenant_id_from_kwargs)
-        
-        # Если API не вернуло ID, используем локальный поиск
-        if not service_id:
-            logger.info(f"[book_appointment_ai_payload_tool] API не вернуло service_id для '{service_name}', используем локальный поиск")
-            service_id = get_id_by_name(tenant_id_from_kwargs, 'service', service_name)
-            
+        service_id = get_id_by_name(tenant_id_from_kwargs, 'service', service_name)
         if not service_id:
             return f"Не удалось найти ID для услуги: '{service_name}'"
 
@@ -789,21 +745,6 @@ async def book_appointment_ai_payload_tool(**kwargs_from_llm) -> str:
         error_type = getattr(e, '__class__', Exception).__name__
         return f"Ошибка при обработке запроса на запись (AI Payload) ({error_type}): {str(e)}"
 
-async def get_services_by_category_tool(**kwargs_from_llm) -> str:
-    """Инструмент для получения услуг в конкретной категории."""
-    logger.info(f"ENTERING get_services_by_category_tool. Raw kwargs_from_llm: {kwargs_from_llm}")
-
-    try:
-        # Создаем экземпляр напрямую из clinic_functions
-        handler = clinic_functions.GetServicesByCategory(**kwargs_from_llm)
-        logger.info(f"GetServicesByCategory handler создан с аргументами: {kwargs_from_llm}")
-        result = handler.process()
-        logger.info(f"GetServicesByCategory успешно обработан")
-        return result
-    except Exception as e:
-        logger.error(f"get_services_by_category_tool: {e}", exc_info=True)
-        return f"Ошибка при получении услуг категории: {str(e)}"
-
 TOOL_FUNCTIONS = [
     find_employees_tool,
     get_service_price_tool,
@@ -816,12 +757,11 @@ TOOL_FUNCTIONS = [
     list_services_in_category_tool,
     list_services_in_filial_tool,
     find_services_in_price_range_tool,
-    list_categories_tool,
+    list_all_categories_tool,
     list_employee_filials_tool,
     get_free_slots_tool, 
     book_appointment_tool,  
-    book_appointment_ai_payload_tool,
-    get_services_by_category_tool,  # <--- ДОБАВЛЕНА НОВАЯ ФУНКЦИЯ
+    book_appointment_ai_payload_tool, # <--- ДОБАВЛЕН НОВЫЙ ИНСТРУМЕНТ
 ]
 logger.info(f"Определено {len(TOOL_FUNCTIONS)} функций-инструментов для динамической привязки.")
 SYSTEM_PROMPT = """
@@ -1093,16 +1033,16 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         find_service_locations_tool: FindServiceLocationsArgs, find_specialists_by_service_or_category_and_filial_tool: FindSpecialistsByServiceOrCategoryAndFilialArgs,
         list_services_in_category_tool: ListServicesInCategoryArgs, list_services_in_filial_tool: ListServicesInFilialArgs,
         find_services_in_price_range_tool: FindServicesInPriceRangeArgs, 
-        list_categories_tool: ListCategoriesArgs, # <--- ИСПРАВЛЕНО с NoArgsSchema
+        list_all_categories_tool: ListAllCategoriesArgs, # <--- ИСПРАВЛЕНО с NoArgsSchema
         list_employee_filials_tool: ListEmployeeFilialsArgs,
-        get_services_by_category_tool: clinic_functions.GetServicesByCategory,  # <--- ДОБАВЛЕН НОВЫЙ МАППИНГ
     }
 
-    def create_tool_wrapper_react(original_tool_func: callable, raw_data_for_tenant: Optional[List[Dict]], tenant_id_for_tool: str): # <--- ДОБАВЛЕН tenant_id_for_tool
-        def actual_wrapper(*args, **kwargs) -> str:
+    def create_tool_wrapper_react(original_tool_func: callable, raw_data_for_tenant: Optional[List[Dict]], tenant_id_for_tool: str, configurable_dict: Dict = None): # <--- ДОБАВЛЕН configurable_dict
+        import inspect
+        async def actual_wrapper(*args, **kwargs):
             tool_name = original_tool_func.__name__
             logger.info(f"[ReAct Tool] Вызов обертки для {tool_name} с args: {args}, kwargs: {kwargs}")
-            clinic_functions.set_clinic_data(raw_data_for_tenant if raw_data_for_tenant is not None else [], tenant_id=tenant_id_for_tool) # <--- ПЕРЕДАЕМ tenant_id
+            clinic_functions.set_clinic_data(raw_data_for_tenant if raw_data_for_tenant is not None else [], tenant_id=tenant_id_for_tool)
             try:
                 handler_class_name = ''.join(word.capitalize() for word in tool_name.replace('_tool', '').split('_'))
                 HandlerClass = getattr(clinic_functions, handler_class_name, None)
@@ -1110,8 +1050,40 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
                     logger.error(f"Не найден класс-обработчик '{handler_class_name}' для {tool_name}")
                     return f"Ошибка: Некорректная конфигурация инструмента {tool_name}."
                 handler_instance = HandlerClass(**kwargs)
-                if hasattr(handler_instance, 'process') and callable(getattr(handler_instance, 'process')):
-                    return handler_instance.process()
+                process_method = getattr(handler_instance, 'process', None)
+                if process_method:
+                    params = inspect.signature(process_method).parameters
+                    needs_tenant = 'tenant_id' in params
+                    needs_token = 'api_token' in params
+                    # Получаем tenant_id и api_token
+                    tenant_id = kwargs.get('tenant_id') or tenant_id_for_tool
+                    api_token = kwargs.get('api_token')
+                    
+                    # Если api_token не найден в kwargs, пытаемся получить из configurable_dict
+                    if not api_token and configurable_dict:
+                        api_token = configurable_dict.get("client_api_token")
+                        logger.info(f"[ReAct Tool] api_token получен из configurable_dict: {api_token[:50] if api_token else None}...")
+                    
+                    logger.info(f"[ReAct Tool] Передача в {tool_name}: tenant_id='{tenant_id}', api_token='{api_token[:50] if api_token else None}...'")
+                    # --- Проверяем, асинхронная ли функция ---
+                    if inspect.iscoroutinefunction(process_method):
+                        if needs_tenant and needs_token:
+                            return await process_method(tenant_id, api_token)
+                        elif needs_tenant:
+                            return await process_method(tenant_id)
+                        elif needs_token:
+                            return await process_method(api_token)
+                        else:
+                            return await process_method()
+                    else:
+                        if needs_tenant and needs_token:
+                            return process_method(tenant_id, api_token)
+                        elif needs_tenant:
+                            return process_method(tenant_id)
+                        elif needs_token:
+                            return process_method(api_token)
+                        else:
+                            return process_method()
                 else:
                     logger.error(f"У обработчика {handler_class_name} отсутствует метод process.")
                     return f"Ошибка: У обработчика {handler_class_name} отсутствует метод process."
@@ -1137,11 +1109,11 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
             func_for_tool = tool_function
         elif tool_function in tool_func_to_schema_map:
             current_args_schema = tool_func_to_schema_map.get(tool_function)
-            func_for_tool = create_tool_wrapper_react(tool_function, TENANT_RAW_DATA_MAP.get(tenant_id, []), tenant_id) # <--- ПЕРЕДАЕМ tenant_id
+            func_for_tool = create_tool_wrapper_react(tool_function, TENANT_RAW_DATA_MAP.get(tenant_id, []), tenant_id, configurable) # <--- ПЕРЕДАЕМ configurable
         else:
             logger.warning(f"Инструмент '{tool_name}' не классифицирован. Использование стандартной обертки и schema=None.")
             current_args_schema = None # Явно None, если не классифицирован
-            func_for_tool = create_tool_wrapper_react(tool_function, TENANT_RAW_DATA_MAP.get(tenant_id, []), tenant_id) # <--- ПЕРЕДАЕМ tenant_id
+            func_for_tool = create_tool_wrapper_react(tool_function, TENANT_RAW_DATA_MAP.get(tenant_id, []), tenant_id, configurable) # <--- ПЕРЕДАЕМ configurable
 
         if func_for_tool is None:
             logger.error(f"Не удалось определить функцию для инструмента '{tool_name}'. Пропуск.")
@@ -1238,6 +1210,14 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
                                 if not current_tool_args_for_invoke.get('client_phone_number'): # Проверка после setdefault
                                     # Pydantic возбудит ошибку, если client_phone_number обязателен и None
                                     logger.warning(f"client_phone_number не был предоставлен для book_appointment_ai_payload_tool, Pydantic может вызвать ошибку, если поле обязательное.")
+                        
+                        # Добавляем tenant_id и api_token для всех инструментов, которые используют новый API
+                        elif tool_name in ["find_employees_tool", "get_employee_services_tool", "list_employee_filials_tool"]:
+                            if not cfg_tenant_id:
+                                raise ValueError(f"tenant_id обязателен для {tool_name}, но не найден в configurable.")
+                            current_tool_args_for_invoke['tenant_id'] = cfg_tenant_id
+                            current_tool_args_for_invoke['api_token'] = cfg_client_api_token
+                            logger.info(f"[ReAct System Override] Для {tool_name}: tenant_id='{cfg_tenant_id}', api_token='{cfg_client_api_token[:50] if cfg_client_api_token else None}...'")
 
 
                         # --- Подготовка КОНФИГУРАЦИИ (tool_config) для вызова инструмента ---
@@ -1356,3 +1336,4 @@ class ChromaGigaEmbeddingsWrapper(EmbeddingFunction):
         return embeddings
     def embed_query(self, text: str) -> List[float]:
         return self._gigachat_embeddings.embed_query(text)
+
