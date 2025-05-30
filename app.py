@@ -47,7 +47,6 @@ logging.basicConfig(
 logger = logging.getLogger("clinic_api_module_based")
 
 agent: Optional[Runnable] = None
-
 class AskRequest(BaseModel):
     user_id: str
     message: str

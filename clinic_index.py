@@ -174,6 +174,129 @@ def build_indexes_for_tenant(tenant_id: str, raw_data: List[Dict[str, Any]]):
     logger.info(f"Построены индексы для тенанта {tenant_id} с использованием normalize_text и индекс serviceId->categoryId. Проверьте предупреждения выше на возможные несоответствия данных.")
 
 
+def _select_best_id_from_multiple_matches(
+    tenant_id: str, 
+    entity: str, 
+    name_key_for_index: str, 
+    candidate_ids: List[str], 
+    normalized_search_name: str, 
+    original_search_name: str
+) -> Optional[str]:
+    """
+    Выбирает лучший ID из множественных совпадений, используя несколько стратегий:
+    1. Предпочтение по частоте использования (самый часто встречающийся ID)
+    2. Предпочтение по точности совпадения (наименьшее расстояние Левенштейна)
+    3. Предпочтение по длине названия (самое короткое название)
+    4. Стабильная сортировка по алфавиту ID
+    
+    Args:
+        tenant_id: ID тенанта
+        entity: Тип сущности 
+        name_key_for_index: Ключ для доступа к индексу имён
+        candidate_ids: Список ID-кандидатов
+        normalized_search_name: Нормализованное имя для поиска
+        original_search_name: Оригинальное имя для поиска
+        
+    Returns:
+        Лучший ID или None, если не удалось определить
+    """
+    if not candidate_ids:
+        return None
+    
+    if len(candidate_ids) == 1:
+        return candidate_ids[0]
+    
+    try:
+        # Получаем карты индексов
+        name_to_id_map_key = f"{name_key_for_index}_to_id"
+        id_key = ENTITY_KEYS[[e[0] for e in ENTITY_KEYS].index(name_key_for_index)][1]
+        id_to_name_map_key = f"{id_key}_to_name"
+        
+        name_to_id_map = TENANT_INDEXES.get(tenant_id, {}).get(name_to_id_map_key, {})
+        id_to_name_map = TENANT_INDEXES.get(tenant_id, {}).get(id_to_name_map_key, {})
+        
+        if not name_to_id_map or not id_to_name_map:
+            logger.warning(f"Не удалось получить индексы для выбора лучшего ID")
+            return candidate_ids[0]  # Возвращаем первый по алфавиту
+        
+        # Анализируем каждый кандидат
+        candidates_analysis = []
+        
+        for candidate_id in candidate_ids:
+            original_name = id_to_name_map.get(candidate_id)
+            if not original_name:
+                continue
+                
+            # Определяем флаги нормализации для данного типа сущности
+            keep_spaces_flag = True
+            sort_words_flag = False
+            for nk, ik, ks, sw in ENTITY_KEYS:
+                if nk == name_key_for_index:
+                    keep_spaces_flag = ks
+                    sort_words_flag = sw
+                    break
+            
+            normalized_candidate_name = normalize_text(original_name, keep_spaces=keep_spaces_flag, sort_words=sort_words_flag)
+            
+            # 1. Частота использования (сколько раз этот ID встречается в индексе)
+            frequency = sum(1 for mapped_id in name_to_id_map.values() if mapped_id == candidate_id)
+            
+            # 2. Точность совпадения (расстояние Левенштейна)
+            levenshtein_dist = levenshtein_distance(normalized_search_name, normalized_candidate_name)
+            
+            # 3. Длина названия (предпочитаем более короткие, как более общие)
+            name_length = len(original_name)
+            
+            # 4. Проверяем, является ли поисковый запрос подстрокой названия кандидата
+            is_substring = normalized_search_name in normalized_candidate_name
+            
+            candidates_analysis.append({
+                'id': candidate_id,
+                'original_name': original_name,
+                'normalized_name': normalized_candidate_name,
+                'frequency': frequency,
+                'levenshtein_distance': levenshtein_dist,
+                'name_length': name_length,
+                'is_substring': is_substring
+            })
+            
+            logger.debug(f"Анализ кандидата '{candidate_id}': название='{original_name}', "
+                        f"частота={frequency}, расстояние={levenshtein_dist}, длина={name_length}, "
+                        f"подстрока={is_substring}")
+        
+        if not candidates_analysis:
+            logger.warning(f"Не удалось проанализировать кандидатов для выбора лучшего ID")
+            return candidate_ids[0]
+        
+        # Сортируем по приоритету:
+        # 1. Сначала те, где поисковый запрос является подстрокой (приоритет)
+        # 2. Затем по наименьшему расстоянию Левенштейна
+        # 3. Затем по наибольшей частоте использования
+        # 4. Затем по наименьшей длине названия (более общие названия предпочтительнее)
+        # 5. Наконец, стабильная сортировка по ID для повторяемости результатов
+        candidates_analysis.sort(key=lambda x: (
+            not x['is_substring'],  # False (подстрока) идёт первым
+            x['levenshtein_distance'], 
+            -x['frequency'],  # Отрицательное значение для сортировки по убыванию
+            x['name_length'],
+            x['id']  # Стабильная сортировка
+        ))
+        
+        best_candidate = candidates_analysis[0]
+        
+        logger.info(f"Выбран лучший кандидат из {len(candidates_analysis)} для '{original_search_name}': "
+                   f"ID='{best_candidate['id']}', название='{best_candidate['original_name']}', "
+                   f"частота={best_candidate['frequency']}, расстояние={best_candidate['levenshtein_distance']}, "
+                   f"длина={best_candidate['name_length']}, подстрока={best_candidate['is_substring']}")
+        
+        return best_candidate['id']
+        
+    except Exception as e:
+        logger.error(f"Ошибка при выборе лучшего ID из множественных совпадений: {e}")
+        # В случае ошибки возвращаем первый ID по алфавиту для стабильности
+        return sorted(candidate_ids)[0]
+
+
 def get_id_by_name(tenant_id: str, entity: str, name: str) -> Optional[str]:
     """
     Получить id по имени для сущности (service, employee, filial, category) и tenant_id.
@@ -230,10 +353,27 @@ def get_id_by_name(tenant_id: str, entity: str, name: str) -> Optional[str]:
         return partial_matches_ids[0]
     
     if len(partial_matches_ids) > 1:
-        # Если частичных совпадений несколько, это неоднозначность для данного этапа.
-        # Логируем, но не возвращаем, так как нечеткий поиск может дать лучший результат.
-        logger.warning(f"Найдено НЕСКОЛЬКО ({len(partial_matches_ids)}) частичных совпадений (подстрока) для тенанта '{tenant_id}', сущности '{entity}', по запросу '{normalized_name_to_search}' (исходное: '{name}'). Переходим к нечеткому поиску.")
-        # Не возвращаем None здесь, а продолжаем к нечеткому поиску по всем кандидатам.
+        # Проверяем, все ли найденные ID одинаковые
+        unique_ids = list(set(partial_matches_ids))
+        if len(unique_ids) == 1:
+            # Все найденные частичные совпадения указывают на один и тот же ID
+            logger.info(f"Найдено НЕСКОЛЬКО ({len(partial_matches_ids)}) частичных совпадений, но все указывают на один ID ('{unique_ids[0]}') для тенанта '{tenant_id}', сущности '{entity}', по запросу '{normalized_name_to_search}' (исходное: '{name}').")
+            return unique_ids[0]
+        else:
+            # Если частичных совпадений несколько и они указывают на разные ID, применяем умную стратегию выбора
+            logger.info(f"Найдено НЕСКОЛЬКО ({len(partial_matches_ids)}) частичных совпадений с разными ID для тенанта '{tenant_id}', сущности '{entity}', по запросу '{normalized_name_to_search}' (исходное: '{name}'). Найденные ID: {unique_ids}")
+            
+            # Применяем стратегию выбора лучшего ID из множественных совпадений
+            best_id = _select_best_id_from_multiple_matches(
+                tenant_id, entity, name_key_for_index, unique_ids, normalized_name_to_search, name
+            )
+            
+            if best_id:
+                logger.info(f"Выбран лучший ID ('{best_id}') из множественных частичных совпадений для '{normalized_name_to_search}'.")
+                return best_id
+            else:
+                logger.warning(f"Не удалось выбрать лучший ID из множественных частичных совпадений. Переходим к нечеткому поиску.")
+            # Продолжаем к нечеткому поиску по всем кандидатам
 
     # 3. Нечеткий поиск с использованием расстояния Левенштейна
     if candidate_norm_names_for_fuzzy:
