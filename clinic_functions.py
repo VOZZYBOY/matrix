@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from client_data_service import get_free_times_of_employee_by_services, add_record, get_multiple_data_from_api
 from clinic_index import get_name_by_id, normalize_text, get_id_by_name
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 
 _clinic_data: List[Dict[str, Any]] = []
 _tenant_id_for_clinic_data: Optional[str] = None
@@ -27,27 +27,27 @@ def smart_name_match(query_name: str, db_name: str) -> bool:
     if not query_name or not db_name:
         return False
         
-    # Нормализуем оба имени с сортировкой слов для сравнения
+    
     normalized_query = normalize_text(query_name, keep_spaces=False, sort_words=True)
     normalized_db = normalize_text(db_name, keep_spaces=False, sort_words=True)
     
-    # Точное совпадение после нормализации и сортировки
+    
     if normalized_query == normalized_db:
         return True
     
-    # Если точного совпадения нет, проверяем покрытие слов
+    
     query_words = set(normalize_text(query_name, keep_spaces=True).lower().split())
     db_words = set(normalize_text(db_name, keep_spaces=True).lower().split())
     
-    # Удаляем очень короткие слова (предлоги, сокращения)
+    
     query_words = {word for word in query_words if len(word) > 1}
     db_words = {word for word in db_words if len(word) > 1}
     
-    # Проверяем, содержатся ли все слова запроса в словах из БД
+   
     if query_words and query_words.issubset(db_words):
         return True
     
-    # Проверяем частичное совпадение (хотя бы 70% слов)
+    
     if query_words and db_words:
         intersection = query_words.intersection(db_words)
         coverage = len(intersection) / len(query_words)
@@ -93,15 +93,17 @@ def get_original_filial_name(normalized_name: str) -> Optional[str]:
 
 class FindEmployees(BaseModel):
     """
-    Модель для поиска сотрудников по различным критериям.
+    Модель для поиска сотрудников по различным критериям (унифицированный API с 6 режимами).
     
-    Режимы работы:
-    1. Получение списка сотрудников в филиале (указан только filial_name)
-    2. Получение списка категорий услуг сотрудника в филиале (указаны employee_name и filial_name)
-    3. Поиск сотрудников, выполняющих услугу в филиале (указаны service_name и filial_name)
-    4. Общий поиск по всем критериям
+    6 режимов работы в зависимости от переданных параметров:
+    1. Только filial_name → Все сотрудники в филиале
+    2. Только service_name → Все сотрудники, оказывающие услугу (независимо от филиала)
+    3. Только employee_name → Все услуги сотрудника (независимо от филиала)
+    4. filial_name + employee_name → Услуги сотрудника в конкретном филиале
+    5. filial_name + service_name → Сотрудники, оказывающие услугу в конкретном филиале
+    6. service_name + employee_name → Филиалы, где сотрудник оказывает конкретную услугу
     
-    ВАЖНО: Теперь возвращает категории услуг вместо конкретных услуг для лучшей навигации.
+    ВАЖНО: Возвращает категории услуг вместо конкретных услуг для лучшей навигации.
     """
     employee_name: Optional[str] = Field(default=None, description="Часть или полное ФИО сотрудника")
     service_name: Optional[str] = Field(default=None, description="Точное или частичное название услуги")
@@ -117,7 +119,6 @@ class FindEmployees(BaseModel):
         service_id_query = get_id_by_name(tenant_id, 'service', self.service_name) if self.service_name else None
         filial_id_query = get_id_by_name(tenant_id, 'filial', self.filial_name) if self.filial_name else None
 
-        # If user specified a name/filial/service but ID was not found, return error immediately
         if self.employee_name and not employee_id_query:
             return f"Сотрудник с именем '{self.employee_name}' не найден."
         if self.service_name and not service_id_query:
@@ -125,7 +126,6 @@ class FindEmployees(BaseModel):
         if self.filial_name and not filial_id_query:
              return f"Филиал с названием '{self.filial_name}' не найден."
 
-        # Call the new API endpoint with determined IDs
         from client_data_service import get_multiple_data_from_api
         try:
             api_data = await get_multiple_data_from_api(
@@ -133,30 +133,219 @@ class FindEmployees(BaseModel):
                 filial_id=filial_id_query,
                 employee_id=employee_id_query,
                 service_id=service_id_query,
-                tenant_id=tenant_id # Pass for logging
+                tenant_id=tenant_id 
             )
         except Exception as e:
             logger.error(f"[FindEmployees Proc] Ошибка вызова get_multiple_data_from_api: {e}", exc_info=True)
             return f"Ошибка при получении данных из актуальной базы: {str(e)}"
 
         if not api_data:
-            # No data returned means no matching employees for the criteria
-            # Craft a specific "not found" message based on filters
-            not_found_message = "Сотрудники не найдены"
-            filters_used = []
-            if self.employee_name: filters_used.append(f"именем '{self.employee_name}'")
-            if self.service_name: filters_used.append(f"оказывающие услугу '{self.service_name}'")
-            if self.filial_name: filters_used.append(f"работающие в филиале '{self.filial_name}'")
+            not_found_message = "Данные не найдены"
+            filters_used_parts = []
+            if self.employee_name: filters_used_parts.append(f"для сотрудника '{self.employee_name}'")
+            if self.service_name: filters_used_parts.append(f"по услуге '{self.service_name}'")
+            if self.filial_name: filters_used_parts.append(f"в филиале '{self.filial_name}'")
 
-            if filters_used:
-                not_found_message = f"Сотрудники с {', '.join(filters_used)} не найдены в актуальной базе данных."
+            if filters_used_parts:
+                not_found_message = f"В актуальной базе данных не найдено информации, соответствующей запросу: {', '.join(filters_used_parts)}."
             else:
-                not_found_message = "В актуальной базе данных не найдено сотрудников, соответствующих запросу."
+                not_found_message = "В актуальной базе данных не найдено информации, соответствующей вашему запросу."
             
-            logger.info(f"[FindEmployees Proc] API вернул пустой список. Ответ: {not_found_message}")
+        
+            if (self.employee_name and employee_id_query and not self.service_name):
+                 if self.filial_name and filial_id_query: # Mode 4
+                      not_found_message = f"Сотрудник '{self.employee_name}' не оказывает услуг в филиале '{self.filial_name}' согласно данным из API."
+                 else: 
+                      not_found_message = f"Для сотрудника '{self.employee_name}' не найдено услуг в данных из API."
+
+            logger.info(f"[FindEmployees Proc] API вернул пустой список или нерелевантные данные. Ответ: {not_found_message}")
             return not_found_message
 
-        # Process the data received from the API
+        is_mode_3_employee_services = bool(self.employee_name and not self.service_name and not self.filial_name and employee_id_query)
+        is_mode_4_employee_services_in_filial = bool(self.employee_name and self.filial_name and not self.service_name and employee_id_query and filial_id_query)
+        is_mode_5_service_employees_in_filial = bool(self.filial_name and self.service_name and not self.employee_name and filial_id_query and service_id_query)
+        is_mode_6_employee_service_filials = bool(self.service_name and self.employee_name and not self.filial_name and service_id_query and employee_id_query)
+
+        if is_mode_3_employee_services or is_mode_4_employee_services_in_filial:
+            employee_name_display = get_name_by_id(tenant_id, 'employee', employee_id_query) or self.employee_name
+            filial_name_display_mode4 = None
+            if is_mode_4_employee_services_in_filial and filial_id_query:
+                filial_name_display_mode4 = get_name_by_id(tenant_id, 'filial', filial_id_query) or self.filial_name
+            services_by_filial: Dict[str, List[str]] = {}
+            
+            for item in api_data:
+                service_name_item = item.get('serviceName')
+                filial_id_item = item.get('filialId')
+                
+                if is_mode_4_employee_services_in_filial and filial_id_item != filial_id_query:
+                    continue
+                
+                # Get filial name by ID
+                filial_name_item = get_name_by_id(tenant_id, 'filial', filial_id_item) if filial_id_item else None
+                
+                if service_name_item and filial_name_item:
+                    if filial_name_item not in services_by_filial:
+                        services_by_filial[filial_name_item] = []
+                    if service_name_item not in services_by_filial[filial_name_item]:
+                        services_by_filial[filial_name_item].append(service_name_item)
+
+            # Sort services within each filial
+            for filial_name in services_by_filial:
+                services_by_filial[filial_name].sort(key=normalize_text)
+
+            # Create display items for pagination
+            display_items = []
+            sorted_filial_names = sorted(services_by_filial.keys(), key=normalize_text)
+            
+            if is_mode_4_employee_services_in_filial:
+                # Mode 4: just list services directly
+                # Find the correct filial name key in services_by_filial (it comes from API)
+                target_services = []
+                for filial_name_from_api in services_by_filial:
+                    # Compare normalized names to handle potential differences
+                    if (normalize_text(filial_name_from_api) == normalize_text(filial_name_display_mode4) or
+                        filial_name_from_api == filial_name_display_mode4):
+                        target_services.extend(services_by_filial[filial_name_from_api])
+                        break
+                
+                for service_name in target_services:
+                    display_items.append({'type': 'service', 'name': service_name})
+            else:
+                # Mode 3: group by filials with headers
+                for filial_name in sorted_filial_names:
+                    display_items.append({'type': 'filial_header', 'name': filial_name})
+                    for service_name in services_by_filial[filial_name]:
+                        display_items.append({'type': 'service', 'name': service_name})
+
+            if not display_items:
+                if is_mode_4_employee_services_in_filial:
+                    return f"Сотрудник '{employee_name_display}' не оказывает услуг в филиале '{filial_name_display_mode4}'."
+                return f"Не найдено услуг для сотрудника '{employee_name_display}'."
+
+            # Pagination
+            total_items = len(display_items)
+            start_idx = (self.page_number - 1) * self.page_size
+            end_idx = start_idx + self.page_size
+            paginated_items = display_items[start_idx:end_idx]
+
+            if not paginated_items and self.page_number > 1:
+                max_pages = (total_items + self.page_size - 1) // self.page_size if self.page_size > 0 else 1
+                return f"Страница {self.page_number} не найдена. Доступно страниц: {max_pages} для услуг сотрудника '{employee_name_display}'."
+
+            # Format response
+            response_parts = []
+            if is_mode_4_employee_services_in_filial:
+                response_parts.append(f"Сотрудник {employee_name_display} в филиале '{filial_name_display_mode4}' оказывает следующие услуги:")
+            else:
+                response_parts.append(f"Сотрудник {employee_name_display} оказывает следующие услуги:")
+
+            for item in paginated_items:
+                if item['type'] == 'filial_header':
+                    response_parts.append(f"\nВ филиале \"{item['name']}\":")
+                elif item['type'] == 'service':
+                    indent = "  - " if is_mode_4_employee_services_in_filial else "    - "
+                    response_parts.append(f"{indent}{item['name']}")
+
+            # Add pagination info for services
+            total_services = sum(1 for item in display_items if item['type'] == 'service')
+            shown_services = sum(1 for item in paginated_items if item['type'] == 'service')
+            
+            if total_items > self.page_size or self.page_number > 1:
+                max_pages = (total_items + self.page_size - 1) // self.page_size if self.page_size > 0 else 1
+                pagination_note = f"Показано услуг на этой странице: {shown_services} (всего найдено услуг: {total_services}). Страница {self.page_number} из {max_pages}."
+                if end_idx < total_items:
+                    pagination_note += f" Для следующей страницы укажите page_number={self.page_number + 1}."
+                response_parts.append(f"\n{pagination_note}")
+
+            return "\n".join(response_parts)
+
+        # Mode 5: service + filial -> employees who do this service in this filial
+        if is_mode_5_service_employees_in_filial:
+            service_name_display = get_name_by_id(tenant_id, 'service', service_id_query) or self.service_name
+            filial_name_display = get_name_by_id(tenant_id, 'filial', filial_id_query) or self.filial_name
+            
+            employees_set = set()
+            for item in api_data:
+                emp_name = item.get('employeeFullname')
+                if emp_name:
+                    employees_set.add(emp_name)
+            
+            employees_list = sorted(list(employees_set))
+            
+            if not employees_list:
+                return f"В филиале '{filial_name_display}' не найдено сотрудников, оказывающих услугу '{service_name_display}'."
+            
+            # Pagination for employees
+            total_employees = len(employees_list)
+            start_idx = (self.page_number - 1) * self.page_size
+            end_idx = start_idx + self.page_size
+            paginated_employees = employees_list[start_idx:end_idx]
+            
+            if not paginated_employees and self.page_number > 1:
+                max_pages = (total_employees + self.page_size - 1) // self.page_size if self.page_size > 0 else 1
+                return f"Страница {self.page_number} не найдена. Доступно страниц: {max_pages} для сотрудников, оказывающих услугу '{service_name_display}' в филиале '{filial_name_display}'."
+            
+            response_parts = []
+            response_parts.append(f"В филиале '{filial_name_display}' услугу '{service_name_display}' оказывают следующие сотрудники:")
+            
+            for emp_name in paginated_employees:
+                response_parts.append(f"  - {emp_name}")
+            
+            # Add pagination info
+            if total_employees > self.page_size or self.page_number > 1:
+                max_pages = (total_employees + self.page_size - 1) // self.page_size if self.page_size > 0 else 1
+                pagination_note = f"Показано сотрудников на этой странице: {len(paginated_employees)} (всего найдено: {total_employees}). Страница {self.page_number} из {max_pages}."
+                if end_idx < total_employees:
+                    pagination_note += f" Для следующей страницы укажите page_number={self.page_number + 1}."
+                response_parts.append(f"\n{pagination_note}")
+            
+            return "\n".join(response_parts)
+
+        # Mode 6: service + employee -> filials where this employee does this service
+        if is_mode_6_employee_service_filials:
+            service_name_display = get_name_by_id(tenant_id, 'service', service_id_query) or self.service_name
+            employee_name_display = get_name_by_id(tenant_id, 'employee', employee_id_query) or self.employee_name
+            
+            filials_set = set()
+            for item in api_data:
+                filial_id_item = item.get('filialId')
+                if filial_id_item:
+                    filial_name_item = get_name_by_id(tenant_id, 'filial', filial_id_item)
+                    if filial_name_item:
+                        filials_set.add(filial_name_item)
+            
+            filials_list = sorted(list(filials_set))
+            
+            if not filials_list:
+                return f"Сотрудник '{employee_name_display}' не оказывает услугу '{service_name_display}' ни в одном филиале."
+            
+            # Pagination for filials
+            total_filials = len(filials_list)
+            start_idx = (self.page_number - 1) * self.page_size
+            end_idx = start_idx + self.page_size
+            paginated_filials = filials_list[start_idx:end_idx]
+            
+            if not paginated_filials and self.page_number > 1:
+                max_pages = (total_filials + self.page_size - 1) // self.page_size if self.page_size > 0 else 1
+                return f"Страница {self.page_number} не найдена. Доступно страниц: {max_pages} для филиалов, где сотрудник '{employee_name_display}' оказывает услугу '{service_name_display}'."
+            
+            response_parts = []
+            response_parts.append(f"Сотрудник '{employee_name_display}' оказывает услугу '{service_name_display}' в следующих филиалах:")
+            
+            for filial_name in paginated_filials:
+                response_parts.append(f"  - {filial_name}")
+            
+            # Add pagination info
+            if total_filials > self.page_size or self.page_number > 1:
+                max_pages = (total_filials + self.page_size - 1) // self.page_size if self.page_size > 0 else 1
+                pagination_note = f"Показано филиалов на этой странице: {len(paginated_filials)} (всего найдено: {total_filials}). Страница {self.page_number} из {max_pages}."
+                if end_idx < total_filials:
+                    pagination_note += f" Для следующей страницы укажите page_number={self.page_number + 1}."
+                response_parts.append(f"\n{pagination_note}")
+            
+            return "\n".join(response_parts)
+
+        # Process the data received from the API for other modes (listing employees)
         # The API returns a list of dictionaries, where each dict seems to be a service provided by an employee in a filial.
         # We need to aggregate this by employee.
         employees_info: Dict[str, Dict[str, Any]] = {}
@@ -889,6 +1078,8 @@ class ListServicesInFilial(BaseModel):
 
         # Call the new API endpoint filtering ONLY by filialId
         from client_data_service import get_multiple_data_from_api
+        # Call the new API endpoint filtering ONLY by filialId
+        from client_data_service import get_multiple_data_from_api
         api_data = await get_multiple_data_from_api(
              api_token=api_token,
              filial_id=filial_id_query,
@@ -921,8 +1112,6 @@ class ListServicesInFilial(BaseModel):
         for category in sorted_categories:
              paginatable_items.append((category, None)) # Category header marker
              services_in_category = sorted(list(categories_with_services[category]), key=normalize_text)
-             for service in services_in_category:
-                  paginatable_items.append((category, service)) # Service item
 
         # Apply pagination
         total_paginatable_items = len(paginatable_items)
@@ -967,16 +1156,24 @@ class ListCategories(BaseModel):
     page_number: int = Field(default=1, description="Номер страницы (начиная с 1)")
     page_size: int = Field(default=20, description="Количество категорий на странице")
 
-    def process(self) -> str:
-        if not _clinic_data: return "Ошибка: База данных клиники пуста."
-        if not _tenant_id_for_clinic_data:
-            logger.error("[ListCategories] _tenant_id_for_clinic_data не установлен.")
-            return "Ошибка: Внутренняя ошибка конфигурации (tenant_id не найден)."
+    async def process(self, tenant_id: str, api_token: str) -> str:
+        logger.info(f"[ListCategories Proc] Запрос списка категорий, Tenant: {tenant_id}, Page: {self.page_number}, Size: {self.page_size}")
 
-        logger.info(f"[FC Proc] Запрос списка категорий, Tenant: {_tenant_id_for_clinic_data}, Page: {self.page_number}, Size: {self.page_size}")
+        # Получаем актуальные данные через API
+        try:
+            api_data = await get_multiple_data_from_api(
+                api_token=api_token,
+                tenant_id=tenant_id
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при вызове get_multiple_data_from_api для получения списка категорий: {e}", exc_info=True)
+            return f"Ошибка при получении актуальных данных для списка категорий."
+
+        if not api_data:
+            return "Не найдено актуальных данных для получения списка категорий."
 
         all_categories_orig: Set[str] = set()
-        for item_data in _clinic_data:
+        for item_data in api_data:
             c_name_val = item_data.get('categoryName')
             if c_name_val: 
                 all_categories_orig.add(c_name_val)
@@ -1120,51 +1317,65 @@ class ListServicesInCategory(BaseModel):
     page_number: int = Field(default=1, description="Номер страницы (начиная с 1)")
     page_size: int = Field(default=20, description="Количество услуг на странице")
 
-    def process(self) -> str:
-        if not _clinic_data: return "Ошибка: База данных клиники пуста."
-        if not _tenant_id_for_clinic_data:
-            logger.error("[ListServicesInCategory] _tenant_id_for_clinic_data не установлен.")
-            return "Ошибка: Внутренняя ошибка конфигурации (tenant_id не найден)."
+    async def process(self, tenant_id: str, api_token: str) -> str:
+        logger.info(f"[ListServicesInCategory Proc] Запрос услуг в категории: {self.category_name}, Tenant: {tenant_id}, Page: {self.page_number}, Size: {self.page_size}")
 
-        logger.info(f"[FC Proc] Запрос услуг в категории: {self.category_name}, Tenant: {_tenant_id_for_clinic_data}, Page: {self.page_number}, Size: {self.page_size}")
-
-        category_id = get_id_by_name(_tenant_id_for_clinic_data, 'category', self.category_name)
+        # Get category ID first
+        category_id = get_id_by_name(tenant_id, 'category', self.category_name)
         if not category_id:
             return f"Категория с названием, похожим на '{self.category_name}', не найдена."
 
-        display_category_name = get_name_by_id(_tenant_id_for_clinic_data, 'category', category_id) or self.category_name
+        display_category_name = get_name_by_id(tenant_id, 'category', category_id) or self.category_name
 
+        # Call the new API endpoint filtering by categoryId (using service_id parameter with category logic)
+        from client_data_service import get_multiple_data_from_api
+        try:
+            # Get all data and filter by category on our side since API doesn't have category_id parameter
+            api_data = await get_multiple_data_from_api(
+                api_token=api_token,
+                tenant_id=tenant_id
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при вызове get_multiple_data_from_api для категории {self.category_name}: {e}", exc_info=True)
+            return f"Ошибка при получении данных услуг для категории '{self.category_name}'."
+
+        if not api_data:
+            return f"Не найдено данных в актуальной базе для анализа категории '{display_category_name}'."
+
+        # Filter services by category from API response
         services_in_category: Set[str] = set()
-        for item in _clinic_data:
-            if item.get('categoryId') == category_id:
-                srv_name_raw = item.get('serviceName')
-                if srv_name_raw: services_in_category.add(srv_name_raw)
+        for item in api_data:
+            item_category_id = item.get('categoryId')
+            if item_category_id == category_id:
+                service_name = item.get('serviceName')
+                if service_name:
+                    services_in_category.add(service_name)
 
         if not services_in_category:
-            return f"В категории '{display_category_name}' не найдено конкретных услуг."
-        else:
-            sorted_services = sorted(list(services_in_category), key=lambda s: normalize_text(s, keep_spaces=True))
-            total_services = len(sorted_services)
+            return f"В категории '{display_category_name}' не найдено услуг в актуальной базе данных."
+        
+        sorted_services = sorted(list(services_in_category), key=lambda s: normalize_text(s, keep_spaces=True))
+        total_services = len(sorted_services)
 
-            start_index = (self.page_number - 1) * self.page_size
-            end_index = start_index + self.page_size
-            paginated_services = sorted_services[start_index:end_index]
+        start_index = (self.page_number - 1) * self.page_size
+        end_index = start_index + self.page_size
+        paginated_services = sorted_services[start_index:end_index]
 
-            if not paginated_services and self.page_number > 1:
-                return f"В категории '{display_category_name}' больше нет услуг для отображения (страница {self.page_number})."
+        if not paginated_services and self.page_number > 1:
+            return f"В категории '{display_category_name}' больше нет услуг для отображения (страница {self.page_number})."
 
-            clarification = f" (уточнено до '{display_category_name}')" if normalize_text(display_category_name, keep_spaces=True) != normalize_text(self.category_name, keep_spaces=True) else ""
-            page_info = f" (страница {self.page_number} из {(total_services + self.page_size - 1) // self.page_size if self.page_size > 0 else 1})" if total_services > self.page_size else ""
-            
-            response_intro = f"В категорию '{self.category_name}'{clarification} входят следующие услуги{page_info}:"
-            response_list = "\n- " + "\n- ".join(paginated_services)
-            
-            more_info = ""
-            if end_index < total_services:
-                remaining = total_services - end_index
-                more_info = f"\n... и еще {remaining} {get_readable_count_form(remaining, ('услуга', 'услуги', 'услуг'))}."
-            
-            return f"{response_intro}{response_list}{more_info}"
+        clarification = f" (уточнено до '{display_category_name}')" if normalize_text(display_category_name, keep_spaces=True) != normalize_text(self.category_name, keep_spaces=True) else ""
+        page_info = f" (страница {self.page_number} из {(total_services + self.page_size - 1) // self.page_size if self.page_size > 0 else 1})" if total_services > self.page_size else ""
+        
+        response_intro = f"В категорию '{self.category_name}'{clarification} входят следующие услуги{page_info}:"
+        response_list = "\n- " + "\n- ".join(paginated_services)
+        
+        more_info = ""
+        if end_index < total_services:
+            remaining = total_services - end_index
+            more_info = f"\n... и еще {remaining} {get_readable_count_form(remaining, ('услуга', 'услуги', 'услуг'))}."
+        
+        return f"{response_intro}{response_list}{more_info}"
 
 
 class FindServicesInPriceRange(BaseModel):
@@ -1176,34 +1387,43 @@ class FindServicesInPriceRange(BaseModel):
     page_number: int = Field(default=1, description="Номер страницы (начиная с 1)")
     page_size: int = Field(default=20, description="Количество услуг на странице")
 
-    def process(self) -> str:
-        if not _clinic_data: return "Ошибка: База данных клиники пуста."
-        if not _tenant_id_for_clinic_data:
-            logger.error("[FindServicesInPriceRange] _tenant_id_for_clinic_data не установлен.")
-            return "Ошибка: Внутренняя ошибка конфигурации (tenant_id не найден)."
+    async def process(self, tenant_id: str, api_token: str) -> str:
+        logger.info(f"[FindServicesInPriceRange Proc] Поиск услуг в диапазоне цен: {self.min_price}-{self.max_price}, Категория: {self.category_name}, Филиал: {self.filial_name}, Tenant: {tenant_id}, Page: {self.page_number}, Size: {self.page_size}")
 
-        logger.info(f"[FC Proc] Поиск услуг в диапазоне цен: {self.min_price}-{self.max_price}, Категория: {self.category_name}, Филиал: {self.filial_name}, Tenant: {_tenant_id_for_clinic_data}, Page: {self.page_number}, Size: {self.page_size}")
+        # Получаем актуальные данные через API
+        try:
+            api_data = await get_multiple_data_from_api(
+                api_token=api_token,
+                tenant_id=tenant_id,
+                filial_id=None  # Получаем данные по всем филиалам, потом фильтруем
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при вызове get_multiple_data_from_api для поиска услуг в диапазоне цен: {e}", exc_info=True)
+            return f"Ошибка при получении актуальных данных для поиска услуг в диапазоне цен {self.min_price}-{self.max_price}."
+
+        if not api_data:
+            return f"Не найдено актуальных данных для поиска услуг в диапазоне цен {self.min_price}-{self.max_price}."
 
         target_category_id: Optional[str] = None
         display_category_name_query = self.category_name
         if self.category_name:
-            target_category_id = get_id_by_name(_tenant_id_for_clinic_data, 'category', self.category_name)
+            target_category_id = get_id_by_name(tenant_id, 'category', self.category_name)
             if not target_category_id:
                 return f"Категория '{self.category_name}' не найдена."
-            display_category_name_query = get_name_by_id(_tenant_id_for_clinic_data, 'category', target_category_id) or self.category_name
+            display_category_name_query = get_name_by_id(tenant_id, 'category', target_category_id) or self.category_name
 
         target_filial_id: Optional[str] = None
         display_filial_name_query = self.filial_name
         if self.filial_name:
-            target_filial_id = get_id_by_name(_tenant_id_for_clinic_data, 'filial', self.filial_name)
+            target_filial_id = get_id_by_name(tenant_id, 'filial', self.filial_name)
             if not target_filial_id:
                 return f"Филиал '{self.filial_name}' не найден."
-            display_filial_name_query = get_name_by_id(_tenant_id_for_clinic_data, 'filial', target_filial_id) or self.filial_name
+            display_filial_name_query = get_name_by_id(tenant_id, 'filial', target_filial_id) or self.filial_name
 
         found_services: List[Dict[str, Any]] = [] # Список словарей для каждой найденной услуги
         processed_service_ids: Set[str] = set() # Для избежания дублирования услуг с разными ценами в одном филиале, если такое возможно
 
-        for item in _clinic_data:
+        for item in api_data:
             service_id = item.get('serviceId')
             if not service_id or service_id in processed_service_ids: continue
 
@@ -1286,22 +1506,19 @@ class FindSpecialistsByServiceOrCategoryAndFilial(BaseModel):
     page_number: int = Field(default=1, description="Номер страницы (начиная с 1)")
     page_size: int = Field(default=15, description="Количество специалистов на странице")
 
-    def process(self) -> str:
-        if not self.query_term or not self.filial_name: return "Ошибка: Укажите услугу/категорию и филиал."
-        if not _clinic_data: return "Ошибка: Данные клиники не загружены."
-        if not _tenant_id_for_clinic_data:
-            logger.error("[FindSpecialistsByServiceOrCategoryAndFilial] _tenant_id_for_clinic_data не установлен.")
-            return "Ошибка: Внутренняя ошибка конфигурации (tenant_id не найден)."
+    async def process(self, tenant_id: str, api_token: str) -> str:
+        if not self.query_term or not self.filial_name: 
+            return "Ошибка: Укажите услугу/категорию и филиал."
 
-        logger.info(f"[FC Proc] Поиск специалистов (Запрос: '{self.query_term}', Филиал: '{self.filial_name}'), Tenant: {_tenant_id_for_clinic_data}, Page: {self.page_number}, Size: {self.page_size}")
+        logger.info(f"[FindSpecialistsByServiceOrCategoryAndFilial Proc] Поиск специалистов (Запрос: '{self.query_term}', Филиал: '{self.filial_name}'), Tenant: {tenant_id}, Page: {self.page_number}, Size: {self.page_size}")
 
-        filial_id = get_id_by_name(_tenant_id_for_clinic_data, 'filial', self.filial_name)
+        filial_id = get_id_by_name(tenant_id, 'filial', self.filial_name)
         if not filial_id:
             return f"Филиал с названием, похожим на '{self.filial_name}', не найден."
         
-        original_filial_display_name = get_name_by_id(_tenant_id_for_clinic_data, 'filial', filial_id) or self.filial_name
+        original_filial_display_name = get_name_by_id(tenant_id, 'filial', filial_id) or self.filial_name
 
-        service_id_match = get_id_by_name(_tenant_id_for_clinic_data, 'service', self.query_term)
+        service_id_match = get_id_by_name(tenant_id, 'service', self.query_term)
         category_id_match = None
         query_type = ""
         resolved_query_term_name = self.query_term
@@ -1309,34 +1526,48 @@ class FindSpecialistsByServiceOrCategoryAndFilial(BaseModel):
         if service_id_match:
             query_type = "service"
             logger.info(f"Запрос '{self.query_term}' распознан как услуга с ID: {service_id_match}")
-            resolved_query_term_name = get_name_by_id(_tenant_id_for_clinic_data, 'service', service_id_match) or self.query_term
+            resolved_query_term_name = get_name_by_id(tenant_id, 'service', service_id_match) or self.query_term
         else:
-            category_id_match = get_id_by_name(_tenant_id_for_clinic_data, 'category', self.query_term)
+            category_id_match = get_id_by_name(tenant_id, 'category', self.query_term)
             if category_id_match:
                 query_type = "category"
                 logger.info(f"Запрос '{self.query_term}' распознан как категория с ID: {category_id_match}")
-                resolved_query_term_name = get_name_by_id(_tenant_id_for_clinic_data, 'category', category_id_match) or self.query_term
+                resolved_query_term_name = get_name_by_id(tenant_id, 'category', category_id_match) or self.query_term
             else:
                 return f"Термин '{self.query_term}' не распознан ни как услуга, ни как категория."
 
+        # Получаем актуальные данные о специалистах через API
+        from client_data_service import get_multiple_data_from_api
+        try:
+            # Фильтруем по филиалу и услуге/категории
+            api_data = await get_multiple_data_from_api(
+                api_token=api_token,
+                filial_id=filial_id,
+                service_id=service_id_match if query_type == "service" else None,
+                tenant_id=tenant_id
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при вызове get_multiple_data_from_api для поиска специалистов: {e}", exc_info=True)
+            return f"Ошибка при получении актуальных данных специалистов для '{self.query_term}' в филиале '{self.filial_name}'."
+
+        if not api_data:
+            return f"В филиале '{original_filial_display_name}' не найдено актуальных данных для анализа специалистов по '{resolved_query_term_name}'."
+
         matching_employees: Dict[str, str] = {}
-        for item in _clinic_data:
-            if item.get("filialId") != filial_id:
+        
+        for item in api_data:
+            # Дополнительная фильтрация по категории если нужно (API фильтрует только по service_id)
+            if query_type == "category" and item.get("categoryId") != category_id_match:
                 continue
 
             emp_id = item.get("employeeId")
             emp_name_raw = item.get("employeeFullName")
-            if not emp_id or not emp_name_raw: continue
+            if not emp_id or not emp_name_raw: 
+                continue
 
-            match_found = False
-            if query_type == "service" and item.get("serviceId") == service_id_match:
-                match_found = True
-            elif query_type == "category" and item.get("categoryId") == category_id_match:
-                match_found = True
-            
-            if match_found:
-                if emp_id not in matching_employees:
-                    matching_employees[emp_id] = emp_name_raw # Сохраняем оригинальное имя
+            # Добавляем сотрудника в результаты
+            if emp_id not in matching_employees:
+                matching_employees[emp_id] = emp_name_raw
 
         if not matching_employees:
             return f"В филиале '{original_filial_display_name}' не найдено специалистов для '{resolved_query_term_name}'."
@@ -1441,9 +1672,22 @@ class GetFreeSlots(BaseModel):
     api_token: Optional[str] = None
 
     async def process(self, **kwargs) -> str:
+        # Устанавливаем начальную дату для поиска
         if not self.date_time:
-            self.date_time = datetime.now().strftime("%Y.%m.%d")
+            search_date = datetime.now()
+            self.date_time = search_date.strftime("%Y.%m.%d")
             logger.info(f"Дата не указана, используется текущая: {self.date_time}")
+        else:
+            try:
+                search_date = datetime.strptime(self.date_time, "%Y.%m.%d")
+            except ValueError:
+                try:
+                    search_date = datetime.strptime(self.date_time, "%d.%m.%Y")
+                    self.date_time = search_date.strftime("%Y.%m.%d")
+                except ValueError:
+                    search_date = datetime.now()
+                    self.date_time = search_date.strftime("%Y.%m.%d")
+                    logger.warning(f"Неверный формат даты, используется текущая: {self.date_time}")
         
         # Проверка корректности ID услуг и сотрудника
         if not self.employee_id:
@@ -1455,94 +1699,100 @@ class GetFreeSlots(BaseModel):
         if not self.filial_id:
             return "Не удалось определить ID филиала. Пожалуйста, проверьте правильность названия филиала."
         
-        # МОДИФИКАЦИЯ: Считаем все услуги валидными и передаем их в API
-        valid_services_for_filial = self.service_ids
+        # Получаем имена для отображения
+        employee_name_display = get_name_by_id(self.tenant_id, 'employee', self.employee_id) or self.employee_id
+        filial_name_display = get_name_by_id(self.tenant_id, 'filial', self.filial_id) or self.filial_id
         
-        logger.info(f"Запрос свободных слотов: TenantID={self.tenant_id}, EmployeeID={self.employee_id}, ServiceIDs={self.service_ids}, Date={self.date_time}, FilialID={self.filial_id}")
-        try:
-            # Добавляем более подробное логирование перед вызовом API
-            logger.info(f"Выполняем вызов API get_free_times_of_employee_by_services с параметрами: employeeId={self.employee_id}, serviceId={self.service_ids}, dateTime={self.date_time}, filialId={self.filial_id}")
+        # Умный поиск слотов с итерацией по датам
+        max_iterations = 7
+        date_increment = 7  # дней
+        original_date = search_date
+        searched_dates = []
+        
+        logger.info(f"Начинаем умный поиск слотов: TenantID={self.tenant_id}, EmployeeID={self.employee_id}, ServiceIDs={self.service_ids}, StartDate={self.date_time}, FilialID={self.filial_id}")
+        
+        for iteration in range(max_iterations):
+            current_date_str = search_date.strftime("%Y-%m-%d")
+            searched_dates.append(search_date.strftime("%d.%m.%Y"))
             
-            response_data = await get_free_times_of_employee_by_services(
-                tenant_id=self.tenant_id,
-                employee_id=self.employee_id,
-                service_ids=self.service_ids,
-                date_time=self.date_time,
-                filial_id=self.filial_id,
-                api_token=self.api_token
-            )
+            logger.info(f"Поиск слотов: итерация {iteration + 1}/{max_iterations}, дата: {current_date_str}")
+            
+            try:
+                response_data = await get_free_times_of_employee_by_services(
+                    tenant_id=self.tenant_id,
+                    employee_id=self.employee_id,
+                    service_ids=self.service_ids,
+                    date_time=current_date_str,
+                    filial_id=self.filial_id,
+                    api_token=self.api_token
+                )
 
-            if response_data and response_data.get('code') == 200:
-                api_data_content = response_data.get('data')
+                if response_data and response_data.get('code') == 200:
+                    api_data_content = response_data.get('data')
 
-                if isinstance(api_data_content, dict) and 'workDates' in api_data_content:
-                    all_formatted_slots = []
-                    employee_name_original = api_data_content.get('name', self.employee_id)
-                    
-                    filial_name_original = get_name_by_id(self.tenant_id, 'filial', self.filial_id) or self.filial_id
+                    # Обработка нового формата с workDates
+                    if isinstance(api_data_content, dict) and 'workDates' in api_data_content:
+                        all_formatted_slots = []
+                        employee_name_from_api = api_data_content.get('name', employee_name_display)
 
-                    for work_day in api_data_content.get('workDates', []):
-                        date_str = work_day.get('date')
-                        time_slots_for_day = work_day.get('timeSlots', [])
-                        
-                        if date_str and time_slots_for_day:
-                            try:
-                                formatted_date_str = datetime.strptime(date_str, "%Y.%m.%d").strftime("%d.%m.%Y")
-                            except ValueError:
-                                formatted_date_str = date_str 
+                        for work_day in api_data_content.get('workDates', []):
+                            date_str = work_day.get('date')
+                            time_slots_for_day = work_day.get('timeSlots', [])
                             
-                            day_slots_str = f"На {formatted_date_str}: {', '.join(time_slots_for_day)}"
-                            all_formatted_slots.append(day_slots_str)
-                    
-                    if not all_formatted_slots:
-                        logger.info(f"Не найдено слотов в 'workDates' для сотрудника {employee_name_original} ({self.employee_id}) на {self.date_time} в филиале {filial_name_original} ({self.filial_id}).")
-                        return f"К сожалению, у сотрудника {employee_name_original} нет свободных слотов на указанную дату в филиале {filial_name_original} по выбранным услугам."
-                    
-                    response_message = f"Доступные слоты для сотрудника {employee_name_original} в филиале {filial_name_original}:\n" + "\n".join(all_formatted_slots)
-                    return response_message
+                            if date_str and time_slots_for_day:
+                                try:
+                                    formatted_date_str = datetime.strptime(date_str, "%Y.%m.%d").strftime("%d.%m.%Y")
+                                except ValueError:
+                                    formatted_date_str = date_str 
+                                
+                                day_slots_str = f"На {formatted_date_str}: {', '.join(time_slots_for_day)}"
+                                all_formatted_slots.append(day_slots_str)
+                        
+                        if all_formatted_slots:
+                            # Найдены слоты! Возвращаем результат
+                            if iteration > 0:
+                                date_range_info = f"(поиск проводился с {searched_dates[0]} по {searched_dates[-1]})"
+                            else:
+                                date_range_info = f"на запрашиваемую дату {searched_dates[0]}"
+                            
+                            response_message = f"Доступные слоты для сотрудника {employee_name_from_api} в филиале {filial_name_display} {date_range_info}:\n" + "\n".join(all_formatted_slots)
+                            logger.info(f"Найдены слоты на итерации {iteration + 1}, дата: {current_date_str}")
+                            return response_message
 
-                elif isinstance(api_data_content, list):
-                    logger.info("API вернуло 'data' как список (старый формат). Обработка...")
-                    processed_slots = []
-                    if not api_data_content: 
-                         logger.info(f"API вернуло пустой список в 'data' для сотрудника {self.employee_id} на {self.date_time} в филиале {self.filial_id}.")
-                         return f"К сожалению, свободных слотов не найдено."
+                    # Обработка старого формата (список)
+                    elif isinstance(api_data_content, list) and api_data_content:
+                        processed_slots = []
+                        for slot_info in api_data_content:
+                            if isinstance(slot_info, dict) and 'time' in slot_info:
+                                processed_slots.append(slot_info['time'])
+                        
+                        if processed_slots:
+                            if iteration > 0:
+                                date_range_info = f"(поиск проводился с {searched_dates[0]} по {searched_dates[-1]})"
+                            else:
+                                date_range_info = f"на запрашиваемую дату {searched_dates[0]}"
+                            
+                            logger.info(f"Найдены слоты на итерации {iteration + 1}, дата: {current_date_str}")
+                            return f"Для сотрудника {employee_name_display} в филиале {filial_name_display} {date_range_info} доступны следующие слоты: {', '.join(processed_slots)}."
+                
+                # Ошибка API - прерываем поиск
+                elif response_data and response_data.get('code') != 200:
+                    error_msg = response_data.get('message', 'Неизвестная ошибка от API')
+                    logger.error(f"Ошибка от API при запросе свободных слотов (код {response_data.get('code')}): {error_msg}")
+                    return f"Не удалось получить свободные слоты: {error_msg}"
 
-                    for slot_info in api_data_content:
-                        if isinstance(slot_info, dict) and 'time' in slot_info:
-                            processed_slots.append(slot_info['time'])
-                    
-                    if not processed_slots:
-                        logger.info(f"Не найдено ключей 'time' в элементах списка 'data' от API для {self.employee_id}.")
-                        return "Свободные слоты не найдены (не удалось обработать ответ API)."
-                    
-                    employee_name_display = get_name_by_id(self.tenant_id, 'employee', self.employee_id) or self.employee_id
-                    filial_name_display = get_name_by_id(self.tenant_id, 'filial', self.filial_id) or self.filial_id
-                    date_display = self.date_time 
-
-                    return f"Для сотрудника {employee_name_display} в филиале {filial_name_display} на {date_display} доступны следующие слоты: {', '.join(processed_slots)}."
-
-                else: # Неожиданный формат data
-                    logger.warning(f"Ожидался список или словарь с 'workDates' для 'data' от API, но получен {type(api_data_content)}. Содержимое: {str(api_data_content)[:500]}. Слоты не будут обработаны.")
-                   
-                    employee_name_from_data = "неизвестного сотрудника"
-                    if isinstance(api_data_content, dict) and 'name' in api_data_content:
-                        employee_name_from_data = api_data_content['name']
-                    
-                    filial_name_display = get_name_by_id(self.tenant_id, 'filial', self.filial_id) or self.filial_id
-                    return f"Для сотрудника {employee_name_from_data} в филиале {filial_name_display} на {self.date_time} не найдено свободных слотов, или формат данных от API не распознан."
-
-            elif response_data:
-                error_msg = response_data.get('message', 'Неизвестная ошибка от API')
-                logger.error(f"Ошибка от API при запросе свободных слотов (код {response_data.get('code')}): {error_msg}. Параметры: emp={self.employee_id}, fil={self.filial_id}, date={self.date_time}")
-                return f"Не удалось получить свободные слоты: {error_msg}"
-            else:
-                logger.error(f"Нет ответа от API при запросе свободных слотов для emp={self.employee_id}, fil={self.filial_id}, date={self.date_time}")
-                return "Не удалось связаться с системой записи для получения свободных слотов."
-
-        except Exception as e:
-            logger.error(f"Исключение в GetFreeSlots.process для emp={self.employee_id}, fil={self.filial_id}, date={self.date_time}: {e}", exc_info=True)
-            return f"Произошла внутренняя ошибка при поиске свободных слотов: {e}"
+            except Exception as e:
+                logger.error(f"Исключение в GetFreeSlots.process на итерации {iteration + 1}, дата {current_date_str}: {e}", exc_info=True)
+                return f"Произошла внутренняя ошибка при поиске свободных слотов: {e}"
+            
+            # Переходим к следующей дате (+7 дней)
+            search_date += timedelta(days=date_increment)
+        
+        # Если после всех итераций слоты не найдены
+        date_range_str = f"с {searched_dates[0]} по {searched_dates[-1]}"
+        logger.info(f"Слоты не найдены после {max_iterations} итераций поиска в диапазоне {date_range_str}")
+        
+        return f"К сожалению, у сотрудника {employee_name_display} нет свободных слотов в филиале {filial_name_display} в период {date_range_str} по выбранным услугам. Попробуйте выбрать другую дату или другого специалиста."
 
 
 class BookAppointmentAIPayload(BaseModel):
@@ -1620,58 +1870,75 @@ class GetServicesByCategory(BaseModel):
     page_size: int = Field(default=20, description="Количество услуг на странице")
     include_prices: bool = Field(default=True, description="Включать ли цены в результат")
 
-    def process(self) -> str:
-        if not _clinic_data: 
-            return "Ошибка: База данных клиники пуста."
-        if not _tenant_id_for_clinic_data:
-            logger.error("[GetServicesByCategory] _tenant_id_for_clinic_data не установлен.")
-            return "Ошибка: Внутренняя ошибка конфигурации (tenant_id не найден)."
-
-        logger.info(f"[FC Proc] Получение услуг по категории: '{self.category_name}' в филиале '{self.filial_name}', Tenant: {_tenant_id_for_clinic_data}, Page: {self.page_number}, Size: {self.page_size}")
+    async def process(self, tenant_id: str, api_token: str) -> str:
+        logger.info(f"[GetServicesByCategory Proc] Получение услуг по категории: '{self.category_name}' в филиале '{self.filial_name}', Tenant: {tenant_id}, Page: {self.page_number}, Size: {self.page_size}")
 
         # Проверяем существование категории
-        category_id = get_id_by_name(_tenant_id_for_clinic_data, 'category', self.category_name)
+        category_id = get_id_by_name(tenant_id, 'category', self.category_name)
         if not category_id:
             return f"Категория с названием, похожим на '{self.category_name}', не найдена."
 
         # Проверяем существование филиала
-        filial_id = get_id_by_name(_tenant_id_for_clinic_data, 'filial', self.filial_name)
+        filial_id = get_id_by_name(tenant_id, 'filial', self.filial_name)
         if not filial_id:
             return f"Филиал с названием, похожим на '{self.filial_name}', не найден."
 
         # Получаем точные названия для отображения
-        display_category_name = get_name_by_id(_tenant_id_for_clinic_data, 'category', category_id) or self.category_name
-        display_filial_name = get_name_by_id(_tenant_id_for_clinic_data, 'filial', filial_id) or self.filial_name
+        display_category_name = get_name_by_id(tenant_id, 'category', category_id) or self.category_name
+        display_filial_name = get_name_by_id(tenant_id, 'filial', filial_id) or self.filial_name
 
-        # Собираем услуги из указанной категории в указанном филиале
+        # Получаем актуальные данные через API с фильтрацией по филиалу
+        from client_data_service import get_multiple_data_from_api
+        try:
+            api_data = await get_multiple_data_from_api(
+                api_token=api_token,
+                filial_id=filial_id,
+                tenant_id=tenant_id
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при вызове get_multiple_data_from_api для категории {self.category_name} в филиале {self.filial_name}: {e}", exc_info=True)
+            return f"Ошибка при получении актуальных данных для категории '{self.category_name}' в филиале '{self.filial_name}'."
+
+        if not api_data:
+            return f"В филиале '{display_filial_name}' не найдено актуальных данных для анализа доступности услуг."
+
+        # Собираем услуги из указанной категории в указанном филиале из API
         services_in_category_and_filial = {}  # service_name -> {'price': float or None, 'count': int}
         
-        for item in _clinic_data:
-            if (item.get('categoryId') == category_id and 
-                item.get('filialId') == filial_id):
+        for item in api_data:
+            # Фильтруем по категории (так как API фильтрует только по филиалу)
+            if item.get('categoryId') != category_id:
+                continue
                 
-                service_name = item.get('serviceName')
-                if not service_name:
-                    continue
-                
-                # Получаем цену если требуется
-                price = None
-                if self.include_prices:
-                    price_raw = item.get('price')
-                    if price_raw is not None and price_raw != '':
-                        try:
-                            price = float(str(price_raw).replace(' ', '').replace(',', '.'))
-                        except (ValueError, TypeError):
-                            price = None
-                
-                if service_name not in services_in_category_and_filial:
-                    services_in_category_and_filial[service_name] = {'price': price, 'count': 0}
-                else:
-                    # Если цена еще не установлена, устанавливаем её
-                    if services_in_category_and_filial[service_name]['price'] is None and price is not None:
-                        services_in_category_and_filial[service_name]['price'] = price
-                
-                services_in_category_and_filial[service_name]['count'] += 1
+            service_name = item.get('serviceName')
+            if not service_name:
+                continue
+            
+            # Получаем цену из статических данных если требуется
+            price = None
+            if self.include_prices:
+                # Цены берем из статических данных для стабильности
+                service_id = item.get('serviceId')
+                if service_id and _clinic_data:
+                    for static_item in _clinic_data:
+                        if (static_item.get('serviceId') == service_id and 
+                            static_item.get('filialId') == filial_id):
+                            price_raw = static_item.get('price')
+                            if price_raw is not None and price_raw != '':
+                                try:
+                                    price = float(str(price_raw).replace(' ', '').replace(',', '.'))
+                                    break
+                                except (ValueError, TypeError):
+                                    pass
+            
+            if service_name not in services_in_category_and_filial:
+                services_in_category_and_filial[service_name] = {'price': price, 'count': 0}
+            else:
+                # Если цена еще не установлена, устанавливаем её
+                if services_in_category_and_filial[service_name]['price'] is None and price is not None:
+                    services_in_category_and_filial[service_name]['price'] = price
+            
+            services_in_category_and_filial[service_name]['count'] += 1
 
         if not services_in_category_and_filial:
             category_clarification = f" (уточнено до '{display_category_name}')" if normalize_text(display_category_name, keep_spaces=True) != normalize_text(self.category_name, keep_spaces=True) else ""

@@ -3,23 +3,20 @@
 import os
 import json
 import logging
-# import shutil # <--- Удалено
 import glob
 from typing import List, Dict, Any, Optional, Tuple
 import re
 
-# --- LangChain Imports ---
+
 from langchain_core.documents import Document
-# from langchain_core.runnables import RunnableLambda, RunnableConfig # <--- Удалено
-# from langchain_core.retrievers import BaseRetriever # <--- Удалено
+
 from langchain_gigachat.embeddings import GigaChatEmbeddings
 from langchain_chroma import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.retrievers import BM25Retriever
-# from langchain.retrievers.ensemble import EnsembleRetriever # <--- Удалено
+
 import chromadb
 
-# Импортируем менеджер конфигураций тенантов
 try:
     import tenant_config_manager
 except ImportError:
@@ -29,9 +26,9 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 TENANT_COLLECTION_PREFIX = "tenant_"
-SERVICE_DETAILS_FILE = "base/service_details.json" # <--- ДОБАВЛЕНО: Путь к файлу с деталями услуг
+SERVICE_DETAILS_FILE = "base/service_details.json" 
 
-# --- Начало: Новая функция для загрузки деталей услуг ---
+
 def load_service_details(file_path: str = SERVICE_DETAILS_FILE) -> Dict[Tuple[str, str], Dict[str, Any]]:
     """
     Загружает детали услуг (показания, противопоказания) из JSON-файла.
@@ -64,8 +61,7 @@ def load_service_details(file_path: str = SERVICE_DETAILS_FILE) -> Dict[Tuple[st
                 logger.warning(f"Пропуск услуги без имени или категории в файле деталей: {service_info}")
                 continue
 
-            # Используем ту же нормализацию, что и для основных данных
-            # (для услуг - с сохранением пробелов, для категорий - тоже, т.к. они могут быть многословными)
+            
             norm_service_name = normalize_text(service_name, keep_spaces=True)
             norm_category_name = normalize_text(category_name, keep_spaces=True)
 
@@ -76,7 +72,7 @@ def load_service_details(file_path: str = SERVICE_DETAILS_FILE) -> Dict[Tuple[st
             if isinstance(contraindications, list) and contraindications:
                 details["contraindications"] = contraindications
             
-            if details: # Добавляем, только если есть что добавить
+            if details: 
                 if key in service_details_map:
                     logger.warning(f"Дублирующаяся запись для услуги '{service_name}' в категории '{category_name}' в файле деталей. Используется первая.")
                 else:
@@ -222,7 +218,7 @@ def clinic_info_data_to_docs(clinic_info_data: List[Dict[str, Any]]) -> List[Doc
     return docs
 
 
-# --- Функция индексации документов в коллекцию Chroma ---
+
 def index_documents_to_collection(
     chroma_client: chromadb.ClientAPI,
     embeddings_object: GigaChatEmbeddings,
@@ -247,30 +243,29 @@ def index_documents_to_collection(
     logger.info(f"Проверка/Индексация коллекции '{collection_name}'...")
 
     try:
-        # Пытаемся получить существующую коллекцию СНАЧАЛА
+        
         existing_collection = chroma_client.get_collection(name=collection_name)
         logger.info(f"Коллекция '{collection_name}' уже существует.")
 
-        # Если force_recreate=True, удаляем ее
+       
         if force_recreate:
             logger.warning(f"Флаг force_recreate установлен. Удаление существующей коллекции '{collection_name}'...")
             chroma_client.delete_collection(collection_name)
             logger.info(f"Коллекция '{collection_name}' удалена. Будет создана заново.")
-            # Продолжаем выполнение для создания новой коллекции ниже
+            
         else:
-            # Если удалять не нужно, возвращаем LangChain обертку для существующей коллекции
+            
             logger.info(f"Используем существующую коллекцию '{collection_name}'. Переиндексация пропускается.")
             return Chroma(client=chroma_client, collection_name=collection_name, embedding_function=embeddings_object)
 
-    except Exception as e: # Если get_collection бросает исключение (например, коллекции нет)
+    except Exception as e: 
         logger.info(f"Коллекция '{collection_name}' не найдена или произошла ошибка при проверке: {e}. Создаем новую.")
-        # Продолжаем выполнение для создания новой коллекции ниже
-        pass # Просто игнорируем ошибку и идем дальше к созданию
-
-    # --- Этот блок теперь выполняется только если коллекция не найдена или удалена ---
+        
+        pass 
+   
     if not documents:
         logger.warning(f"Нет документов для создания новой коллекции '{collection_name}'.")
-        return None # Не можем создать пустую коллекцию
+        return None 
 
     text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size, chunk_overlap=chunk_overlap, length_function=len,
@@ -282,7 +277,7 @@ def index_documents_to_collection(
         logger.warning(f"Нет чанков для индексации в новую коллекцию '{collection_name}'.")
         return None
 
-    # Вызов from_documents произойдет только при создании НОВОЙ коллекции
+    
     logger.info(f"Создание новой коллекции '{collection_name}' и индексация документов...")
     vectorstore = Chroma.from_documents(
         documents=splits,
@@ -296,7 +291,7 @@ def index_documents_to_collection(
 
 def add_instruction_to_query(query: str) -> str:
     """Добавляет инструкцию к запросу для поиска в RAG с EmbeddingsGigaR."""
-    # Пример инструкции, можно адаптировать
+   
     instruction = "Найди наиболее релевантный документ с описанием услуги, врача или общей информацией о клинике по следующему запросу: "
     if query:
         logger.debug(f"Добавляем инструкцию к RAG-запросу: '{query}'")
@@ -306,9 +301,9 @@ def add_instruction_to_query(query: str) -> str:
         return ""
 
 
-# --- Основная функция инициализации RAG (Переработана) ---
+
 def initialize_rag(
-    data_dir: str, # Директория с base/*.json
+    data_dir: str,
     chroma_persist_dir: str,
     embedding_credentials: str,
     embedding_model: str,
@@ -321,10 +316,10 @@ def initialize_rag(
 ) -> Tuple[
     Optional[chromadb.ClientAPI],
     Optional[GigaChatEmbeddings],
-    Dict[str, BM25Retriever], # Карта tenant_id -> BM25Retriever
-    Dict[str, List[Document]], # <--- Карта tenant_id -> List[Document] (объединенные)
-    Dict[str, List[Dict]],      # <--- ИЗМЕНЕНО: Карта tenant_id -> List[Dict] (сырые данные)
-    Dict[Tuple[str, str], Dict[str, Any]] # <--- ДОБАВЛЕНО: Карта деталей услуг
+    Dict[str, BM25Retriever], 
+    Dict[str, List[Document]], 
+    Dict[str, List[Dict]],      
+    Dict[Tuple[str, str], Dict[str, Any]] 
 ]:
     """
     Инициализирует RAG-систему:
@@ -351,26 +346,26 @@ def initialize_rag(
     embeddings_object = None
     chroma_client = None
     bm25_retrievers_map: Dict[str, BM25Retriever] = {}
-    tenant_documents_map: Dict[str, List[Document]] = {} # <--- Инициализируем словарь для документов
-    tenant_raw_data_map: Dict[str, List[Dict]] = {} # <--- ИЗМЕНЕНО: Словарь для сырых данных по тенантам
-    service_details_map_loaded: Dict[Tuple[str, str], Dict[str, Any]] = {} # <--- ДОБАВЛЕНО
+    tenant_documents_map: Dict[str, List[Document]] = {} 
+    tenant_raw_data_map: Dict[str, List[Dict]] = {} 
+    service_details_map_loaded: Dict[Tuple[str, str], Dict[str, Any]] = {} 
 
-    # --- Инициализация эмбеддингов и Chroma клиента ---
+    #
     try:
         embeddings_object = GigaChatEmbeddings(
             credentials=embedding_credentials, model=embedding_model,
-            verify_ssl_certs=verify_ssl_certs, scope=embedding_scope, timeout=60
+            verify_ssl_certs=verify_ssl_certs, scope=embedding_scope, timeout=180  
         )
         logger.info(f"Эмбеддинги GigaChat ({embedding_model}) инициализированы.")
     except Exception as e:
         logger.critical(f"Критическая ошибка инициализации эмбеддингов: {e}", exc_info=True)
-        return None, None, {}, {}, {}, {} # <-- ИЗМЕНЕНО: возвращаем пустой словарь
+        return None, None, {}, {}, {}, {} 
 
     try:
         chroma_client = chromadb.PersistentClient(path=chroma_persist_dir)
         logger.info(f"Клиент ChromaDB инициализирован. Данные в: {chroma_persist_dir}")
 
-        # --- Обработка force_recreate (удаляем только коллекции тенантов) ---
+        
         if force_recreate_chroma:
             logger.warning("Флаг force_recreate_chroma установлен. Попытка удаления всех коллекций тенантов...")
             # Получаем список существующих коллекций, чтобы не зависеть от файлов

@@ -2,6 +2,7 @@
 
 import os
 import logging
+import asyncio
 from typing import List, Dict, Any, Optional, Tuple
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, BaseMessage, messages_from_dict, messages_to_dict
@@ -138,13 +139,21 @@ class RagQueryThought(BaseModel):
     analysis: str = Field(description="Анализ последнего запроса пользователя в контексте истории диалога. Если пользователь ссылается на что-то из истории (например, номер пункта, местоимение 'он'/'она'/'это'), явно укажи, к какой сущности (услуге, врачу, филиалу) это относится, используя ее полное название из истории.")
     best_rag_query: str = Field(description="Сформулируй оптимальный, самодостаточный запрос для поиска описания или детальной информации об основной сущности запроса в векторной базе знаний. Используй полное имя/название сущности. Если запрос общий (приветствие, не по теме) или явно запрашивает вызов функции (цена, список филиалов/услуг/врачей и т.д.), оставь поле пустым или верни исходный запрос.")
 class FindEmployeesArgs(BaseModel):
-    employee_name: Optional[str] = Field(default=None, description="Часть или полное ФИО сотрудника для фильтрации (опционально)")
-    service_name: Optional[str] = Field(default=None, description="Точное или частичное название КОНКРЕТНОЙ услуги для фильтрации (опционально)")
-    filial_name: Optional[str] = Field(default=None, description="Точное название филиала. Если указано только это поле, вернет ВСЕХ сотрудников филиала.")
+    employee_name: Optional[str] = Field(default=None, description="Часть или полное ФИО сотрудника для фильтрации. В комбинации с filial_name покажет услуги конкретного сотрудника в филиале. С service_name покажет филиалы, где сотрудник оказывает услугу.")
+    service_name: Optional[str] = Field(default=None, description="Точное или частичное название КОНКРЕТНОЙ услуги для фильтрации. В комбинации с filial_name покажет сотрудников, оказывающих услугу в филиале. С employee_name покажет филиалы, где сотрудник оказывает услугу.")
+    filial_name: Optional[str] = Field(default=None, description="Точное название филиала. Самостоятельно - покажет ВСЕХ сотрудников филиала. С employee_name - услуги сотрудника в филиале. С service_name - сотрудников, оказывающих услугу в филиале.")
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=15, description="Количество сотрудников на странице для пагинации")
 def find_employees_tool(employee_name: Optional[str] = None, service_name: Optional[str] = None, filial_name: Optional[str] = None) -> str:
-    """Ищет сотрудников клиники по ФИО, выполняемой услуге или филиалу. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 15), если ожидается много результатов или пользователь просит показать все/дальше."""
+    """Унифицированный поиск сотрудников клиники с 6 режимами работы:
+    1. Только filial_name → Все сотрудники в филиале
+    2. Только service_name → Все сотрудники, оказывающие услугу
+    3. Только employee_name → Все услуги сотрудника
+    4. filial_name + employee_name → Услуги сотрудника в конкретном филиале
+    5. filial_name + service_name → Сотрудники, оказывающие услугу в филиале
+    6. service_name + employee_name → Филиалы, где сотрудник оказывает услугу
+    
+    Поддерживает пагинацию: 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 15)."""
     handler = clinic_functions.FindEmployees(employee_name=employee_name, service_name=service_name, filial_name=filial_name)
     return handler.process()
 class GetServicePriceArgs(BaseModel):
@@ -195,26 +204,111 @@ class FindSpecialistsByServiceOrCategoryAndFilialArgs(BaseModel):
     filial_name: str = Field(description="Точное название филиала")
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=15, description="Количество специалистов на странице для пагинации")
-def find_specialists_by_service_or_category_and_filial_tool(query_term: str, filial_name: str) -> str:
+    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
+    api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
+async def find_specialists_by_service_or_category_and_filial_tool(**kwargs_from_llm) -> str:
     """Ищет СПЕЦИАЛИСТОВ по УСЛУГЕ/КАТЕГОРИИ в КОНКРЕТНОМ филиале. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 15), если ожидается много результатов или пользователь просит показать все/дальше."""
-    handler = clinic_functions.FindSpecialistsByServiceOrCategoryAndFilial(query_term=query_term.lower(), filial_name=filial_name.lower())
-    return handler.process()
+    logger.info(f"ENTERING find_specialists_by_service_or_category_and_filial_tool. Raw kwargs_from_llm: {kwargs_from_llm}")
+
+    try:
+        validated_args = FindSpecialistsByServiceOrCategoryAndFilialArgs(**kwargs_from_llm)
+    except Exception as e:
+        logger.error(f"Ошибка валидации аргументов для find_specialists_by_service_or_category_and_filial_tool: {e}. Аргументы: {kwargs_from_llm}", exc_info=True)
+        return f"Ошибка: неверные или отсутствующие аргументы для поиска специалистов: {e}"
+    
+    tenant_id_from_kwargs = validated_args.tenant_id
+    api_token_from_kwargs = validated_args.api_token
+
+    logger.info(f"find_specialists_by_service_or_category_and_filial_tool - Retrieved from validated_args - tenant_id: {tenant_id_from_kwargs}")
+    logger.info(f"find_specialists_by_service_or_category_and_filial_tool - Retrieved from validated_args - api_token: {'******' if api_token_from_kwargs else None}")
+
+    if not tenant_id_from_kwargs:
+        logger.error(f"CRITICAL (find_specialists_by_service_or_category_and_filial_tool): tenant_id (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: ID тенанта не был предоставлен системе для вызова find_specialists_by_service_or_category_and_filial_tool."
+
+    if not api_token_from_kwargs:
+        logger.error(f"CRITICAL (find_specialists_by_service_or_category_and_filial_tool): api_token (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: API токен не был предоставлен системе для вызова find_specialists_by_service_or_category_and_filial_tool."
+
+    handler = clinic_functions.FindSpecialistsByServiceOrCategoryAndFilial(
+        query_term=validated_args.query_term.lower(), 
+        filial_name=validated_args.filial_name.lower(),
+        page_number=validated_args.page_number,
+        page_size=validated_args.page_size
+    )
+    return await handler.process(tenant_id_from_kwargs, api_token_from_kwargs)
 class ListServicesInCategoryArgs(BaseModel):
     category_name: str = Field(description="Точное название категории")
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=20, description="Количество услуг на странице для пагинации")
-def list_services_in_category_tool(category_name: str) -> str:
+    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
+    api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
+async def list_services_in_category_tool(**kwargs_from_llm) -> str:
     """Возвращает список КОНКРЕТНЫХ услуг в указанной КАТЕГОРИИ. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 20), если ожидается много результатов или пользователь просит показать все/дальше."""
-    handler = clinic_functions.ListServicesInCategory(category_name=category_name)
-    return handler.process()
+    logger.info(f"ENTERING list_services_in_category_tool. Raw kwargs_from_llm: {kwargs_from_llm}")
+
+    try:
+        validated_args = ListServicesInCategoryArgs(**kwargs_from_llm)
+    except Exception as e:
+        logger.error(f"Ошибка валидации аргументов для list_services_in_category_tool: {e}. Аргументы: {kwargs_from_llm}", exc_info=True)
+        return f"Ошибка: неверные или отсутствующие аргументы для получения списка услуг: {e}"
+    
+    tenant_id_from_kwargs = validated_args.tenant_id
+    api_token_from_kwargs = validated_args.api_token
+
+    logger.info(f"list_services_in_category_tool - Retrieved from validated_args - tenant_id: {tenant_id_from_kwargs}")
+    logger.info(f"list_services_in_category_tool - Retrieved from validated_args - api_token: {'******' if api_token_from_kwargs else None}")
+
+    if not tenant_id_from_kwargs:
+        logger.error(f"CRITICAL (list_services_in_category_tool): tenant_id (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: ID тенанта не был предоставлен системе для вызова list_services_in_category_tool."
+
+    if not api_token_from_kwargs:
+        logger.error(f"CRITICAL (list_services_in_category_tool): api_token (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: API токен не был предоставлен системе для вызова list_services_in_category_tool."
+
+    handler = clinic_functions.ListServicesInCategory(
+        category_name=validated_args.category_name,
+        page_number=validated_args.page_number,
+        page_size=validated_args.page_size
+    )
+    return await handler.process(tenant_id_from_kwargs, api_token_from_kwargs)
 class ListServicesInFilialArgs(BaseModel):
     filial_name: str = Field(description="Точное название филиала")
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=30, description="Количество услуг на странице для пагинации (учитывайте, что вывод также содержит заголовки категорий)")
-def list_services_in_filial_tool(filial_name: str) -> str:
+    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
+    api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
+async def list_services_in_filial_tool(**kwargs_from_llm) -> str:
     """Возвращает ПОЛНЫЙ список УНИКАЛЬНЫХ услуг в КОНКРЕТНОМ филиале. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 30), если ожидается много результатов или пользователь просит показать все/дальше. Учитывайте, что вывод page_size также включает заголовки категорий."""
-    handler = clinic_functions.ListServicesInFilial(filial_name=filial_name)
-    return handler.process()
+    logger.info(f"ENTERING list_services_in_filial_tool. Raw kwargs_from_llm: {kwargs_from_llm}")
+
+    try:
+        validated_args = ListServicesInFilialArgs(**kwargs_from_llm)
+    except Exception as e:
+        logger.error(f"Ошибка валидации аргументов для list_services_in_filial_tool: {e}. Аргументы: {kwargs_from_llm}", exc_info=True)
+        return f"Ошибка: неверные или отсутствующие аргументы для получения списка услуг в филиале: {e}"
+    
+    tenant_id_from_kwargs = validated_args.tenant_id
+    api_token_from_kwargs = validated_args.api_token
+
+    logger.info(f"list_services_in_filial_tool - Retrieved from validated_args - tenant_id: {tenant_id_from_kwargs}")
+    logger.info(f"list_services_in_filial_tool - Retrieved from validated_args - api_token: {'******' if api_token_from_kwargs else None}")
+
+    if not tenant_id_from_kwargs:
+        logger.error(f"CRITICAL (list_services_in_filial_tool): tenant_id (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: ID тенанта не был предоставлен системе для вызова list_services_in_filial_tool."
+
+    if not api_token_from_kwargs:
+        logger.error(f"CRITICAL (list_services_in_filial_tool): api_token (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: API токен не был предоставлен системе для вызова list_services_in_filial_tool."
+
+    handler = clinic_functions.ListServicesInFilial(
+        filial_name=validated_args.filial_name,
+        page_number=validated_args.page_number,
+        page_size=validated_args.page_size
+    )
+    return await handler.process(tenant_id_from_kwargs, api_token_from_kwargs)
 class FindServicesInPriceRangeArgs(BaseModel):
     min_price: float = Field(description="Минимальная цена")
     max_price: float = Field(description="Максимальная цена")
@@ -222,30 +316,108 @@ class FindServicesInPriceRangeArgs(BaseModel):
     filial_name: Optional[str] = Field(default=None, description="Опционально: филиал")
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=20, description="Количество услуг на странице для пагинации")
-def find_services_in_price_range_tool(min_price: float, max_price: float, category_name: Optional[str] = None, filial_name: Optional[str] = None) -> str:
+    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
+    api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
+async def find_services_in_price_range_tool(**kwargs_from_llm) -> str:
     """Ищет услуги в ЗАДАННОМ ЦЕНОВОМ ДИАПАЗОНЕ. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 20), если ожидается много результатов или пользователь просит показать все/дальше."""
-    handler = clinic_functions.FindServicesInPriceRange(min_price=min_price, max_price=max_price, category_name=category_name, filial_name=filial_name)
-    return handler.process()
+    try:
+        validated_args = FindServicesInPriceRangeArgs(**kwargs_from_llm)
+    except Exception as e:
+        logger.error(f"Ошибка валидации аргументов для find_services_in_price_range_tool: {e}")
+        return f"Ошибка: неверные или отсутствующие аргументы для поиска услуг в диапазоне цен: {e}"
+    
+    tenant_id_from_kwargs = validated_args.tenant_id
+    api_token_from_kwargs = validated_args.api_token
+
+    logger.info(f"find_services_in_price_range_tool - Retrieved from validated_args - tenant_id: {tenant_id_from_kwargs}")
+    logger.info(f"find_services_in_price_range_tool - Retrieved from validated_args - api_token: {'******' if api_token_from_kwargs else None}")
+
+    if not tenant_id_from_kwargs:
+        logger.error(f"CRITICAL (find_services_in_price_range_tool): tenant_id (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: ID тенанта не был предоставлен системе для вызова find_services_in_price_range_tool."
+
+    if not api_token_from_kwargs:
+        logger.error(f"CRITICAL (find_services_in_price_range_tool): api_token (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: API токен не был предоставлен системе для вызова find_services_in_price_range_tool."
+
+    handler = clinic_functions.FindServicesInPriceRange(
+        min_price=validated_args.min_price, 
+        max_price=validated_args.max_price, 
+        category_name=validated_args.category_name, 
+        filial_name=validated_args.filial_name,
+        page_number=validated_args.page_number,
+        page_size=validated_args.page_size
+    )
+    return await handler.process(tenant_id_from_kwargs, api_token_from_kwargs)
 class ListAllCategoriesArgs(BaseModel):
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=30, description="Количество категорий на странице для пагинации")
-def list_all_categories_tool() -> str:
+    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
+    api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
+
+async def list_all_categories_tool(**kwargs_from_llm) -> str:
     """Возвращает список ВСЕХ категорий услуг. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 30), если ожидается много результатов или пользователь просит показать все/дальше."""
-    handler = clinic_functions.ListAllCategories()
-    return handler.process()
+    try:
+        validated_args = ListAllCategoriesArgs(**kwargs_from_llm)
+    except Exception as e:
+        logger.error(f"Ошибка валидации аргументов для list_all_categories_tool: {e}")
+        return f"Ошибка: неверные или отсутствующие аргументы для получения списка категорий: {e}"
+    
+    tenant_id_from_kwargs = validated_args.tenant_id
+    api_token_from_kwargs = validated_args.api_token
+
+    logger.info(f"list_all_categories_tool - Retrieved from validated_args - tenant_id: {tenant_id_from_kwargs}")
+    logger.info(f"list_all_categories_tool - Retrieved from validated_args - api_token: {'******' if api_token_from_kwargs else None}")
+
+    if not tenant_id_from_kwargs:
+        logger.error(f"CRITICAL (list_all_categories_tool): tenant_id (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: ID тенанта не был предоставлен системе для вызова list_all_categories_tool."
+
+    if not api_token_from_kwargs:
+        logger.error(f"CRITICAL (list_all_categories_tool): api_token (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: API токен не был предоставлен системе для вызова list_all_categories_tool."
+
+    handler = clinic_functions.ListCategories(
+        page_number=validated_args.page_number,
+        page_size=validated_args.page_size
+    )
+    return await handler.process(tenant_id_from_kwargs, api_token_from_kwargs)
 class ListEmployeeFilialsArgs(BaseModel):
     employee_name: str = Field(description="Точное или близкое ФИО сотрудника")
-def list_employee_filials_tool(employee_name: str) -> str:
+    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
+    api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
+
+async def list_employee_filials_tool(**kwargs_from_llm) -> str:
     """ОБЯЗАТЕЛЬНО ВЫЗЫВАЙ для получения ПОЛНОГО списка ВСЕХ филиалов КОНКРЕТНОГО сотрудника."""
-    logger.info(f"Вызов list_employee_filials_tool для: {employee_name}")
-    handler = clinic_functions.ListEmployeeFilials(employee_name=employee_name)
-    return handler.process()
+    try:
+        validated_args = ListEmployeeFilialsArgs(**kwargs_from_llm)
+    except Exception as e:
+        logger.error(f"Ошибка валидации аргументов для list_employee_filials_tool: {e}")
+        return f"Ошибка: неверные или отсутствующие аргументы для получения филиалов сотрудника: {e}"
+    
+    tenant_id_from_kwargs = validated_args.tenant_id
+    api_token_from_kwargs = validated_args.api_token
+
+    logger.info(f"list_employee_filials_tool - Вызов для: {validated_args.employee_name}")
+    logger.info(f"list_employee_filials_tool - Retrieved from validated_args - tenant_id: {tenant_id_from_kwargs}")
+    logger.info(f"list_employee_filials_tool - Retrieved from validated_args - api_token: {'******' if api_token_from_kwargs else None}")
+
+    if not tenant_id_from_kwargs:
+        logger.error(f"CRITICAL (list_employee_filials_tool): tenant_id (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: ID тенанта не был предоставлен системе для вызова list_employee_filials_tool."
+
+    if not api_token_from_kwargs:
+        logger.error(f"CRITICAL (list_employee_filials_tool): api_token (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+        return "Критическая ошибка: API токен не был предоставлен системе для вызова list_employee_filials_tool."
+
+    handler = clinic_functions.ListEmployeeFilials(employee_name=validated_args.employee_name)
+    return await handler.process(tenant_id_from_kwargs, api_token_from_kwargs)
 
 class GetFreeSlotsArgs(BaseModel):
     tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
     employee_name: str = Field(description="ФИО сотрудника (точно или частично)")
     service_names: List[str] = Field(description="Список названий услуг (точно)")
-    date_time: str = Field(description="Дата для поиска слотов (формат YYYY-MM-DD)")
+    date_time: str = Field(description="Дата для начала поиска слотов (формат YYYY-MM-DD). ВАЖНО: Система автоматически найдет ближайшие доступные слоты, начиная с этой даты. Если на указанную дату нет слотов, поиск продолжится на +7, +14, +21 дней и т.д. (максимум 7 итераций). Не нужно указывать несколько дат - система сама найдет оптимальный период.")
     filial_name: str = Field(description="Название филиала (точно)")
     lang_id: str = Field(default="ru", description="Язык ответа")
     api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
@@ -478,8 +650,8 @@ async def get_free_slots_tool(**kwargs_from_llm) -> str:
     
     # Проверяем, выполняет ли сотрудник эти услуги в указанном филиале
     for service_id in valid_service_ids:
-        success, message = service_disambiguation.verify_service_employee_filial_compatibility(
-            tenant_id_from_kwargs, service_id, employee_id, filial_id, TENANT_RAW_DATA_MAP.get(tenant_id_from_kwargs, [])
+        success, message = await service_disambiguation.verify_service_employee_filial_compatibility(
+            tenant_id_from_kwargs, service_id, employee_id, filial_id, api_token_from_kwargs
         )
         if not success:
             return message
@@ -768,7 +940,7 @@ SYSTEM_PROMPT = """
 Ты — вежливый и информативный ассистент клиники.
 
 Главные правила:
-- Для **ОБЩИХ ОПИСАНИЙ** услуг, специалистов (их квалификации, опыта, но НЕ того, какие конкретно услуги они где оказывают), общей справочной информации о клинике (адреса, общие правила) — используй RAG-поиск.
+- Для **ОБЩИХ ОПИСАНИЙ** услуг (что такое МРТ, виды массажа), специалистов (их квалификации, опыта, но НЕ того, какие конкретно услуги они где оказывают), общей справочной информации о клинике (адреса, общие правила) — используй RAG-поиск.
 - **ЗАПРЕЩЕНО ИСПОЛЬЗОВАТЬ RAG** для получения информации о том:
     - какие конкретные услуги выполняет тот или иной специалист.
     - в каких филиалах работает специалист.
@@ -776,13 +948,37 @@ SYSTEM_PROMPT = """
     - какие специалисты выполняют конкретную услугу в конкретном филиале.
   Для ВСЕХ этих данных — **ВСЕГДА ВЫЗЫВАЙ СООТВЕТСТВУЮЩУЮ ФУНКЦИЮ (ИНСТРУМЕНТ)**. Не пытайся отвечать на такие вопросы из RAG или памяти.
 - Для всех остальных конкретных данных (цены, списки (кроме списков услуг/специалистов по филиалам), расписания, наличие, сравнения, фильтрация) — также всегда вызывай соответствующую функцию (инструмент).
+
+**ВАЖНО: Классификация вопросов RAG vs Functions**
+- **RAG используй для:** общих описаний услуг (что такое МРТ), квалификации врачей, общей информации о клинике, правил, адресов
+- **Functions используй для:** конкретных данных - кто где работает, какие услуги оказывает конкретный врач, цены, расписания, записи
+
+**ВАЖНО: Работа с find_employees_tool (унифицированный поиск)**
+Функция find_employees_tool имеет 6 режимов работы в зависимости от переданных параметров:
+1. Только filial_name → Возвращает всех сотрудников в филиале
+2. Только service_name → Возвращает всех сотрудников, оказывающих услугу (независимо от филиала)
+3. Только employee_name → Возвращает все услуги конкретного сотрудника (независимо от филиала)
+4. filial_name + employee_name → Возвращает услуги сотрудника в конкретном филиале
+5. filial_name + service_name → Возвращает сотрудников, оказывающих услугу в конкретном филиале
+6. service_name + employee_name → Возвращает филиалы, где сотрудник оказывает конкретную услугу
+
+Используй эти режимы осознанно в зависимости от того, что именно спрашивает пользователь.
+
 - Если не хватает параметров для функции — вежливо уточни у пользователя.
 - Не выдумывай данные и не сокращай списки, возвращай их полностью как выдала функция.
 - Не давай медицинских советов, только информируй.
 
 **ВАЖНО: Процесс записи на услугу**
 1. Сначала всегда вызывай функцию получения свободных слотов (окон) сотрудника по услуге и филиалу (get_free_slots_tool). Убедись, что ты знаешь точное название услуги, для которой ищешь слоты, ФИО сотрудника и филиал. Используй инструменты для уточнения этой информации, если необходимо, **не полагайся на RAG**.
-2. Покажи пользователю доступные времена для записи (start_time), полученные от get_free_slots_tool.
+
+   **ВАЖНО О ПОИСКЕ СЛОТОВ**: Функция get_free_slots_tool использует умную логику поиска дат:
+   - Начинает поиск с указанной даты (или сегодняшней, если дата не указана)
+   - Если на указанную дату нет свободных слотов, автоматически ищет на 7 дней позже
+   - Максимум проверяет 7 периодов (примерно месяц вперед) с интервалом в 7 дней
+   - В ответе ясно указывает, в каком диапазоне дат проводился поиск
+   - Не нужно вызывать функцию несколько раз с разными датами - она сама найдет ближайшие доступные слоты
+
+2. Покажи пользователю доступные времена для записи (start_time), полученные от get_free_slots_tool. Если система нашла слоты не на запрашиваемую дату, а позже, обязательно объясни это пользователю.
 3. После того как пользователь выберет конкретное время (start_time) из предложенных — вызывай функцию записи (book_appointment_ai_payload_tool),
    где:
    - duration_of_time всегда равен 60 (минут, если иное не было уточнено ранее для конкретной услуги).
@@ -931,14 +1127,22 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         return f"Ошибка: Не удалось получить доступ к базе знаний для филиала '{tenant_id}'."
 
     if not bm25_retriever:
-        logger.warning(f"BM25 ретривер для тенанта {tenant_id} не найден. Поиск будет только векторным.")
-        final_retriever = chroma_retriever
+        logger.warning(f"BM25 ретривер для тенанта {tenant_id} не найден. Будет создан EnsembleRetriever только с векторным поиском.")
+        # Создаем пустой BM25 ретривер для EnsembleRetriever
+        from langchain_core.documents import Document
+        dummy_docs = [Document(page_content="dummy", metadata={})]
+        dummy_bm25 = BM25Retriever.from_documents(dummy_docs, k=search_k_global)
+        final_retriever = EnsembleRetriever(
+            retrievers=[dummy_bm25, chroma_retriever],
+            weights=[0.0, 1.0]  # Вес 0.0 для BM25, 1.0 для векторного поиска
+        )
+        logger.info(f"Ensemble ретривер создан для тенанта {tenant_id} с весами [BM25: 0.0, Chroma: 1.0] (только векторный поиск).")
     else:
         final_retriever = EnsembleRetriever(
             retrievers=[bm25_retriever, chroma_retriever],
             weights=[0.5, 0.5]
         )
-        logger.info(f"Ensemble ретривер (BM25 + Chroma) создан для тенанта {tenant_id}.")
+        logger.info(f"Ensemble ретривер (BM25 + Chroma) создан для тенанта {tenant_id} с весами [0.5, 0.5].")
 
     # --- Шаг 1: Определение необходимости RAG и формирование RAG-запроса (один раз) ---
     rag_context = ""
@@ -954,12 +1158,12 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
                 "чтобы найти ОПИСАНИЕ или детали этой сущности. Используй полные названия. "
                 "Пример: Если история содержит '1. Услуга А\\n2. Услуга Б', а пользователь спрашивает 'расскажи о 2', "
                 "то best_rag_query должен быть что-то вроде 'Описание услуги Б'. "
-                "ВАЖНО: Если запрос пользователя является простым приветствием (например, 'Привет', 'Добрый день', 'Как дела?'), коротким общим вопросом, не требующим поиска информации, "
+                "ВАЖНО: Если запрос пользователя является простым приветствием (например, 'Привет', 'Добрый день', 'Как дела?'), "
                 "или очевидным согласием/просьбой продолжить предыдущий ответ ассистента (например, 'да', 'дальше', 'продолжай', 'еще', 'следующая страница'), "
                 "то best_rag_query ДОЛЖЕН БЫТЬ ПУСТОЙ СТРОКОЙ. "
-                "Также, если запрос очевидно должен быть обработан вызовом функции (например, запросы на списки чего-либо, цены, проверки наличия, сравнения, поиск по точным критериям), "
+                "Также, если запрос очевидно требует точных данных через вызов функции (например, запросы на цены, поиск сотрудника по имени, списки филиалов, проверки наличия, сравнения, поиск по точным критериям), "
                 "то best_rag_query ДОЛЖЕН БЫТЬ ПУСТОЙ СТРОКОЙ. "
-                "Во всех остальных случаях (запросы на описание, общую информацию о клинике) сформулируй поисковый запрос. "
+                "Во всех остальных случаях (запросы на описание услуг/процедур, информацию о показаниях/противопоказаниях, общую информацию о клинике, что помогает от морщин и т.п.) сформулируй поисковый запрос для поиска описательной информации. "
                 "Поле 'analysis' должно содержать краткий анализ твоего решения, особенно пояснение, почему RAG-запрос нужен или не нужен."
             ))
         ]
@@ -991,18 +1195,62 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         logger.warning(f"[{tenant_id}:{user_id}] Исключение при улучшении RAG-запроса: {e}. RAG-запрос будет пустым.", exc_info=True)
 
     # --- Шаг 2: Выполнение RAG-поиска, если необходимо (один раз) ---
+    rag_context = ""
+    max_retries = 3
+    retry_delay = 2  # секунды
+    
     try:
         if effective_rag_query and effective_rag_query.strip():
             logger.info(f"[{tenant_id}:{user_id}] Выполнение RAG-поиска с запросом: '{effective_rag_query[:100]}...'")
-            relevant_docs = await final_retriever.ainvoke(effective_rag_query, config=config)
-            rag_context = format_docs(relevant_docs)
-            logger.info(f"RAG: Найдено {len(relevant_docs)} док-в для запроса: '{effective_rag_query[:50]}...'. Контекст: {len(rag_context)} симв.")
+            
+            # Retry-механизм для RAG поиска с улучшенной обработкой таймаутов
+            for attempt in range(max_retries):
+                try:
+                    logger.debug(f"[{tenant_id}:{user_id}] RAG поиск попытка {attempt + 1}/{max_retries}")
+                    relevant_docs = await final_retriever.ainvoke(effective_rag_query, config=config)
+                    rag_context = format_docs(relevant_docs)
+                    logger.info(f"RAG: Найдено {len(relevant_docs)} док-в для запроса: '{effective_rag_query[:50]}...'. Контекст: {len(rag_context)} симв.")
+                    break  # Успешно выполнено, выходим из retry-цикла
+                    
+                except Exception as retry_error:
+                    error_message = str(retry_error)
+                    is_timeout_error = any(timeout_keyword in error_message.lower() for timeout_keyword in 
+                                         ['timeout', 'timed out', 'time out', 'connection timeout', 'read timeout'])
+                    
+                    if is_timeout_error:
+                        logger.warning(f"[{tenant_id}:{user_id}] RAG поиск неудачен из-за таймаута (попытка {attempt + 1}/{max_retries}): {retry_error}")
+                    else:
+                        logger.warning(f"[{tenant_id}:{user_id}] RAG поиск неудачен (попытка {attempt + 1}/{max_retries}): {retry_error}")
+                    
+                    if attempt < max_retries - 1:  # Если это не последняя попытка
+                        if is_timeout_error:
+                            # Для таймаутов используем больший интервал повтора
+                            timeout_delay = retry_delay * 2
+                            logger.info(f"[{tenant_id}:{user_id}] Ожидание {timeout_delay} сек перед повтором RAG поиска (таймаут)")
+                            await asyncio.sleep(timeout_delay)
+                        else:
+                            logger.info(f"[{tenant_id}:{user_id}] Ожидание {retry_delay} сек перед повтором RAG поиска")
+                            await asyncio.sleep(retry_delay)
+                        retry_delay *= 1.5  # Постепенное увеличение задержки
+                    else:
+                        # Последняя попытка неудачна, пробрасываем исключение
+                        logger.error(f"[{tenant_id}:{user_id}] Все {max_retries} попытки RAG поиска неудачны. Последняя ошибка: {retry_error}")
+                        raise retry_error
         else:
             logger.info(f"[{tenant_id}:{user_id}] RAG-запрос пуст, RAG поиск пропущен.")
             rag_context = "Поиск по базе знаний не выполнялся, так как запрос не предполагает этого или является вызовом функции."
+            
     except Exception as e:
-        logger.error(f"Ошибка выполнения RAG поиска для тенанта {tenant_id} с запросом '{effective_rag_query}': {e}", exc_info=True)
-        rag_context = "[Ошибка получения информации из базы знаний]"
+        error_message = str(e)
+        is_timeout_error = any(timeout_keyword in error_message.lower() for timeout_keyword in 
+                             ['timeout', 'timed out', 'time out', 'connection timeout', 'read timeout'])
+        
+        if is_timeout_error:
+            logger.error(f"Таймаут выполнения RAG поиска для тенанта {tenant_id} с запросом '{effective_rag_query}' после {max_retries} попыток: {e}", exc_info=True)
+            rag_context = "[Превышено время ожидания при поиске в базе знаний. Возможно, сервер перегружен. Попробуйте переформулировать запрос или повторить позже.]"
+        else:
+            logger.error(f"Ошибка выполнения RAG поиска для тенанта {tenant_id} с запросом '{effective_rag_query}' после {max_retries} попыток: {e}", exc_info=True)
+            rag_context = "[Ошибка получения информации из базы знаний. Попробуйте переформулировать запрос или повторить позже.]"
 
     # --- Подготовка к циклу ReAct ---
     system_prompt_base = SYSTEM_PROMPT # Базовый системный промпт

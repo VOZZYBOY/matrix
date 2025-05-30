@@ -377,64 +377,88 @@ def verify_service_for_employee(tenant_id: str, service_id: str, employee_id: st
             return True
     return False
 
-def verify_service_employee_filial_compatibility(tenant_id: str, service_id: str, employee_id: str, filial_id: str, _clinic_data: List[Dict]) -> Tuple[bool, str]:
+async def verify_service_employee_filial_compatibility(tenant_id: str, service_id: str, employee_id: str, filial_id: str, api_token: str) -> Tuple[bool, str]:
     """
-    Проверяет совместимость услуги, сотрудника и филиала.
+    Проверяет совместимость услуги, сотрудника и филиала через актуальный API.
+    Использует рабочую комбинацию filial_id + service_id вместо employee_id + service_id.
     
     Args:
         tenant_id: ID тенанта
         service_id: ID услуги
         employee_id: ID сотрудника
         filial_id: ID филиала
-        _clinic_data: данные клиники
+        api_token: Bearer-токен для авторизации
         
     Returns:
         Tuple[bool, str]: (успех, сообщение)
     """
-    # Проверяем, есть ли такая услуга вообще
+    # Получаем названия для сообщений
     service_name = get_name_by_id(tenant_id, 'service', service_id) or f"ID:{service_id}"
     employee_name = get_name_by_id(tenant_id, 'employee', employee_id) or f"ID:{employee_id}"
     filial_name = get_name_by_id(tenant_id, 'filial', filial_id) or f"ID:{filial_id}"
     
-    # 1. Проверяем, доступна ли услуга в филиале
-    service_in_filial = verify_service_in_filial(tenant_id, service_id, filial_id, _clinic_data)
-    if not service_in_filial:
-        filials = get_filials_for_service(tenant_id, service_id, _clinic_data)
-        if filials:
-            filial_names = [f["filialName"] for f in filials]
-            return False, f"Услуга '{service_name}' недоступна в филиале '{filial_name}'. Она доступна в следующих филиалах: {', '.join(filial_names)}."
+    try:
+        from client_data_service import get_multiple_data_from_api
+        
+        # ШАГИ ПРОВЕРКИ:
+        # 1. Проверяем, доступна ли услуга в указанном филиале (filial_id + service_id)
+        # 2. Если да, то проверяем, работает ли указанный сотрудник среди тех, кто оказывает эту услугу в этом филиале
+        
+        logger.info(f"Проверяем совместимость: service_id={service_id}, employee_id={employee_id}, filial_id={filial_id}")
+        
+        # Шаг 1: Получаем всех сотрудников, которые оказывают данную услугу в данном филиале
+        api_data = await get_multiple_data_from_api(
+            api_token=api_token,
+            service_id=service_id,
+            filial_id=filial_id,
+            tenant_id=tenant_id
+        )
+        
+        if not api_data:
+            # API не вернуло данных - значит услуга недоступна в этом филиале
+            logger.warning(f"Услуга {service_id} недоступна в филиале {filial_id}")
+            return False, f"Услуга '{service_name}' недоступна в филиале '{filial_name}' согласно актуальным данным."
+        
+        # Шаг 2: Проверяем, есть ли указанный сотрудник среди тех, кто оказывает эту услугу
+        found_employee = False
+        available_employees = []
+        
+        for item in api_data:
+            item_employee_id = item.get('employeeId')
+            item_employee_name = item.get('employeeFullName') or item.get('employeeName')
+            
+            if item_employee_name:
+                available_employees.append(item_employee_name)
+            
+            if item_employee_id == employee_id:
+                found_employee = True
+                # Обновляем названия из актуальных данных API если они есть
+                if item.get('serviceName'):
+                    service_name = item.get('serviceName')
+                if item_employee_name:
+                    employee_name = item_employee_name
+                if item.get('filialName'):
+                    filial_name = item.get('filialName')
+                
+                logger.info(f"Найден сотрудник {employee_id} для услуги {service_id} в филиале {filial_id}")
+        
+        if found_employee:
+            return True, f"Услуга '{service_name}' доступна у сотрудника '{employee_name}' в филиале '{filial_name}'."
         else:
-            return False, f"Услуга '{service_name}' не найдена ни в одном филиале."
-    
-    # 2. Проверяем, выполняет ли сотрудник услугу
-    employee_performs_service = verify_service_for_employee(tenant_id, service_id, employee_id, _clinic_data)
-    if not employee_performs_service:
-        return False, f"Сотрудник '{employee_name}' не выполняет услугу '{service_name}'."
-    
-    # 3. Проверяем, работает ли сотрудник в этом филиале
-    employee_works_in_filial = False
-    for item in _clinic_data:
-        if item.get("employeeId") == employee_id and item.get("filialId") == filial_id:
-            employee_works_in_filial = True
-            break
-    
-    if not employee_works_in_filial:
-        return False, f"Сотрудник '{employee_name}' не работает в филиале '{filial_name}'."
-    
-    # 4. Проверяем, выполняет ли сотрудник эту услугу в этом филиале
-    service_by_employee_in_filial = False
-    for item in _clinic_data:
-        if (item.get("serviceId") == service_id and 
-            item.get("employeeId") == employee_id and 
-            item.get("filialId") == filial_id):
-            service_by_employee_in_filial = True
-            break
-    
-    if not service_by_employee_in_filial:
-        return False, f"Сотрудник '{employee_name}' не выполняет услугу '{service_name}' в филиале '{filial_name}'."
-    
-    # Все проверки пройдены
-    return True, f"Услуга '{service_name}' доступна у сотрудника '{employee_name}' в филиале '{filial_name}'."
+            # Услуга доступна в филиале, но указанный сотрудник её не оказывает
+            if available_employees:
+                # Удаляем дубликаты и сортируем
+                unique_employees = sorted(set(available_employees))
+                employee_list = ', '.join(unique_employees)
+                logger.warning(f"Сотрудник {employee_id} не найден среди {len(unique_employees)} доступных сотрудников")
+                return False, f"Сотрудник '{employee_name}' не оказывает услугу '{service_name}' в филиале '{filial_name}'. Доступные сотрудники: {employee_list}."
+            else:
+                logger.warning(f"Нет доступных сотрудников для услуги {service_id} в филиале {filial_id}")
+                return False, f"Услуга '{service_name}' недоступна в филиале '{filial_name}' или отсутствуют сотрудники для её оказания."
+                
+    except Exception as e:
+        logger.error(f"Ошибка при проверке совместимости через API: {e}", exc_info=True)
+        return False, f"Ошибка при проверке совместимости услуги, сотрудника и филиала: {str(e)}"
 
 def validate_services_for_filial(tenant_id: str, service_ids: List[str], filial_id: str, _clinic_data: List[Dict]) -> Tuple[List[str], List[Dict]]:
     """

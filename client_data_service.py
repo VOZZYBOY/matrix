@@ -21,9 +21,38 @@ async def get_multiple_data_from_api(
 ) -> Optional[List[Dict[str, Any]]]:
     """
     Вызывает эндпоинт /api/v1/AI/getMultipleData для получения связанных данных.
-    Принимает опциональные filial_id, employee_id, service_id.
-    Требует api_token.
-    Возвращает список словарей с данными или None при ошибке/нет данных.
+    
+    ВАЖНО: Функция поддерживает 6 режимов работы в зависимости от переданных параметров:
+    
+    1. **Только filial_id** → Возвращает всех сотрудников, которые работают в этом филиале,
+       с их услугами и категориями.
+       
+    2. **Только service_id** → Возвращает всех сотрудников, которые оказывают эту услугу,
+       во всех филиалах где она доступна.
+       
+    3. **Только employee_id** → Возвращает все услуги конкретного сотрудника
+       во всех филиалах где он работает.
+       
+    4. **filial_id + employee_id** → Возвращает услуги конкретного сотрудника
+       только в указанном филиале.
+       
+    5. **filial_id + service_id** → Возвращает всех сотрудников, которые оказывают
+       конкретную услугу в конкретном филиале.
+       
+    6. **service_id + employee_id** → Возвращает информацию о том, в каких филиалах
+       конкретный сотрудник оказывает конкретную услугу.
+    
+    Args:
+        api_token: Bearer-токен для авторизации (обязательно)
+        filial_id: ID филиала (опционально)
+        employee_id: ID сотрудника (опционально) 
+        service_id: ID услуги (опционально)
+        tenant_id: ID тенанта для логирования (опционально)
+    
+    Returns:
+        Список словарей с данными или None при ошибке/отсутствии данных.
+        Каждый элемент содержит: employeeId, employeeFullname, serviceId, serviceName,
+        categoryId, categoryName, filialId, filialName
     """
     if not api_token:
         logger.error(f"[Tenant: {tenant_id}] api_token не предоставлен для вызова getMultipleData.")
@@ -512,7 +541,10 @@ async def get_free_times_of_employee_by_services(
     """
     Получить свободные слоты для сотрудника по выбранным услугам.
     Ожидает ID для сотрудника, услуг и филиала.
+    Включает retry-логику для обработки нестабильных 500 ошибок.
     """
+    import asyncio
+    
     payload = {
         "employeeId": employee_id,
         "serviceId": service_ids,
@@ -525,22 +557,60 @@ async def get_free_times_of_employee_by_services(
     if api_token:
         headers["Authorization"] = f"Bearer {api_token}"
         
+    # Retry настройки для борьбы с "магическими" 500 ошибками
+    max_retries = 3
+    base_delay = 1.0  # Базовая задержка в секундах
+    backoff_multiplier = 2.0  # Множитель для экспоненциальной задержки
+    
     logger.info(f"Отправка запроса к API getFreeTimesOfEmployeeByChoosenServices: URL={api_url}, Параметры={payload}")
     
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(api_url, json=payload, headers=headers, timeout=15.0)
-            resp.raise_for_status()
-            response_data = resp.json()
-            
-            # Логируем ответ API (только первые 200 символов, если ответ большой)
-            response_snippet = str(response_data)[:200] + "..." if len(str(response_data)) > 200 else str(response_data)
-            logger.info(f"Получен ответ от API getFreeTimesOfEmployeeByChoosenServices: {response_snippet}")
-            
-            return response_data
-    except Exception as e:
-        logger.error(f"Ошибка при вызове API getFreeTimesOfEmployeeByChoosenServices: {e}", exc_info=True)
-        raise
+    for attempt in range(max_retries + 1):
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(api_url, json=payload, headers=headers, timeout=15.0)
+                
+                # Если получили успешный ответ
+                if resp.status_code == 200:
+                    response_data = resp.json()
+                    response_snippet = str(response_data)[:200] + "..." if len(str(response_data)) > 200 else str(response_data)
+                    
+                    if attempt > 0:
+                        logger.info(f"[Retry успех] Получен ответ от API getFreeTimesOfEmployeeByChoosenServices после {attempt} попыток: {response_snippet}")
+                    else:
+                        logger.info(f"Получен ответ от API getFreeTimesOfEmployeeByChoosenServices: {response_snippet}")
+                    
+                    return response_data
+                
+                # Если 500 ошибка и есть попытки для повтора
+                elif resp.status_code == 500 and attempt < max_retries:
+                    delay = base_delay * (backoff_multiplier ** attempt)
+                    logger.warning(f"[Retry {attempt + 1}/{max_retries}] API getFreeTimesOfEmployeeByChoosenServices вернул 500 ошибку. Повтор через {delay}с. Response: {resp.text[:200]}")
+                    await asyncio.sleep(delay)
+                    continue
+                
+                # Для других ошибок или если закончились попытки
+                else:
+                    resp.raise_for_status()
+                    
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 500 and attempt < max_retries:
+                delay = base_delay * (backoff_multiplier ** attempt)
+                logger.warning(f"[Retry {attempt + 1}/{max_retries}] HTTP 500 ошибка в getFreeTimesOfEmployeeByChoosenServices. Повтор через {delay}с. Error: {e.response.text[:200]}")
+                await asyncio.sleep(delay)
+                continue
+            else:
+                logger.error(f"HTTP ошибка при вызове API getFreeTimesOfEmployeeByChoosenServices (после {attempt} попыток): {e}", exc_info=True)
+                raise
+                
+        except Exception as e:
+            if attempt < max_retries:
+                delay = base_delay * (backoff_multiplier ** attempt)
+                logger.warning(f"[Retry {attempt + 1}/{max_retries}] Ошибка в getFreeTimesOfEmployeeByChoosenServices. Повтор через {delay}с. Error: {e}")
+                await asyncio.sleep(delay)
+                continue
+            else:
+                logger.error(f"Ошибка при вызове API getFreeTimesOfEmployeeByChoosenServices (после {max_retries} попыток): {e}", exc_info=True)
+                raise
 
 async def add_record(
     tenant_id: str,
@@ -577,7 +647,7 @@ async def add_record(
         "totalPrice": total_price,
     }
 
-    # Добавляем опциональные поля, если они есть
+   
     if color_code_record is not None:
         api_request_payload["colorCodeRecord"] = color_code_record
     if traffic_channel is not None:

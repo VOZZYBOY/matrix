@@ -23,7 +23,7 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_DB = int(os.getenv("REDIS_DB", 0))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
 REDIS_KEY_PREFIX = "chat_history"
-DEFAULT_TTL_SECONDS = 3600 # 1 час
+DEFAULT_TTL_SECONDS = 3600
 
 # Инициализация клиента Redis
 try:
@@ -205,33 +205,3 @@ class TenantAwareRedisChatMessageHistory(BaseChatMessageHistory):
         # Используем существующую функцию clear_history
         clear_history(self.tenant_id, self.session_id)
 
-# <<< КОНЕЦ НОВОГО КОДА >>>
-
-# Пример использования (можно закомментировать или удалить)
-if __name__ == "__main__":
-    test_tenant = "medumed"
-    test_user = "user123"
-
-    # Проверка соединения
-    if redis_client:
-        print(f"Соединение с Redis установлено: {redis_client.ping()}")
-
-        # Добавление сообщений
-        add_message(test_tenant, test_user, {"type": "human", "content": "Привет!"})
-        add_message(test_tenant, test_user, {"type": "ai", "content": "Здравствуйте!"})
-        add_message(test_tenant, test_user, {"type": "human", "content": "Как дела?"})
-
-        # Получение истории
-        history = get_history(test_tenant, test_user, limit=10)
-        print("История:")
-        for msg in history:
-            print(msg)
-
-        # # Очистка истории (раскомментируйте для теста)
-        # cleared = clear_history(test_tenant, test_user)
-        # print(f"История очищена: {cleared}")
-        # history_after_clear = get_history(test_tenant, test_user, limit=10)
-        # print(f"История после очистки: {history_after_clear}")
-
-    else:
-        print("Не удалось подключиться к Redis для выполнения тестов.")
