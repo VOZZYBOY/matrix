@@ -1248,6 +1248,7 @@ class ListServicesInFilial(BaseModel):
         return "\n".join(response_parts)
 
 
+
 # Добавим все остальные функции (ListCategories, ListServicesInCategory, FindServicesInPriceRange и т.д.)
 # Они остаются без изменений, так как уже работают с прямым поиском или используют ID там, где это необходимо
 
@@ -1883,7 +1884,12 @@ class GetFreeSlots(BaseModel):
 
             except Exception as e:
                 logger.error(f"Исключение в GetFreeSlots.process на итерации {iteration + 1}, дата {current_date_str}: {e}", exc_info=True)
-                return f"Произошла внутренняя ошибка при поиске свободных слотов: {e}"
+                
+                # Если это таймаут, даем более понятное сообщение
+                if "ReadTimeout" in str(e) or "timeout" in str(e).lower():
+                    return f"Извините, система записи временно медленно отвечает. Попробуйте повторить запрос через несколько минут или обратитесь к администратору."
+                else:
+                    return f"Произошла внутренняя ошибка при поиске свободных слотов: {e}"
             
             # Переходим к следующей дате (+7 дней)
             search_date += timedelta(days=date_increment)

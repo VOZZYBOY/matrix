@@ -567,7 +567,7 @@ async def get_free_times_of_employee_by_services(
     for attempt in range(max_retries + 1):
         try:
             async with httpx.AsyncClient() as client:
-                resp = await client.post(api_url, json=payload, headers=headers, timeout=15.0)
+                resp = await client.post(api_url, json=payload, headers=headers, timeout=30.0)
                 
                 # Если получили успешный ответ
                 if resp.status_code == 200:
@@ -821,7 +821,7 @@ async def get_filial_services_by_categories(
             logger.info(f"[Tenant: {tenant_id}] Отправка GET запроса на получение услуг по категориям для филиала {filial_id}")
             logger.info(f"[Tenant: {tenant_id}] URL: {url}")
             
-            # Используем GET запрос
+            
             response = await client.get(url, headers=headers, timeout=20.0)
             
             logger.info(f"[Tenant: {tenant_id}] Response status: {response.status_code}")
@@ -831,7 +831,7 @@ async def get_filial_services_by_categories(
 
             response_data = response.json()
             
-            # Ожидаемый формат: {"code": 200, "data": [...]}
+        
             if response_data.get("code") == 200 and isinstance(response_data.get("data"), list):
                 logger.info(f"[Tenant: {tenant_id}] Успешно получены услуги по категориям. Найдено категорий: {len(response_data['data'])}")
                 return response_data["data"]
@@ -850,4 +850,3 @@ async def get_filial_services_by_categories(
         logger.error(f"[Tenant: {tenant_id}] Неизвестная ошибка при получении услуг по категориям: {e}", exc_info=True)
         return None
 
-# --- End new API endpoint function ---
