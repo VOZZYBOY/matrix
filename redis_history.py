@@ -23,7 +23,7 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_DB = int(os.getenv("REDIS_DB", 0))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
 REDIS_KEY_PREFIX = "chat_history"
-DEFAULT_TTL_SECONDS = 3600
+DEFAULT_TTL_SECONDS = 3600 * 24
 
 # Инициализация клиента Redis
 try:
@@ -102,14 +102,13 @@ def get_history(tenant_id: str, user_id: str, limit: int = 50) -> List[Dict[str,
 
     try:
         key = _get_redis_key(tenant_id, user_id)
-        # Получаем последние limit элементов (от -limit до -1)
-        # Redis возвращает байтовые строки, т.к. decode_responses=False
+        
         history_bytes = redis_client.lrange(key, -limit, -1)
 
         history_dicts = []
         for msg_bytes in history_bytes:
             try:
-                # Декодируем байты в строку и парсим JSON
+                
                 msg_str = msg_bytes.decode('utf-8')
                 history_dicts.append(json.loads(msg_str))
             except json.JSONDecodeError as e:
@@ -156,6 +155,62 @@ def clear_history(tenant_id: str, user_id: str) -> bool:
     except Exception as e:
         logger.error(f"Неизвестная ошибка при удалении истории для {tenant_id}/{user_id}: {e}", exc_info=True)
         return False
+
+
+def get_current_session_number(tenant_id: str, base_user_id: str) -> int:
+    """
+    Получает текущий номер сессии для пользователя БЕЗ инкремента.
+    
+    :param tenant_id: Идентификатор тенанта.
+    :param base_user_id: Базовый идентификатор пользователя (без номера сессии).
+    :return: Текущий номер сессии.
+    """
+    if not redis_client:
+        logger.error("Клиент Redis не инициализирован. Возвращаем сессию 1.")
+        return 1
+    
+    try:
+        session_counter_key = f"session_counter:{tenant_id}:{base_user_id}"
+        # Получаем текущее значение БЕЗ инкремента
+        current_value = redis_client.get(session_counter_key)
+        session_number = int(current_value) if current_value else 1
+        logger.debug(f"Текущий номер сессии для {tenant_id}/{base_user_id}: {session_number}")
+        return session_number
+    except redis.exceptions.RedisError as e:
+        logger.error(f"Ошибка Redis при получении номера сессии для {tenant_id}/{base_user_id}: {e}", exc_info=True)
+        return 1
+    except Exception as e:
+        logger.error(f"Неизвестная ошибка при получении номера сессии для {tenant_id}/{base_user_id}: {e}", exc_info=True)
+        return 1
+
+
+def get_next_session_number(tenant_id: str, base_user_id: str) -> int:
+    """
+    Получает и инкрементирует номер сессии для пользователя.
+    
+    :param tenant_id: Идентификатор тенанта.
+    :param base_user_id: Базовый идентификатор пользователя (без номера сессии).
+    :return: Следующий номер сессии.
+    """
+    if not redis_client:
+        logger.error("Клиент Redis не инициализирован. Возвращаем сессию 1.")
+        return 1
+    
+    try:
+        session_counter_key = f"session_counter:{tenant_id}:{base_user_id}"
+        # Инкрементируем счетчик и получаем новое значение
+        session_number = redis_client.incr(session_counter_key)
+        # Устанавливаем TTL для счетчика (например, 7 дней)
+        redis_client.expire(session_counter_key, 7 * 24 * 3600)
+        logger.info(f"Новый номер сессии для {tenant_id}/{base_user_id}: {session_number}")
+        return session_number
+    except redis.exceptions.RedisError as e:
+        logger.error(f"Ошибка Redis при получении номера сессии для {tenant_id}/{base_user_id}: {e}", exc_info=True)
+        return 1
+    except Exception as e:
+        logger.error(f"Неизвестная ошибка при получении номера сессии для {tenant_id}/{base_user_id}: {e}", exc_info=True)
+        return 1
+
 
 # <<< НАЧАЛО НОВОГО КОДА >>>
 class TenantAwareRedisChatMessageHistory(BaseChatMessageHistory):

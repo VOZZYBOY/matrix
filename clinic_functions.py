@@ -5,7 +5,7 @@ import re
 from typing import Optional, List, Dict, Any, Set, Tuple
 from pydantic import BaseModel, Field
 from client_data_service import get_free_times_of_employee_by_services, add_record, get_multiple_data_from_api
-from clinic_index import get_name_by_id, normalize_text, get_id_by_name
+from clinic_index import get_name_by_id, normalize_text, get_id_by_name, get_service_id_by_name
 import asyncio
 from datetime import datetime, timedelta
 
@@ -448,35 +448,23 @@ class GetServicePrice(BaseModel):
 
         logger.info(f"[FC Proc] Запрос цены (Услуга: {self.service_name}, Филиал: {self.filial_name}, В процессе записи: {self.in_booking_process}), Tenant: {_tenant_id_for_clinic_data}")
 
-        # Нормализованные запросы для поиска
-        normalized_service_query = normalize_text(self.service_name, keep_spaces=True).lower()
+        # Используем fuzzy search из clinic_index для поиска услуги
+        service_id = get_service_id_by_name(_tenant_id_for_clinic_data, self.service_name)
+        
+        if not service_id:
+            logger.warning(f"[GetServicePrice] Услуга '{self.service_name}' не найдена через fuzzy search")
+            return f"Услуга с названием, похожим на '{self.service_name}', не найдена."
+        
+        logger.info(f"[GetServicePrice] Найдена услуга через fuzzy search: service_id={service_id}")
+        
+        # Нормализуем запрос филиала для фильтрации цен
         normalized_filial_query = normalize_text(self.filial_name, keep_spaces=True).lower() if self.filial_name else None
         
-        # Найденные услуги по приоритету совпадения
-        exact_matches = []
-        substring_matches = []
-        
-        # Поиск услуг напрямую в данных
+        # Находим все записи с этим service_id
+        matching_services = []
         for item in _clinic_data:
-            service_name = item.get("serviceName")
-            if not service_name:
-                continue
-                
-            normalized_service_name = normalize_text(service_name, keep_spaces=True).lower()
-            
-            # Точное совпадение
-            if normalized_service_name == normalized_service_query:
-                exact_matches.append(item)
-            # Совпадение по подстроке
-            elif normalized_service_query in normalized_service_name:
-                substring_matches.append(item)
-        
-        # Выбираем лучшие совпадения
-        matching_services = exact_matches if exact_matches else substring_matches
-        
-        if not matching_services:
-            logger.warning(f"[GetServicePrice] Услуга '{self.service_name}' не найдена")
-            return f"Услуга с названием, похожим на '{self.service_name}', не найдена."
+            if item.get("serviceId") == service_id:
+                matching_services.append(item)
         
         # Применяем фильтрацию по ключевым словам
         keyword_filters = {
@@ -1066,7 +1054,7 @@ class ListServicesInFilial(BaseModel):
     page_number: int = Field(default=1, description="Номер страницы (начиная с 1)")
     page_size: int = Field(default=30, description="Количество услуг на странице")
 
-    async def process(self, tenant_id: str, api_token: str) -> str: # <-- Added tenant_id and api_token
+    async def process(self, tenant_id: str, api_token: str) -> str:
         logger.info(f"[ListServicesInFilial Proc] Получение списка услуг в филиале '{self.filial_name}', Tenant: {tenant_id}, Page: {self.page_number}, Size: {self.page_size}")
 
         # Get filial ID first (mandatory)
@@ -1076,14 +1064,100 @@ class ListServicesInFilial(BaseModel):
         
         actual_filial_name = get_name_by_id(tenant_id, 'filial', filial_id_query) or self.filial_name
 
-        # Call the new API endpoint filtering ONLY by filialId
+        # Try new API endpoint first for getting services by categories
+        from client_data_service import get_filial_services_by_categories
+        categories_data = await get_filial_services_by_categories(
+            api_token=api_token,
+            filial_id=filial_id_query,
+            tenant_id=tenant_id
+        )
+
+        if categories_data:
+            # Use new structured data format
+            return self._format_services_by_categories(categories_data, actual_filial_name)
+        else:
+            # Fallback to old API endpoint
+            logger.info(f"[ListServicesInFilial] Новый API недоступен, используем старый метод для филиала '{actual_filial_name}'")
+            return await self._process_with_old_api(tenant_id, api_token, filial_id_query, actual_filial_name)
+
+    def _format_services_by_categories(self, categories_data: List[Dict[str, Any]], filial_name: str) -> str:
+        """Форматирует данные из нового API endpoint с категориями и услугами."""
+        if not categories_data:
+            return f"В филиале '{filial_name}' не найдено услуг."
+
+        # Prepare items for pagination (categories and their services)
+        paginatable_items = []
+        
+        # Sort categories by name
+        sorted_categories = sorted(categories_data, key=lambda x: normalize_text(x.get('categoryName', '')))
+        
+        for category_data in sorted_categories:
+            category_name = category_data.get('categoryName', 'Без категории')
+            services = category_data.get('services', [])
+            
+            # Add category header
+            paginatable_items.append(('category', category_name, None, None, None))
+            
+            # Sort services within category
+            sorted_services = sorted(services, key=lambda x: normalize_text(x.get('serviceName', '')))
+            
+            for service in sorted_services:
+                service_name = service.get('serviceName', 'Неизвестная услуга')
+                price = service.get('price')
+                duration = service.get('duration')
+                description = service.get('description', '').strip()
+                
+                paginatable_items.append(('service', service_name, price, duration, description))
+
+        # Apply pagination
+        total_items = len(paginatable_items)
+        start_idx = (self.page_number - 1) * self.page_size
+        end_idx = start_idx + self.page_size
+        paginated_items = paginatable_items[start_idx:end_idx]
+
+        if not paginated_items and self.page_number > 1:
+            max_pages = (total_items + self.page_size - 1) // self.page_size if self.page_size > 0 else 1
+            return f"Страница {self.page_number} не найдена. Доступно страниц: {max_pages}. Всего пунктов в филиале '{filial_name}': {total_items}"
+
+        # Format response
+        response_parts = []
+        page_info = f" (страница {self.page_number} из {(total_items + self.page_size - 1) // self.page_size if total_items > 0 and self.page_size > 0 else 1})" if total_items > self.page_size else ""
+        
+        response_parts.append(f"Услуги в филиале '{filial_name}'{page_info}:")
+
+        for item_type, name, price, duration, description in paginated_items:
+            if item_type == 'category':
+                response_parts.append(f"\n📋 {name}:")
+            elif item_type == 'service':
+                service_info = f"  • {name}"
+                if price is not None:
+                    try:
+                        service_info += f" - {int(price):,} ₽".replace(',', ' ')
+                    except (ValueError, TypeError):
+                        service_info += f" - {price} ₽"
+                if duration is not None:
+                    service_info += f" ({duration} мин)"
+                response_parts.append(service_info)
+                
+                if description:
+                    response_parts.append(f"    💡 {description}")
+
+        # Add pagination info
+        if end_idx < total_items:
+            response_parts.append(f"\n... показано {len(paginated_items)} из {total_items} пунктов. Используйте page_number={self.page_number + 1} для следующей страницы.")
+
+        response_parts.append(f"\n💰 Для уточнения актуальных цен используйте функцию GetServicePrice.")
+
+        return "\n".join(response_parts)
+
+    async def _process_with_old_api(self, tenant_id: str, api_token: str, filial_id_query: str, actual_filial_name: str) -> str:
+        """Fallback метод, использующий старый API endpoint."""
         from client_data_service import get_multiple_data_from_api
-        # Call the new API endpoint filtering ONLY by filialId
-        from client_data_service import get_multiple_data_from_api
+        
         api_data = await get_multiple_data_from_api(
              api_token=api_token,
              filial_id=filial_id_query,
-             tenant_id=tenant_id # Pass for logging
+             tenant_id=tenant_id
         )
 
         if not api_data:
@@ -1102,7 +1176,6 @@ class ListServicesInFilial(BaseModel):
                 categories_with_services[category_name].add(service_name)
 
         if not categories_with_services:
-            # Should not happen if api_data was not empty, but as a safeguard
             return f"В филиале '{actual_filial_name}' не найдено услуг или данные о них отсутствуют в актуальной базе данных (после группировки)."
 
         # Prepare items for pagination, including category headers
@@ -1110,11 +1183,39 @@ class ListServicesInFilial(BaseModel):
         sorted_categories = sorted(categories_with_services.keys(), key=normalize_text)
 
         for category in sorted_categories:
-             paginatable_items.append((category, None)) # Category header marker
+             paginatable_items.append(('category', category, None, None, None))
              services_in_category = sorted(list(categories_with_services[category]), key=normalize_text)
+             for service in services_in_category:
+                 paginatable_items.append(('service', service, None, None, None))
 
         # Apply pagination
         total_paginatable_items = len(paginatable_items)
+        start_idx = (self.page_number - 1) * self.page_size
+        end_idx = start_idx + self.page_size
+        paginated_items = paginatable_items[start_idx:end_idx]
+
+        if not paginated_items and self.page_number > 1:
+            max_pages = (total_paginatable_items + self.page_size - 1) // self.page_size if total_paginatable_items > 0 and self.page_size > 0 else 1
+            return f"Страница {self.page_number} не найдена. Доступно страниц: {max_pages}. Всего пунктов в филиале '{actual_filial_name}': {total_paginatable_items}"
+
+        response_parts = []
+        page_info = f" (страница {self.page_number} из {(total_paginatable_items + self.page_size - 1) // self.page_size if total_paginatable_items > 0 and self.page_size > 0 else 1})" if total_paginatable_items > self.page_size else ""
+
+        response_parts.append(f"Услуги в филиале '{actual_filial_name}'{page_info}:")
+
+        for item_type, name, price, duration, description in paginated_items:
+            if item_type == 'category':
+                response_parts.append(f"\n📋 {name}:")
+            elif item_type == 'service':
+                response_parts.append(f"  • {name}")
+
+        # Add pagination info
+        if end_idx < total_paginatable_items:
+            response_parts.append(f"\n... показано {len(paginated_items)} из {total_paginatable_items} пунктов. Используйте page_number={self.page_number + 1} для следующей страницы.")
+
+        response_parts.append(f"\n💰 Для уточнения актуальных цен используйте функцию GetServicePrice.")
+
+        return "\n".join(response_parts)
         start_idx = (self.page_number - 1) * self.page_size
         end_idx = start_idx + self.page_size
         paginated_items = paginatable_items[start_idx:end_idx]
@@ -1130,20 +1231,19 @@ class ListServicesInFilial(BaseModel):
 
         current_category = None
         for category, service in paginated_items:
-            if service is None: # This is a category header
-                response_parts.append(f"\n{category}:")
+            if service is None:
+                response_parts.append(f"\n📋 {category}:")
                 current_category = category
-            elif current_category is not None: # This is a service under the current category
-                response_parts.append(f"  - {service}")
-            # Fallback for safety, although should not be needed if logic is correct
+            elif current_category is not None:
+                response_parts.append(f"  • {service}")
             elif service is not None:
-                response_parts.append(f"- {service}")
+                response_parts.append(f"• {service}")
 
         # Add pagination info
         if end_idx < total_paginatable_items:
              response_parts.append(f"\n... показано {len(paginated_items)} из {total_paginatable_items} пунктов (категории + услуги). Используйте page_number={self.page_number + 1} для следующей страницы.")
 
-        response_parts.append(f"\nДля получения подробной информации об услуге используйте функцию GetServicePrice.")
+        response_parts.append(f"\n💰 Для получения подробной информации об услуге используйте функцию GetServicePrice.")
 
         return "\n".join(response_parts)
 

@@ -152,18 +152,41 @@ async def ask_assistant(
         logger.error(f"Получен запрос без tenant_id.")
         raise HTTPException(status_code=400, detail="Параметр 'tenant_id' обязателен.")
 
-    if request.phone_number:
-        user_id_for_agent_chat_history = f"{tenant_id}_{request.phone_number}"
-    else:
-        user_id_for_agent_chat_history = f"{tenant_id}_{generate_user_id()}"
+    # Формируем базовый user_id
+    base_user_id = f"{tenant_id}_{request.phone_number}" if request.phone_number else f"{tenant_id}_{generate_user_id()}"
     
-    logger.info(f"Получен запрос от tenant '{tenant_id}', НАШ user_chat_history_id '{user_id_for_agent_chat_history}' (оригинальный request.user_id: '{request.user_id}', phone '{request.phone_number}'): {request.message[:50]}... Reset: {reset}")
+    # Получаем текущий номер сессии (без инкремента)
+    session_counter = 1  # По умолчанию первая сессия
+    if redis_clear_history:
+        try:
+            from redis_history import get_current_session_number
+            session_counter = get_current_session_number(tenant_id, base_user_id)
+        except Exception as e:
+            logger.warning(f"Не удалось получить счетчик сессий: {e}")
+            session_counter = 1
+    
+    # Формируем финальный user_id с номером сессии (всегда с суффиксом)
+    user_id_for_agent_chat_history = f"{base_user_id}_s{session_counter}"
+    
+    logger.info(f"Получен запрос от tenant '{tenant_id}', НАШ user_chat_history_id '{user_id_for_agent_chat_history}' (оригинальный request.user_id: '{request.user_id}', phone '{request.phone_number}', session: {session_counter}): {request.message[:50]}... Reset: {reset}")
 
     if reset:
         if redis_clear_history:
+            # Очищаем старую историю
             cleared = redis_clear_history(tenant_id=tenant_id, user_id=user_id_for_agent_chat_history)
+            
+            # Инкрементируем счетчик сессий с помощью встроенной Redis функции
+            try:
+                from redis_history import get_next_session_number
+                new_session_counter = get_next_session_number(tenant_id, base_user_id)
+                # Обновляем user_id для ответа с новым номером сессии
+                user_id_for_agent_chat_history = f"{base_user_id}_s{new_session_counter}"
+                logger.info(f"Создана новая сессия {new_session_counter} для {base_user_id}")
+            except Exception as e:
+                logger.error(f"Ошибка при инкременте счетчика сессий: {e}")
+            
             logger.info(f"Запрос на сброс сессии для tenant '{tenant_id}', user_id '{user_id_for_agent_chat_history}'. Сессия удалена: {cleared}")
-            return MessageResponse(response="История чата была очищена.", user_id=user_id_for_agent_chat_history)
+            return MessageResponse(response="История чата была очищена. Начинаем новую сессию.", user_id=user_id_for_agent_chat_history)
         else:
              logger.error(f"Функция redis_clear_history не доступна для tenant '{tenant_id}', user_id '{user_id_for_agent_chat_history}'")
              return MessageResponse(response="Запрос на сброс сессии получен, но функция очистки истории в Redis недоступна. Сообщение не было обработано.", user_id=user_id_for_agent_chat_history)

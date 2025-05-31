@@ -765,3 +765,89 @@ async def get_service_id_by_name_api(
     except Exception as e:
         logger.error(f"[Tenant: {tenant_id}] Непредвиденная ошибка в get_service_id_by_name_api для '{service_name}': {e}", exc_info=True)
         return None
+
+
+async def get_filial_services_by_categories(
+    api_token: str,
+    filial_id: str,
+    tenant_id: Optional[str] = None
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    Вызывает новый эндпоинт для получения услуг по категориям в конкретном филиале.
+    
+    Возвращает структуру вида:
+    [
+        {
+            "categoryId": "uuid",
+            "categoryName": "название категории",
+            "services": [
+                {
+                    "serviceId": "uuid",
+                    "serviceName": "название услуги",
+                    "description": "описание",
+                    "price": цена,
+                    "duration": длительность
+                }
+            ]
+        }
+    ]
+    
+    Args:
+        api_token: Bearer-токен для авторизации
+        filial_id: ID филиала
+        tenant_id: ID тенанта для логирования (опционально)
+    
+    Returns:
+        Список категорий с услугами или None при ошибке
+    """
+    if not api_token:
+        logger.error(f"[Tenant: {tenant_id}] api_token не предоставлен для вызова filial services by categories.")
+        return None
+    
+    if not filial_id:
+        logger.error(f"[Tenant: {tenant_id}] filial_id не предоставлен для вызова filial services by categories.")
+        return None
+
+    # Правильный URL для нового эндпоинта
+    url = f"{CLIENT_API_BASE_URL}/AI/filial/{filial_id}/categories-services"
+
+    headers = {
+        "Authorization": f"Bearer {api_token}",
+        "accept": "*/*"
+    }
+
+    try:
+        async with httpx.AsyncClient(verify=False) as client:
+            logger.info(f"[Tenant: {tenant_id}] Отправка GET запроса на получение услуг по категориям для филиала {filial_id}")
+            logger.info(f"[Tenant: {tenant_id}] URL: {url}")
+            
+            # Используем GET запрос
+            response = await client.get(url, headers=headers, timeout=20.0)
+            
+            logger.info(f"[Tenant: {tenant_id}] Response status: {response.status_code}")
+            logger.info(f"[Tenant: {tenant_id}] Response body: {response.text[:500]}...")
+            
+            response.raise_for_status()
+
+            response_data = response.json()
+            
+            # Ожидаемый формат: {"code": 200, "data": [...]}
+            if response_data.get("code") == 200 and isinstance(response_data.get("data"), list):
+                logger.info(f"[Tenant: {tenant_id}] Успешно получены услуги по категориям. Найдено категорий: {len(response_data['data'])}")
+                return response_data["data"]
+            else:
+                logger.warning(f"[Tenant: {tenant_id}] API вернуло код {response_data.get('code')} или данные не в формате списка. Ответ: {response_data}")
+                return None
+
+    except httpx.HTTPStatusError as e:
+        error_content = e.response.text
+        logger.error(f"[Tenant: {tenant_id}] Ошибка HTTP Status {e.response.status_code} при получении услуг по категориям: {error_content}", exc_info=True)
+        return None
+    except httpx.RequestError as e:
+        logger.error(f"[Tenant: {tenant_id}] Ошибка запроса при получении услуг по категориям: {e}", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"[Tenant: {tenant_id}] Неизвестная ошибка при получении услуг по категориям: {e}", exc_info=True)
+        return None
+
+# --- End new API endpoint function ---

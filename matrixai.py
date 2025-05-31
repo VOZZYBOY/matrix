@@ -349,7 +349,8 @@ async def find_services_in_price_range_tool(**kwargs_from_llm) -> str:
         page_size=validated_args.page_size
     )
     return await handler.process(tenant_id_from_kwargs, api_token_from_kwargs)
-class ListAllCategoriesArgs(BaseModel):
+
+class ListCategoriesArgs(BaseModel):
     page_number: Optional[int] = Field(default=1, description="Номер страницы для пагинации (начиная с 1)")
     page_size: Optional[int] = Field(default=30, description="Количество категорий на странице для пагинации")
     tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
@@ -358,7 +359,7 @@ class ListAllCategoriesArgs(BaseModel):
 async def list_all_categories_tool(**kwargs_from_llm) -> str:
     """Возвращает список ВСЕХ категорий услуг. Поддерживает пагинацию: используйте 'page_number' (по умолчанию 1) и 'page_size' (по умолчанию 30), если ожидается много результатов или пользователь просит показать все/дальше."""
     try:
-        validated_args = ListAllCategoriesArgs(**kwargs_from_llm)
+        validated_args = ListCategoriesArgs(**kwargs_from_llm)
     except Exception as e:
         logger.error(f"Ошибка валидации аргументов для list_all_categories_tool: {e}")
         return f"Ошибка: неверные или отсутствующие аргументы для получения списка категорий: {e}"
@@ -503,7 +504,7 @@ TOOL_CLASSES = [
     ListServicesInCategoryArgs,
     ListServicesInFilialArgs,
     FindServicesInPriceRangeArgs,
-    ListAllCategoriesArgs,
+    ListCategoriesArgs,
     ListEmployeeFilialsArgs,
     GetFreeSlotsArgs,  # Новый класс-аргументы
     BookAppointmentArgs,  # Новый класс-аргументы
@@ -1281,8 +1282,8 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         find_service_locations_tool: FindServiceLocationsArgs, find_specialists_by_service_or_category_and_filial_tool: FindSpecialistsByServiceOrCategoryAndFilialArgs,
         list_services_in_category_tool: ListServicesInCategoryArgs, list_services_in_filial_tool: ListServicesInFilialArgs,
         find_services_in_price_range_tool: FindServicesInPriceRangeArgs, 
-        list_all_categories_tool: ListAllCategoriesArgs, # <--- ИСПРАВЛЕНО с NoArgsSchema
-        list_employee_filials_tool: ListEmployeeFilialsArgs,
+        list_all_categories_tool: ListCategoriesArgs,
+        list_employee_filials_tool: ListEmployeeFilialsArgs
     }
 
     def create_tool_wrapper_react(original_tool_func: callable, raw_data_for_tenant: Optional[List[Dict]], tenant_id_for_tool: str, configurable_dict: Dict = None): # <--- ДОБАВЛЕН configurable_dict
