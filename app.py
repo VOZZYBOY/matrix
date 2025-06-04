@@ -4,14 +4,15 @@ import os
 import uuid
 import time
 from contextlib import asynccontextmanager
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 import datetime
-from fastapi import FastAPI, HTTPException, Depends, Request
+import base64
+from fastapi import FastAPI, HTTPException, Depends, Request, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from langchain_core.runnables import Runnable
 
 from client_data_service import get_client_context_for_agent
@@ -70,6 +71,26 @@ class GetTenantSettingsResponse(BaseModel):
     clinic_info_docs: Optional[List[Dict[str, Any]]] = None
     last_modified_general: Optional[str] = None 
 
+class ImageData(BaseModel):
+    """Модель для передачи изображений в мультимодальном формате"""
+    type: str = Field(default="image", description="Тип контента - всегда 'image'")
+    source_type: str = Field(description="Тип источника: 'base64' или 'url'")
+    data: Optional[str] = Field(default=None, description="Base64 данные изображения (для source_type='base64')")
+    url: Optional[str] = Field(default=None, description="URL изображения (для source_type='url')")
+    mime_type: Optional[str] = Field(default="image/jpeg", description="MIME тип изображения")
+    
+    @validator("data")
+    def validate_base64_data(cls, v, values):
+        if values.get("source_type") == "base64" and not v:
+            raise ValueError("Для source_type='base64' поле 'data' обязательно")
+        return v
+    
+    @validator("url")
+    def validate_url_data(cls, v, values):
+        if values.get("source_type") == "url" and not v:
+            raise ValueError("Для source_type='url' поле 'url' обязательно")
+        return v
+
 class MessageRequest(BaseModel):
     message: str
     user_id: Optional[str] = None
@@ -77,6 +98,7 @@ class MessageRequest(BaseModel):
     tenant_id: str 
     phone_number: Optional[str] = None
     client_api_token: Optional[str] = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJJZCI6ImUwOTA0YWU2LWQ4NzMtNDA5MS1iNjFjLTQyODlhYTI3ZjY2ZSIsIk5hbWUiOiJhZG1pbiIsIlN1cm5hbWUiOiJhZG1pbiIsIlJvbGVOYW1lIjoi0JDQtNC80LjQvdC40YHRgtGA0LDRgtC-0YAiLCJFbWFpbCI6ImhhbGFsb2xzdW5AbWFpbC5jb20iLCJUZW5hbnRJZCI6Im1lZHl1bWVkLjIwMjMtMDQtMjQiLCJSb2xlSWQiOiJyb2xlMiIsIlBob3RvVXJsIjoiaHR0cHM6Ly9jZG4ubWF0cml4Y3JtLnJ1L21lZHl1bWVkLjIwMjMtMDQtMjQvOTFhMGZhYzAtYmQ1Zi00M2RkLThmNTAtNTc5YmI0NjEwZGUyLmpwZWciLCJDaXR5SWQiOiIyIiwiZXhwIjoxNzg3MTI4MDY4LCJpc3MiOiJodHRwczovL2xvY2FsaG9zdDo3MDk1IiwiYXVkIjoiaHR0cHM6Ly9sb2NhbGhvc3Q6NzA5NSJ9.v9fQ_6Fepbov-BYZIg5RgcTluQVgWZSaDDK71OIsOjE"
+    images: Optional[List[ImageData]] = Field(default=None, description="Список изображений для мультимодальной обработки")
 class MessageResponse(BaseModel):
     response: str
     user_id: str
@@ -132,6 +154,91 @@ def get_agent() -> Runnable:
 
 def generate_user_id() -> str:
     return f"user_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+
+async def prepare_multimodal_input(request: MessageRequest, client_context_str: Optional[str]) -> Union[str, List[Dict[str, Any]]]:
+    """
+    Подготавливает входные данные для мультимодального агента.
+    
+    Возвращает:
+    - Обычную строку, если изображений нет
+    - Список блоков контента в мультимодальном формате LangChain, если есть изображения
+    """
+    
+    # Формируем основное текстовое сообщение
+    text_message = request.message
+    if client_context_str:
+        text_message = f"{client_context_str}\n\nИсходное сообщение: {request.message}"
+        logger.info(f"Добавлен контекст о клиенте. Новое сообщение для агента (начало): {text_message[:150]}...")
+    else:
+        logger.info("Контекст о клиенте не был сформирован.")
+    
+    # Если нет изображений, возвращаем обычную строку
+    if not request.images:
+        return text_message
+    
+    # Если есть изображения, формируем мультимодальный формат
+    logger.info(f"Обрабатываем мультимодальный запрос с {len(request.images)} изображениями")
+    
+    content_blocks = []
+    
+    # Добавляем текстовый блок
+    content_blocks.append({
+        "type": "text",
+        "text": text_message
+    })
+    
+    # Добавляем блоки изображений
+    for i, image in enumerate(request.images):
+        try:
+            if image.source_type == "base64":
+                # Валидируем base64 данные
+                if not image.data:
+                    logger.warning(f"Изображение {i+1}: отсутствуют base64 данные")
+                    continue
+                    
+                # Проверяем, что это валидный base64
+                try:
+                    base64.b64decode(image.data, validate=True)
+                except Exception as e:
+                    logger.error(f"Изображение {i+1}: невалидные base64 данные: {e}")
+                    continue
+                
+                image_block = {
+                    "type": "image",
+                    "source_type": "base64",
+                    "data": image.data,
+                    "mime_type": image.mime_type or "image/jpeg"
+                }
+                
+            elif image.source_type == "url":
+                if not image.url:
+                    logger.warning(f"Изображение {i+1}: отсутствует URL")
+                    continue
+                    
+                image_block = {
+                    "type": "image", 
+                    "source_type": "url",
+                    "url": image.url
+                }
+                
+            else:
+                logger.error(f"Изображение {i+1}: неподдерживаемый source_type: {image.source_type}")
+                continue
+                
+            content_blocks.append(image_block)
+            logger.info(f"Добавлено изображение {i+1} ({image.source_type})")
+            
+        except Exception as e:
+            logger.error(f"Ошибка при обработке изображения {i+1}: {e}")
+            continue
+    
+    # Если все изображения оказались невалидными, возвращаем только текст
+    if len(content_blocks) == 1:
+        logger.warning("Все изображения оказались невалидными, возвращаем только текст")
+        return text_message
+    
+    logger.info(f"Подготовлен мультимодальный ввод с {len(content_blocks)} блоками контента")
+    return content_blocks
 
 
 @app.get("/")
@@ -205,15 +312,11 @@ async def ask_assistant(
             frequent_visit_threshold=3      
         )
 
-        actual_message_for_agent = request.message
-        if client_context_str:
-            actual_message_for_agent = f"{client_context_str}\n\nИсходное сообщение: {request.message}"
-            logger.info(f"Добавлен контекст о клиенте. Новое сообщение для агента (начало): {actual_message_for_agent[:150]}...")
-        else:
-            logger.info("Контекст о клиенте не был сформирован (возможно, не указан номер/токен/ID клиента или данные не найдены).")
+        # Формируем мультимодальное сообщение для агента
+        multimodal_input = await prepare_multimodal_input(request, client_context_str)
 
         response_data = await agent_dependency.ainvoke(
-            {"input": actual_message_for_agent}, 
+            {"input": multimodal_input}, 
             config={
                 "configurable": {
                     "session_id": composite_session_id,

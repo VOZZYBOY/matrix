@@ -3,7 +3,7 @@
 import os
 import logging
 import asyncio
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage, BaseMessage, messages_from_dict, messages_to_dict
 from langchain_core.runnables.history import RunnableWithMessageHistory
@@ -506,10 +506,10 @@ TOOL_CLASSES = [
     FindServicesInPriceRangeArgs,
     ListCategoriesArgs,
     ListEmployeeFilialsArgs,
-    GetFreeSlotsArgs,  # Новый класс-аргументы
-    BookAppointmentArgs,  # Новый класс-аргументы
-    BookAppointmentAIPayloadArgs, # <--- ДОБАВЛЕН НОВЫЙ ИНСТРУМЕНТ
-    BookAppointmentAIPayload, # <--- ДОБАВЛЕНА РЕГИСТРАЦИЯ КЛАССА-ОБЁРТКИ
+    GetFreeSlotsArgs,
+    BookAppointmentArgs, 
+    BookAppointmentAIPayloadArgs,
+    BookAppointmentAIPayload,
 ]
 logger.info(f"Определено {len(TOOL_CLASSES)} Pydantic классов для аргументов инструментов.")
 
@@ -1073,12 +1073,26 @@ from langchain_core.tools import Tool, StructuredTool
 async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str: # <--- ИЗМЕНЕНО на async def
     """
     Функция, имитирующая выполнение основного агента или цепочки с ReAct-подобным циклом.
-    Принимает словарь с 'input' (вопрос пользователя) и RunnableConfig.
+    Принимает словарь с 'input' (вопрос пользователя или мультимодальные данные) и RunnableConfig.
     Извлекает tenant_id и session_id (user_id) из config.
     Выполняет RAG-поиск (один раз в начале), формирует промпт и вызывает LLM в цикле.
     Динамически создает инструменты для LLM.
+    Поддерживает мультимодальный ввод (текст + изображения).
     """
-    question = input_dict.get("input")
+    raw_input = input_dict.get("input")
+    
+    # Обработка мультимодального ввода
+    is_multimodal = isinstance(raw_input, list)
+    if is_multimodal:
+        # Извлекаем текст из мультимодального ввода для RAG-поиска
+        text_blocks = [block for block in raw_input if block.get("type") == "text"]
+        question = text_blocks[0]["text"] if text_blocks else ""
+        logger.info(f"Получен мультимодальный ввод с {len(raw_input)} блоками. Извлечен текст для RAG: {question[:100]}...")
+    else:
+        # Обычный текстовый ввод
+        question = raw_input or ""
+        logger.info(f"Получен текстовый ввод: {question[:100]}...")
+    
     history_messages: List[BaseMessage] = input_dict.get("history", [])
     configurable = config.get("configurable", {})
     composite_session_id = configurable.get("session_id")
@@ -1387,8 +1401,30 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
     messages_for_llm_cycle.extend(history_messages) # Общая история диалога
     
     rag_query_display_initial = effective_rag_query if effective_rag_query and effective_rag_query.strip() else "не выполнялся"
-    rag_context_block_initial = f"\\n\\n[Информация из базы знаний (поисковый запрос: '{rag_query_display_initial}')]:\\n{rag_context}\\n[/Информация из базы знаний]"
-    messages_for_llm_cycle.append(HumanMessage(content=question + rag_context_block_initial))
+    rag_context_block = f"\\n\\n[Информация из базы знаний (поисковый запрос: '{rag_query_display_initial}')]:\\n{rag_context}\\n[/Информация из базы знаний]"
+    
+    # Создаем итоговое сообщение пользователя с учетом мультимодальности
+    if is_multimodal:
+        # Для мультимодального ввода обновляем текстовый блок, добавляя RAG-контекст
+        final_multimodal_content = []
+        for block in raw_input:
+            if block.get("type") == "text":
+                # Добавляем RAG-контекст к первому текстовому блоку
+                enhanced_text = block["text"] + rag_context_block
+                final_multimodal_content.append({
+                    "type": "text",
+                    "text": enhanced_text
+                })
+            else:
+                # Изображения и другие блоки копируем как есть
+                final_multimodal_content.append(block)
+        
+        messages_for_llm_cycle.append(HumanMessage(content=final_multimodal_content))
+        logger.info(f"Создано мультимодальное сообщение с {len(final_multimodal_content)} блоками контента")
+    else:
+        # Обычное текстовое сообщение
+        messages_for_llm_cycle.append(HumanMessage(content=question + rag_context_block))
+        logger.info("Создано текстовое сообщение для LLM")
 
     llm_with_tools = chat_model.bind_tools(tenant_tools)
     final_answer_content = "Не удалось получить ответ от ассистента." # Ответ по умолчанию
