@@ -60,11 +60,14 @@ async def get_multiple_data_from_api(
 
     url = f"{CLIENT_API_BASE_URL}/AI/getMultipleData"
     
-    payload = {
-        "filialId": filial_id or "",
-        "employeeId": employee_id or "",
-        "serviceId": service_id or ""
-    }
+    # Подготавливаем query параметры (отправляем только непустые значения)
+    params = {}
+    if filial_id:
+        params["filialId"] = filial_id
+    if employee_id:
+        params["employeeId"] = employee_id
+    if service_id:
+        params["serviceId"] = service_id
 
     # Проверяем, заданы ли какие-то фильтры
     has_filters = bool(filial_id or employee_id or service_id)
@@ -72,24 +75,23 @@ async def get_multiple_data_from_api(
     if not has_filters:
          logger.warning(f"[Tenant: {tenant_id}] getMultipleData вызван без фильтров (filial_id, employee_id, service_id). Будет возвращен весь список. URL: {url}")
     else:
-         logger.info(f"[Tenant: {tenant_id}] Вызов getMultipleData с фильтрами: {payload}. URL: {url}")
+         logger.info(f"[Tenant: {tenant_id}] Вызов getMultipleData с query параметрами: {params}. URL: {url}")
 
 
     headers = {
         "Authorization": f"Bearer {api_token}",
-        "Content-Type": "application/json",
         "accept": "*/*"
     }
 
     try:
         async with httpx.AsyncClient(verify=False) as client: # verify=False для отключения проверки SSL
             # Логируем детали запроса
-            logger.info(f"[Tenant: {tenant_id}] Отправка GET запроса с JSON телом на {url}")
+            logger.info(f"[Tenant: {tenant_id}] Отправка GET запроса с query параметрами на {url}")
             logger.info(f"[Tenant: {tenant_id}] Headers: {headers}")
-            logger.info(f"[Tenant: {tenant_id}] JSON payload: {payload}")
+            logger.info(f"[Tenant: {tenant_id}] Query params: {params}")
             
-            # Используем GET запрос с JSON телом (нестандартно, но API так работает)
-            response = await client.request("GET", url, json=payload, headers=headers, timeout=20.0)
+            # Используем обычный GET запрос с query параметрами
+            response = await client.get(url, params=params, headers=headers, timeout=20.0)
             
             # Логируем ответ
             logger.info(f"[Tenant: {tenant_id}] Response status: {response.status_code}")
