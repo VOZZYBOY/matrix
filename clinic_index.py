@@ -126,7 +126,7 @@ def build_indexes_for_tenant(tenant_id: str, raw_data: List[Dict[str, Any]]):
                 if normalized_name not in name_to_id:
                     name_to_id[normalized_name] = id_
                 elif name_to_id[normalized_name] != id_: 
-                     logger.warning(
+                     logger.debug(
                         f"Tenant '{tenant_id}': Обнаружена коллизия нормализованных имен для сущности '{name_key}'. "
                         f"Нормализованное имя '{normalized_name}' (из оригинала: '{name}') пытается сопоставиться с ID '{id_}', "
                         f"но уже сопоставлено с ID '{name_to_id[normalized_name]}' в обычном индексе. "
@@ -140,7 +140,7 @@ def build_indexes_for_tenant(tenant_id: str, raw_data: List[Dict[str, Any]]):
                 elif id_to_name[id_] != name: 
                     # Особое внимание для филиалов, так как это текущая проблема
                     if id_key == "filialId":
-                        logger.warning(
+                        logger.debug(
                             f"Tenant '{tenant_id}': Обнаружено несоответствие данных для filialId '{id_}'. "
                             f"Этот ID уже сопоставлен с оригинальным именем филиала '{id_to_name[id_]}', "
                             f"но другая запись пытается сопоставить его с именем '{name}'. "
@@ -148,7 +148,7 @@ def build_indexes_for_tenant(tenant_id: str, raw_data: List[Dict[str, Any]]):
                             f"Это НАСТОЯТЕЛЬНО УКАЗЫВАЕТ на то, что в исходном файле данных один и тот же filialId используется для разных названий филиалов."
                         )
                     else: # Общее предупреждение для других сущностей
-                        logger.warning(
+                        logger.debug(
                             f"Tenant '{tenant_id}': Дублирующийся ID '{id_}' для сущности '{name_key}'. "
                             f"Существующее оригинальное имя: '{id_to_name[id_]}', новое оригинальное имя: '{name}'. "
                             f"Сохраняется первое ('{id_to_name[id_]}'). Это может указывать на несоответствие данных."

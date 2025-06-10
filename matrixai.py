@@ -41,8 +41,32 @@ import pytz
 from datetime import datetime
 import inspect
 from langchain_core.runnables import RunnableLambda, RunnableConfig # <--- Убрали get_config_value
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s:%(name)s:%(lineno)d - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Импорт анализатора завершенности сообщений
+try:
+    from message_completeness_analyzer import (
+        analyze_message,
+        analyze_message_with_accumulation,
+        should_wait_for_completion,
+        initialize_analyzer,
+        MessageAnalysis,
+        CompletenessStatus,
+        clear_accumulator
+    )
+    MESSAGE_ANALYZER_AVAILABLE = True
+    logger.info("Анализатор завершенности сообщений успешно импортирован")
+except ImportError as e:
+    logger.warning(f"Анализатор завершенности сообщений недоступен: {e}")
+    MESSAGE_ANALYZER_AVAILABLE = False
+    analyze_message = None
+    analyze_message_with_accumulation = None
+    should_wait_for_completion = None
+    initialize_analyzer = None
+    clear_accumulator = None
+
 GIGACHAT_CREDENTIALS = "OTkyYTgyNGYtMjRlNC00MWYyLTg3M2UtYWRkYWVhM2QxNTM1OjA5YWRkODc0LWRjYWItNDI2OC04ZjdmLWE4ZmEwMDIxMThlYw=="
 JSON_DATA_PATH = os.environ.get("JSON_DATA_PATH", "base/cleaned_data.json")
 CHROMA_PERSIST_DIR = os.environ.get("CHROMA_PERSIST_DIR", "chroma_db_clinic_giga")
@@ -116,6 +140,29 @@ def initialize_rag_components():
         logger.critical(f"Критическая ошибка во время инициализации RAG: {e}", exc_info=True)
         exit()
 initialize_rag_components()
+
+# Инициализация анализатора завершенности сообщений
+def initialize_message_analyzer():
+    """Инициализирует анализатор завершенности сообщений"""
+    if MESSAGE_ANALYZER_AVAILABLE and initialize_analyzer:
+        try:
+            # Используем тот же ключ, что и для основной модели OpenAI
+            openai_api_key = "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"
+            
+            # Инициализируем анализатор с o3-mini моделью
+            initialize_analyzer(openai_api_key, model_name="o3-mini")
+            logger.info("Анализатор завершенности сообщений успешно инициализирован")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка инициализации анализатора завершенности: {e}")
+            return False
+    else:
+        logger.warning("Анализатор завершенности сообщений недоступен")
+        return False
+
+# Инициализируем анализатор
+ANALYZER_INITIALIZED = initialize_message_analyzer()
+
 def format_docs(docs: List[Document]) -> str:
     """Форматирует найденные RAG документы для добавления в промпт."""
     if not docs:
@@ -1558,6 +1605,94 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
     logger.info(f"[{tenant_id}:{user_id}] Итоговый ответ ReAct (первые 100 симв): {final_answer_content[:100]}...")
     return final_answer_content
 
+# === ФУНКЦИИ АНАЛИЗА ЗАВЕРШЕННОСТИ СООБЩЕНИЙ ===
+
+async def analyze_user_message_completeness(
+    message: str, 
+    user_id: str, 
+    tenant_id: str,
+    previous_messages: Optional[List[str]] = None,
+    time_since_last: Optional[float] = None
+) -> Tuple[Optional['MessageAnalysis'], str]:
+    """
+    Анализирует завершенность сообщения пользователя с накоплением
+    
+    Args:
+        message: Текст сообщения для анализа
+        user_id: ID пользователя  
+        tenant_id: ID тенанта
+        previous_messages: Предыдущие сообщения (опционально)
+        time_since_last: Время с последнего сообщения в секундах
+        
+    Returns:
+        Tuple[MessageAnalysis, str]: Результат анализа и итоговое сообщение для ассистента
+    """
+    logger.info(f"[ДЕБАГ АНАЛИЗА] Входящие параметры:")
+    logger.info(f"[ДЕБАГ АНАЛИЗА] - message: '{message}'")
+    logger.info(f"[ДЕБАГ АНАЛИЗА] - user_id: '{user_id}'")
+    logger.info(f"[ДЕБАГ АНАЛИЗА] - tenant_id: '{tenant_id}'")
+    logger.info(f"[ДЕБАГ АНАЛИЗА] - ANALYZER_INITIALIZED: {ANALYZER_INITIALIZED}")
+    logger.info(f"[ДЕБАГ АНАЛИЗА] - analyze_message_with_accumulation функция доступна: {'Да' if analyze_message_with_accumulation else 'Нет'}")
+    
+    if not ANALYZER_INITIALIZED or not analyze_message_with_accumulation:
+        logger.warning(f"[{tenant_id}:{user_id}] Анализатор завершенности недоступен")
+        return None, message
+        
+    try:
+        logger.info(f"[ДЕБАГ АНАЛИЗА] Вызываем analyze_message_with_accumulation для: '{message[:50]}...'")
+        
+        analysis_result, final_message = await analyze_message_with_accumulation(
+            message=message,
+            user_id=f"{tenant_id}:{user_id}",
+            previous_messages=previous_messages,
+            time_since_last=time_since_last
+        )
+        
+        logger.info(f"[{tenant_id}:{user_id}] Анализ завершенности: {analysis_result.status} "
+                   f"(уверенность: {analysis_result.confidence:.2f})")
+        logger.info(f"[{tenant_id}:{user_id}] Итоговое сообщение: '{final_message[:100]}...'")
+        
+        return analysis_result, final_message
+        
+    except Exception as e:
+        logger.error(f"[{tenant_id}:{user_id}] Ошибка анализа завершенности: {e}", exc_info=True)
+        return None, message
+
+def should_wait_for_message_completion(analysis: Optional['MessageAnalysis']) -> bool:
+    """
+    Определяет, нужно ли ждать завершения сообщения
+    
+    Args:
+        analysis: Результат анализа сообщения или None
+        
+    Returns:
+        bool: True если нужно ждать, False если можно отвечать
+    """
+    if not analysis or not should_wait_for_completion:
+        return False
+        
+    return should_wait_for_completion(analysis)
+
+def get_message_analysis_response(analysis: 'MessageAnalysis', user_id: str) -> str:
+    """
+    Формирует ответ для неполного сообщения
+    
+    Args:
+        analysis: Результат анализа сообщения
+        user_id: ID пользователя
+        
+    Returns:
+        str: Текст ответа для пользователя
+    """
+    if analysis.status == CompletenessStatus.INCOMPLETE:
+        return "Кажется, ваше сообщение не завершено. Продолжайте, пожалуйста..."
+    elif analysis.status == CompletenessStatus.WAITING_FOR_MORE:
+        return "Я жду продолжения вашего сообщения..."
+    elif analysis.status == CompletenessStatus.AMBIGUOUS:
+        return "Не совсем понял. Можете продолжить или уточнить?"
+    else:
+        return "Продолжайте, пожалуйста..."
+
 async def trigger_reindex_tenant_async(tenant_id: str) -> bool:
     """
     Асинхронно запускает переиндексацию данных для указанного тенанта.
@@ -1621,4 +1756,18 @@ class ChromaGigaEmbeddingsWrapper(EmbeddingFunction):
         return embeddings
     def embed_query(self, text: str) -> List[float]:
         return self._gigachat_embeddings.embed_query(text)
+
+# === ЭКСПОРТ ФУНКЦИЙ ===
+# Основные функции для использования в app.py
+__all__ = [
+    'agent_with_history',
+    'GIGACHAT_CREDENTIALS', 
+    'trigger_reindex_tenant_async',
+    'analyze_user_message_completeness',
+    'should_wait_for_message_completion', 
+    'get_message_analysis_response',
+    'MESSAGE_ANALYZER_AVAILABLE',
+    'ANALYZER_INITIALIZED',
+    'clear_accumulator'
+]
 

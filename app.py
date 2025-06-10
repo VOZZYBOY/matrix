@@ -1,5 +1,6 @@
 import logging
 import uvicorn
+
 import os
 import uuid
 import time
@@ -29,10 +30,21 @@ except ImportError as e:
     redis_clear_history = None
     redis_get_history = None
 
+# Импорт основных компонентов из matrixai
 try:
-    from matrixai import agent_with_history, trigger_reindex_tenant_async
+    from matrixai import (
+        agent_with_history, 
+        trigger_reindex_tenant_async,
+        analyze_user_message_completeness,
+        should_wait_for_message_completion,
+        get_message_analysis_response,
+        MESSAGE_ANALYZER_AVAILABLE,
+        ANALYZER_INITIALIZED,
+        clear_accumulator
+    )
+    logging.info("Основные компоненты из matrixai.py успешно импортированы")
 except ImportError as e:
-     logging.critical(f"Не удалось импортировать agent_with_history из matrixai.py: {e}", exc_info=True)
+     logging.critical(f"Не удалось импортировать компоненты из matrixai.py: {e}", exc_info=True)
      raise SystemExit(f"Критическая ошибка импорта: {e}")
 
 
@@ -103,6 +115,16 @@ class MessageResponse(BaseModel):
     response: str
     user_id: str
 
+class DebouncedMessageResponse(BaseModel):
+    """Ответ с поддержкой дебаунсинга"""
+    response: str
+    user_id: str
+    is_waiting: bool = False
+    wait_time: Optional[float] = None
+    debounce_reasoning: Optional[str] = None
+    is_complete: Optional[bool] = None
+    confidence: Optional[float] = None
+
 class BookAppointmentArgs(BaseModel):
     phone_number: str
     service_name: str
@@ -125,6 +147,13 @@ async def lifespan(app: FastAPI):
              logger.info("Агент (agent_with_history) успешно получен из matrixai.")
         else:
              logger.critical("Критическая ошибка: agent_with_history из matrixai равен None.")
+        
+        # Проверка статуса анализатора завершенности сообщений  
+        if MESSAGE_ANALYZER_AVAILABLE and ANALYZER_INITIALIZED:
+            logger.info("Анализатор завершенности сообщений готов к работе")
+        else:
+            logger.warning("Анализатор завершенности сообщений недоступен. Дебаунсинг будет отключен.")
+            
     except Exception as e:
         logger.critical(f"Критическая ошибка при получении агента из matrixai: {e}", exc_info=True)
         agent = None 
@@ -246,11 +275,15 @@ async def read_root(request: Request):
     logger.info("Запрос корневой страницы (Admin+Chat)")
     return templates.TemplateResponse("index.html", {"request": request})
 
-@app.post("/ask", response_model=MessageResponse, tags=["assistant"])
+@app.post("/ask", response_model=DebouncedMessageResponse, tags=["assistant"])
 async def ask_assistant(
     request: MessageRequest,
     agent_dependency: Runnable = Depends(get_agent)
 ):
+    print("🚨🚨🚨 АНАЛИЗ ЗАВЕРШЕННОСТИ - ФУНКЦИЯ ЗАПУЩЕНА 🚨🚨🚨")
+    logger.error("🚨🚨🚨 АНАЛИЗ ЗАВЕРШЕННОСТИ - ФУНКЦИЯ ЗАПУЩЕНА 🚨🚨🚨")
+    logger.info(f"[ДЕБАГ] Получен запрос /ask от пользователя: '{request.message}'")
+    
     user_id_for_crm_visit_history = request.user_id 
     reset = request.reset_session
     tenant_id = request.tenant_id 
@@ -282,6 +315,15 @@ async def ask_assistant(
             # Очищаем старую историю
             cleared = redis_clear_history(tenant_id=tenant_id, user_id=user_id_for_agent_chat_history)
             
+            # Очищаем накопитель сообщений для этого пользователя
+            try:
+                from matrixai import clear_accumulator
+                if clear_accumulator:
+                    clear_accumulator(f"{tenant_id}:{user_id_for_agent_chat_history}")
+                    logger.info(f"Очищен накопитель сообщений для {user_id_for_agent_chat_history}")
+            except Exception as e:
+                logger.warning(f"Не удалось очистить накопитель сообщений: {e}")
+            
             # Инкрементируем счетчик сессий с помощью встроенной Redis функции
             try:
                 from redis_history import get_next_session_number
@@ -293,15 +335,114 @@ async def ask_assistant(
                 logger.error(f"Ошибка при инкременте счетчика сессий: {e}")
             
             logger.info(f"Запрос на сброс сессии для tenant '{tenant_id}', user_id '{user_id_for_agent_chat_history}'. Сессия удалена: {cleared}")
-            return MessageResponse(response="История чата была очищена. Начинаем новую сессию.", user_id=user_id_for_agent_chat_history)
+            return DebouncedMessageResponse(
+                response="История чата была очищена. Начинаем новую сессию.", 
+                user_id=user_id_for_agent_chat_history,
+                is_waiting=False,
+                is_complete=True
+            )
         else:
              logger.error(f"Функция redis_clear_history не доступна для tenant '{tenant_id}', user_id '{user_id_for_agent_chat_history}'")
-             return MessageResponse(response="Запрос на сброс сессии получен, но функция очистки истории в Redis недоступна. Сообщение не было обработано.", user_id=user_id_for_agent_chat_history)
+             return DebouncedMessageResponse(
+                 response="Запрос на сброс сессии получен, но функция очистки истории в Redis недоступна. Сообщение не было обработано.", 
+                 user_id=user_id_for_agent_chat_history,
+                 is_waiting=False,
+                 is_complete=True
+             )
 
     try:
         start_time = time.time()
         composite_session_id = f"{tenant_id}:{user_id_for_agent_chat_history}"
+        logger.info(f"[ПРЕД-ДЕБАГ] Входим в try блок, создаём composite_session_id...")
         logger.debug(f"Создан composite_session_id для истории чата ассистента: {composite_session_id}")
+
+        # === АНАЛИЗ ЗАВЕРШЕННОСТИ СООБЩЕНИЯ ===
+        logger.info(f"[КРИТИЧЕСКИЙ ТЕСТ] ТОЧКА ВХОДА В АНАЛИЗ ЗАВЕРШЕННОСТИ!")
+        logger.info(f"[КРИТИЧЕСКИЙ ТЕСТ] Тестируем импорт...")
+        logger.info(f"[ДЕБАГ] Проверяем анализатор завершенности:")
+        
+        # Импортируем переменные заново для актуального состояния
+        from matrixai import MESSAGE_ANALYZER_AVAILABLE, ANALYZER_INITIALIZED
+        
+        logger.info(f"[ДЕБАГ] MESSAGE_ANALYZER_AVAILABLE: {MESSAGE_ANALYZER_AVAILABLE}")
+        logger.info(f"[ДЕБАГ] ANALYZER_INITIALIZED: {ANALYZER_INITIALIZED}")
+        logger.info(f"[ДЕБАГ] Сообщение для анализа: '{request.message}'")
+        logger.info(f"[ДЕБАГ] Логическое условие: {MESSAGE_ANALYZER_AVAILABLE and ANALYZER_INITIALIZED}")
+        
+        # Получаем предыдущие сообщения пользователя для контекста
+        previous_user_messages = []
+        time_since_last_message = None
+        
+        if MESSAGE_ANALYZER_AVAILABLE and ANALYZER_INITIALIZED:
+            try:
+                # Получаем историю чата
+                if redis_get_history:
+                    history_data = redis_get_history(tenant_id=tenant_id, user_id=user_id_for_agent_chat_history, limit=10)
+                    # Извлекаем только сообщения пользователя
+                    user_messages = [
+                        msg.get('content', '') for msg in history_data 
+                        if msg.get('type') == 'human' and msg.get('content', '').strip()
+                    ]
+                    previous_user_messages = user_messages[-5:]  # Последние 5 сообщений пользователя
+                    
+                    # Вычисляем время с последнего сообщения (упрощенно)
+                    if history_data:
+                        time_since_last_message = 5.0  # Примерная оценка, можно улучшить
+                
+                # Анализируем завершенность текущего сообщения
+                logger.info(f"[Анализ завершенности] Анализируем сообщение от {user_id_for_agent_chat_history}: '{request.message[:100]}...'")
+                logger.info(f"[ПЕРЕД АНАЛИЗОМ] Вызываем analyze_user_message_completeness")
+                logger.info(f"[ПЕРЕД АНАЛИЗОМ] Параметры: message='{request.message}', user_id='{user_id_for_agent_chat_history}', tenant_id='{tenant_id}'")
+                
+                analysis_result, final_message = await analyze_user_message_completeness(
+                    message=request.message,
+                    user_id=user_id_for_agent_chat_history,
+                    tenant_id=tenant_id,
+                    previous_messages=previous_user_messages,
+                    time_since_last=time_since_last_message
+                )
+                
+                logger.info(f"[ПОСЛЕ АНАЛИЗА] Результат: {analysis_result}")
+                logger.info(f"[ПОСЛЕ АНАЛИЗА] Итоговое сообщение: '{final_message[:100]}...'")
+                
+                if analysis_result:
+                    logger.info(f"[Анализ завершенности] Результат: {analysis_result.status}, "
+                               f"уверенность: {analysis_result.confidence:.2f}, "
+                               f"рекомендуемое ожидание: {analysis_result.suggested_wait_time}s")
+                    
+                    # Проверяем, нужно ли ждать завершения
+                    if should_wait_for_message_completion(analysis_result):
+                        logger.info(f"[Молчание] Сообщение определено как неполное. НЕ ОТВЕЧАЕМ, ждем продолжения.")
+                        
+                        # НЕ ОТВЕЧАЕМ НА НЕПОЛНЫЕ СООБЩЕНИЯ! Просто возвращаем пустой ответ
+                        return DebouncedMessageResponse(
+                            response="",  # Пустой ответ - система молчит
+                            user_id=user_id_for_agent_chat_history,
+                            is_waiting=True,
+                            wait_time=analysis_result.suggested_wait_time,
+                            debounce_reasoning=f"Неполное сообщение. Ожидаем продолжения. {analysis_result.reasoning}",
+                            is_complete=False,
+                            confidence=analysis_result.confidence
+                        )
+                        
+                    logger.info(f"[Анализ завершенности] Сообщение считается завершенным. Передаем ассистенту.")
+                    logger.info(f"[Склеивание] Используем итоговое сообщение: '{final_message[:100]}...'")
+                    
+                    # Используем склеенное сообщение вместо исходного
+                    request.message = final_message
+                    
+                else:
+                    logger.debug(f"[Анализ завершенности] Анализ вернул None. Продолжаем обработку.")
+                
+            except Exception as e:
+                logger.error(f"Ошибка при анализе завершенности сообщения: {e}", exc_info=True)
+                # При ошибке анализа продолжаем обработку как обычно
+        else:
+            logger.warning(f"[ДЕБАГ] Анализатор завершенности недоступен!")
+            logger.warning(f"[ДЕБАГ] MESSAGE_ANALYZER_AVAILABLE = {MESSAGE_ANALYZER_AVAILABLE}")
+            logger.warning(f"[ДЕБАГ] ANALYZER_INITIALIZED = {ANALYZER_INITIALIZED}")
+            logger.warning(f"[ДЕБАГ] Условие: {MESSAGE_ANALYZER_AVAILABLE} AND {ANALYZER_INITIALIZED} = {MESSAGE_ANALYZER_AVAILABLE and ANALYZER_INITIALIZED}")
+            logger.warning("[ДЕБАГ] Используем стандартную обработку без анализа завершенности.")
 
         client_context_str = await get_client_context_for_agent(
             phone_number=request.phone_number, 
@@ -337,7 +478,14 @@ async def ask_assistant(
             response_text = str(response_data)
 
         logger.info(f"Ответ для {user_id_for_agent_chat_history}: {response_text[:50]}...")
-        return MessageResponse(response=response_text, user_id=user_id_for_agent_chat_history)
+        
+        # Обычный ответ (завершенное сообщение)
+        return DebouncedMessageResponse(
+            response=response_text,
+            user_id=user_id_for_agent_chat_history,
+            is_waiting=False,
+            is_complete=True
+        )
 
     except Exception as e:
         logger.error(f"Критическая ошибка при обработке запроса для {user_id_for_agent_chat_history}: {e}", exc_info=True)
