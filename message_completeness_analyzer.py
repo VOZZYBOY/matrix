@@ -3,12 +3,10 @@
 Использует LLM для определения, является ли сообщение законченным или неполным.
 """
 
-import asyncio
 import logging
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
-import json
 import time
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -19,8 +17,8 @@ logger = logging.getLogger(__name__)
 
 class CompletenessStatus(str, Enum):
     """Статус завершенности сообщения"""
-    COMPLETE = "complete"           # Сообщение завершено - можно отвечать
-    INCOMPLETE = "incomplete"       # Сообщение неполное - нужно ждать продолжения
+    COMPLETE = "complete"      
+    INCOMPLETE = "incomplete"      
 
 class MessageAnalysis(BaseModel):
     """Результат анализа завершенности сообщения"""
@@ -114,7 +112,7 @@ class MessageCompletenessAnalyzer:
 - COMPLETE: 0 секунд (отвечаем сразу)
 - INCOMPLETE: 5 секунд (ждем продолжения)
 
-ВАЖНО: При малейших сомнениях выбирай COMPLETE. Лучше ответить на возможно неполный вопрос, чем заставлять пользователя ждать."""
+"""
 
     def _create_cache_key(self, context: MessageContext) -> str:
         """Создает ключ для кэширования анализа"""
@@ -150,13 +148,12 @@ class MessageCompletenessAnalyzer:
             return cached_analysis
         
         try:
-            # Подготавливаем данные для анализа
             analysis_request = self._prepare_analysis_request(context)
             
-            # Создаем цепочку обработки (без парсера - structured output делает это автоматически)
+
             chain = self.prompt_template | self.llm
             
-            # Выполняем анализ
+            
             start_time = time.time()
             analysis_result = await chain.ainvoke({"analysis_request": analysis_request})
             analysis_time = time.time() - start_time
@@ -164,14 +161,14 @@ class MessageCompletenessAnalyzer:
             logger.info(f"Анализ завершенности для {context.user_id}: {analysis_result.status} "
                        f"(уверенность: {analysis_result.confidence:.2f}, время: {analysis_time:.2f}s)")
             
-            # Сохраняем в кэш
+            
             self._analysis_cache[cache_key] = (analysis_result, time.time())
             
             return analysis_result
             
         except Exception as e:
             logger.error(f"Ошибка при анализе завершенности сообщения: {e}")
-            # Возвращаем безопасный fallback - лучше ответить, чем заставлять ждать
+        
             return MessageAnalysis(
                 status=CompletenessStatus.COMPLETE,
                 confidence=0.5,
@@ -196,26 +193,23 @@ class MessageCompletenessAnalyzer:
         """
         message = message.strip()
         
-        # Только критические случаи, где анализ LLM не нужен
-        # Пустые сообщения или только пробелы
+      
         if not message or len(message.strip()) == 0:
             return CompletenessStatus.INCOMPLETE
             
-        # Только знаки препинания без текста
         if not any(c.isalnum() for c in message):
             return CompletenessStatus.INCOMPLETE
             
-        # Очень короткие сообщения (1-2 символа)
+        
         if len(message) < 2:
             return CompletenessStatus.INCOMPLETE
             
-        # ВСЕ ОСТАЛЬНОЕ отдаем на анализ LLM
-        return None  # Полный анализ LLM для всех сообщений
+        
+        return None 
 
-# Глобальный экземпляр анализатора (будет инициализирован в app.py)
 _analyzer_instance: Optional[MessageCompletenessAnalyzer] = None
 
-# Кэш для накопления неполных сообщений (user_id -> {accumulated_message, last_update, parts})
+
 _message_accumulator: Dict[str, Dict[str, any]] = {}
 ACCUMULATOR_TTL = 300  
 
@@ -258,7 +252,7 @@ def add_message_to_accumulator(user_id: str, message: str) -> str:
     current_time = time.time()
     
     if user_id not in _message_accumulator:
-        # Создаем новый накопитель для пользователя
+    
         _message_accumulator[user_id] = {
             'accumulated_message': message,
             'last_update': current_time,
@@ -267,10 +261,8 @@ def add_message_to_accumulator(user_id: str, message: str) -> str:
         }
         logger.info(f"Создан новый накопитель для {user_id}: '{message[:50]}...'")
     else:
-        # Добавляем к существующему накопителю
         accumulator = _message_accumulator[user_id]
         
-        # Склеиваем сообщения с умным разделителем
         separator = _get_smart_separator(accumulator['accumulated_message'], message)
         
         accumulator['accumulated_message'] += separator + message
