@@ -10,6 +10,7 @@ from enum import Enum
 import time
 
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.messages import BaseMessage, messages_from_dict
 from pydantic import BaseModel, Field
 from langchain_openai import ChatOpenAI
 
@@ -78,6 +79,7 @@ class MessageCompletenessAnalyzer:
 2. Семантическая полнота важнее грамматики  
 3. При сомнениях выбирай COMPLETE (лучше ответить, чем заставить ждать)
 4. Медицинские вопросы обычно простые и прямые
+5. УЧИТЫВАЙ КОНТЕКСТ предыдущих сообщений пользователя для понимания завершенности
 
 ТОЛЬКО ДВА СТАТУСА:
 - COMPLETE: мысль выражена полностью, можно отвечать
@@ -101,6 +103,19 @@ class MessageCompletenessAnalyzer:
 ❌ "у меня болит" - может продолжаться ("что именно")
 ❌ "нужно узнать про" - незавершенная мысль
 ❌ "я хочу сказать что" - явно будет продолжение
+
+ПРИМЕРЫ С КОНТЕКСТОМ ДИАЛОГА:
+🤖 Ассистент: Какие у вас симптомы?
+👤 Пользователь: болит живот
+Текущее сообщение: "еще и тошнота" → COMPLETE (дополнение к симптомам)
+
+🤖 Ассистент: К какому врачу хотите записаться?
+👤 Пользователь: хочу к врачу
+Текущее сообщение: "к терапевту" → COMPLETE (ответ на вопрос)
+
+👤 Пользователь: нужна справка
+🤖 Ассистент: Для чего нужна справка?
+Текущее сообщение: "для работы" → COMPLETE (ответ на уточнение)
 
 КРИТЕРИИ ДЛЯ COMPLETE:
 - Есть законченная мысль (понятно, что хочет пользователь)
@@ -179,12 +194,26 @@ class MessageCompletenessAnalyzer:
     
     def _prepare_analysis_request(self, context: MessageContext) -> str:
         """Подготавливает запрос для анализа"""
-        return f"""Проанализируй: "{context.current_message}"
+        request = f"""Проанализируй сообщение: "{context.current_message}"
 
 Длина: {len(context.current_message)} символов
-Слов: {len(context.current_message.split())}
+Слов: {len(context.current_message.split())}"""
 
-Верни структурированный анализ завершенности."""
+        # Добавляем историю чата для контекста
+        if context.previous_messages:
+            history_text = "\n".join([
+                msg for msg in context.previous_messages[-5:]  # Последние 5 сообщений
+            ])
+            request += f"""
+
+КОНТЕКСТ ДИАЛОГА (последние сообщения):
+{history_text}
+
+Учитывай полный контекст беседы при анализе завершенности текущего сообщения пользователя."""
+        
+        request += "\n\nВерни структурированный анализ завершенности."
+        
+        return request
 
     def quick_heuristic_check(self, message: str) -> Optional[CompletenessStatus]:
         """
@@ -370,6 +399,59 @@ async def analyze_message(
     
     return await analyzer.analyze_message_completeness(context)
 
+def get_history_via_langchain(tenant_id: str, user_id: str, limit: int = 15) -> List[str]:
+    """
+    Получает историю чата используя тот же подход, что и основной агент.
+    Использует LangChain TenantAwareRedisChatMessageHistory для правильной обработки структуры data.content
+    
+    Args:
+        tenant_id: ID тенанта
+        user_id: ID пользователя  
+        limit: Количество сообщений
+        
+    Returns:
+        List[str]: Список отформатированных сообщений для контекста
+    """
+    try:
+        # Импортируем готовый класс из redis_history
+        from redis_history import TenantAwareRedisChatMessageHistory
+        
+        # Создаем экземпляр истории (тот же подход что у основного агента)
+        chat_history = TenantAwareRedisChatMessageHistory(tenant_id=tenant_id, session_id=user_id)
+        
+        # Получаем сообщения через LangChain (автоматически обрабатывает data.content)
+        messages = chat_history.messages
+        logger.info(f"[LangChain История] Получено {len(messages)} BaseMessage объектов")
+        
+        if not messages:
+            return []
+        
+        # Берем последние сообщения согласно лимиту
+        recent_messages = messages[-limit:] if len(messages) > limit else messages
+        
+        # Форматируем сообщения для контекста
+        formatted_messages = []
+        for msg in recent_messages:
+            # BaseMessage имеет атрибуты type и content
+            msg_type = getattr(msg, 'type', 'unknown')
+            msg_content = getattr(msg, 'content', '').strip()
+            
+            if msg_content and len(msg_content) > 2:
+                # Форматируем с указанием автора
+                author = "👤 Пользователь" if msg_type == 'human' else "🤖 Ассистент"
+                formatted_message = f"{author}: {msg_content}"
+                formatted_messages.append(formatted_message)
+                logger.debug(f"[LangChain История] ✅ Добавлено сообщение: '{formatted_message[:50]}...'")
+            else:
+                logger.debug(f"[LangChain История] ❌ Пропущено: type='{msg_type}', len={len(msg_content)}")
+        
+        logger.info(f"[LangChain История] Возвращаем {len(formatted_messages)} отформатированных сообщений")
+        return formatted_messages
+        
+    except Exception as e:
+        logger.error(f"Ошибка при получении истории через LangChain для {tenant_id}:{user_id}: {e}", exc_info=True)
+        return []
+
 async def analyze_message_with_accumulation(
     message: str, 
     user_id: str, 
@@ -422,3 +504,4 @@ def should_wait_for_completion(analysis: MessageAnalysis) -> bool:
         return analysis.confidence > 0.7
         
     return False
+        

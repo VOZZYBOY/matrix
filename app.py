@@ -280,9 +280,6 @@ async def ask_assistant(
     request: MessageRequest,
     agent_dependency: Runnable = Depends(get_agent)
 ):
-    print("🚨🚨🚨 АНАЛИЗ ЗАВЕРШЕННОСТИ - ФУНКЦИЯ ЗАПУЩЕНА 🚨🚨🚨")
-    logger.error("🚨🚨🚨 АНАЛИЗ ЗАВЕРШЕННОСТИ - ФУНКЦИЯ ЗАПУЩЕНА 🚨🚨🚨")
-    logger.info(f"[ДЕБАГ] Получен запрос /ask от пользователя: '{request.message}'")
     
     user_id_for_crm_visit_history = request.user_id 
     reset = request.reset_session
@@ -353,63 +350,54 @@ async def ask_assistant(
     try:
         start_time = time.time()
         composite_session_id = f"{tenant_id}:{user_id_for_agent_chat_history}"
-        logger.info(f"[ПРЕД-ДЕБАГ] Входим в try блок, создаём composite_session_id...")
         logger.debug(f"Создан composite_session_id для истории чата ассистента: {composite_session_id}")
 
         # === АНАЛИЗ ЗАВЕРШЕННОСТИ СООБЩЕНИЯ ===
-        logger.info(f"[КРИТИЧЕСКИЙ ТЕСТ] ТОЧКА ВХОДА В АНАЛИЗ ЗАВЕРШЕННОСТИ!")
-        logger.info(f"[КРИТИЧЕСКИЙ ТЕСТ] Тестируем импорт...")
-        logger.info(f"[ДЕБАГ] Проверяем анализатор завершенности:")
-        
         # Импортируем переменные заново для актуального состояния
         from matrixai import MESSAGE_ANALYZER_AVAILABLE, ANALYZER_INITIALIZED
         
-        logger.info(f"[ДЕБАГ] MESSAGE_ANALYZER_AVAILABLE: {MESSAGE_ANALYZER_AVAILABLE}")
-        logger.info(f"[ДЕБАГ] ANALYZER_INITIALIZED: {ANALYZER_INITIALIZED}")
-        logger.info(f"[ДЕБАГ] Сообщение для анализа: '{request.message}'")
-        logger.info(f"[ДЕБАГ] Логическое условие: {MESSAGE_ANALYZER_AVAILABLE and ANALYZER_INITIALIZED}")
-        
-        # Получаем предыдущие сообщения пользователя для контекста
-        previous_user_messages = []
+        # Получаем предыдущие сообщения диалога для контекста (и пользователя, и ассистента)
+        previous_dialog_messages = []
         time_since_last_message = None
         
         if MESSAGE_ANALYZER_AVAILABLE and ANALYZER_INITIALIZED:
             try:
-                # Получаем историю чата
-                if redis_get_history:
-                    history_data = redis_get_history(tenant_id=tenant_id, user_id=user_id_for_agent_chat_history, limit=10)
-                    # Извлекаем только сообщения пользователя
-                    user_messages = [
-                        msg.get('content', '') for msg in history_data 
-                        if msg.get('type') == 'human' and msg.get('content', '').strip()
-                    ]
-                    previous_user_messages = user_messages[-5:]  # Последние 5 сообщений пользователя
-                    
-                    # Вычисляем время с последнего сообщения (упрощенно)
-                    if history_data:
-                        time_since_last_message = 5.0  # Примерная оценка, можно улучшить
+                # Получаем историю чата для контекстуального анализа через LangChain
+                logger.debug(f"Используем LangChain подход для получения истории")
                 
-                # Анализируем завершенность текущего сообщения
-                logger.info(f"[Анализ завершенности] Анализируем сообщение от {user_id_for_agent_chat_history}: '{request.message[:100]}...'")
-                logger.info(f"[ПЕРЕД АНАЛИЗОМ] Вызываем analyze_user_message_completeness")
-                logger.info(f"[ПЕРЕД АНАЛИЗОМ] Параметры: message='{request.message}', user_id='{user_id_for_agent_chat_history}', tenant_id='{tenant_id}'")
+                # Импортируем функцию из анализатора завершенности
+                from message_completeness_analyzer import get_history_via_langchain
+                
+                # Получаем отформатированные сообщения через LangChain (правильно обрабатывает data.content)
+                previous_dialog_messages = get_history_via_langchain(tenant_id=tenant_id, user_id=user_id_for_agent_chat_history, limit=15)
+                
+                # Берем последние 7 сообщений для полного контекста диалога
+                previous_dialog_messages = previous_dialog_messages[-7:] if len(previous_dialog_messages) > 7 else previous_dialog_messages
+                
+                # Более точное вычисление времени с последнего сообщения
+                time_since_last_message = None
+                if previous_dialog_messages:
+                    # Простая оценка на основе количества недавних сообщений
+                    recent_user_messages = len([msg for msg in previous_dialog_messages[-3:] if "👤 Пользователь" in msg])
+                    if recent_user_messages > 0:
+                        time_since_last_message = 3.0 + (recent_user_messages * 2.0)  # Примерная оценка
+                    else:
+                        time_since_last_message = 10.0  # Давно не было сообщений
+                
+                logger.debug(f"Получено {len(previous_dialog_messages)} предыдущих сообщений диалога для анализа")
+                
+                # Анализируем завершенность текущего сообщения с контекстом
+                logger.debug(f"Анализируем сообщение от {user_id_for_agent_chat_history}: '{request.message[:50]}...'")
                 
                 analysis_result, final_message = await analyze_user_message_completeness(
                     message=request.message,
                     user_id=user_id_for_agent_chat_history,
                     tenant_id=tenant_id,
-                    previous_messages=previous_user_messages,
+                    previous_messages=previous_dialog_messages,
                     time_since_last=time_since_last_message
                 )
                 
-                logger.info(f"[ПОСЛЕ АНАЛИЗА] Результат: {analysis_result}")
-                logger.info(f"[ПОСЛЕ АНАЛИЗА] Итоговое сообщение: '{final_message[:100]}...'")
-                
                 if analysis_result:
-                    logger.info(f"[Анализ завершенности] Результат: {analysis_result.status}, "
-                               f"уверенность: {analysis_result.confidence:.2f}, "
-                               f"рекомендуемое ожидание: {analysis_result.suggested_wait_time}s")
-                    
                     # Проверяем, нужно ли ждать завершения
                     if should_wait_for_message_completion(analysis_result):
                         logger.info(f"[Молчание] Сообщение определено как неполное. НЕ ОТВЕЧАЕМ, ждем продолжения.")
@@ -426,7 +414,7 @@ async def ask_assistant(
                         )
                         
                     logger.info(f"[Анализ завершенности] Сообщение считается завершенным. Передаем ассистенту.")
-                    logger.info(f"[Склеивание] Используем итоговое сообщение: '{final_message[:100]}...'")
+                    logger.debug(f"[Склеивание] Используем итоговое сообщение: '{final_message[:100]}...'")
                     
                     # Используем склеенное сообщение вместо исходного
                     request.message = final_message
@@ -441,7 +429,6 @@ async def ask_assistant(
             logger.warning(f"[ДЕБАГ] Анализатор завершенности недоступен!")
             logger.warning(f"[ДЕБАГ] MESSAGE_ANALYZER_AVAILABLE = {MESSAGE_ANALYZER_AVAILABLE}")
             logger.warning(f"[ДЕБАГ] ANALYZER_INITIALIZED = {ANALYZER_INITIALIZED}")
-            logger.warning(f"[ДЕБАГ] Условие: {MESSAGE_ANALYZER_AVAILABLE} AND {ANALYZER_INITIALIZED} = {MESSAGE_ANALYZER_AVAILABLE and ANALYZER_INITIALIZED}")
             logger.warning("[ДЕБАГ] Используем стандартную обработку без анализа завершенности.")
 
         client_context_str = await get_client_context_for_agent(
@@ -649,7 +636,8 @@ async def get_user_chat_history(tenant_id: str, user_id: str, limit: Optional[in
         raise HTTPException(status_code=503, detail="Функциональность истории чата недоступна.")
 
     try:
-        history_data = redis_get_history(tenant_id=tenant_id, user_id=user_id, limit=limit if limit is not None else 50) # Убедимся что limit не None
+        history_data = redis_get_history(tenant_id=tenant_id, user_id=user_id, limit=limit if limit is not None else 50)
+        logger.debug(f"История получена: {len(history_data)} сообщений для {tenant_id}/{user_id}")
         return history_data 
     except ValueError as ve: 
         logger.error(f"Ошибка формирования ключа для истории: {ve}")

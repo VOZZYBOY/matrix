@@ -96,27 +96,41 @@ def get_history(tenant_id: str, user_id: str, limit: int = 50) -> List[Dict[str,
     :param limit: Максимальное количество сообщений для возврата.
     :return: Список словарей сообщений или пустой список при ошибке/отсутствии истории.
     """
+    logger.debug(f"Запрос истории для {tenant_id}/{user_id}, лимит: {limit}")
+    
     if not redis_client:
         logger.error("Клиент Redis не инициализирован. Невозможно получить историю.")
         return []
 
     try:
         key = _get_redis_key(tenant_id, user_id)
+        logger.debug(f"Используем Redis ключ: {key}")
+        
+
+        if not redis_client.exists(key):
+            logger.debug(f"Ключ {key} не существует в Redis")
+            return []
+        
+
+        total_messages = redis_client.llen(key)
+        logger.debug(f"Всего сообщений в {key}: {total_messages}")
         
         history_bytes = redis_client.lrange(key, -limit, -1)
+        logger.debug(f"Получено {len(history_bytes)} сообщений из Redis")
 
         history_dicts = []
-        for msg_bytes in history_bytes:
+        for i, msg_bytes in enumerate(history_bytes):
             try:
-                
                 msg_str = msg_bytes.decode('utf-8')
-                history_dicts.append(json.loads(msg_str))
+                msg_dict = json.loads(msg_str)
+                history_dicts.append(msg_dict)
+                logger.debug(f"Сообщение {i+1}: {str(msg_dict)[:100]}...")
             except json.JSONDecodeError as e:
                  logger.warning(f"Ошибка декодирования JSON из истории для {key}: {e}. Пропускаем сообщение: {msg_bytes[:100]}...")
             except UnicodeDecodeError as e:
                  logger.warning(f"Ошибка декодирования UTF-8 из истории для {key}: {e}. Пропускаем сообщение: {msg_bytes[:100]}...")
 
-        logger.debug(f"Получено {len(history_dicts)} сообщений для {key}")
+        logger.debug(f"Успешно обработано {len(history_dicts)} сообщений для {key}")
         return history_dicts
     except ValueError as ve:
          logger.error(f"Ошибка формирования ключа: {ve}")
@@ -202,7 +216,7 @@ def get_next_session_number(tenant_id: str, base_user_id: str) -> int:
         session_number = redis_client.incr(session_counter_key)
         # Устанавливаем TTL для счетчика (например, 7 дней)
         redis_client.expire(session_counter_key, 7 * 24 * 3600)
-        logger.info(f"Новый номер сессии для {tenant_id}/{base_user_id}: {session_number}")
+        logger.debug(f"Новый номер сессии для {tenant_id}/{base_user_id}: {session_number}")
         return session_number
     except redis.exceptions.RedisError as e:
         logger.error(f"Ошибка Redis при получении номера сессии для {tenant_id}/{base_user_id}: {e}", exc_info=True)
