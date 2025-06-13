@@ -1,6 +1,6 @@
 import httpx
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from pydantic import BaseModel
 import datetime
 from clinic_index import get_id_by_name
@@ -141,6 +141,7 @@ class ElasticByPhoneResponse(BaseModel):
 
 class ServiceInRecord(BaseModel):
     serviceName: Optional[str] = None
+    serviceId: Optional[str] = None
 
 class VisitRecordData(BaseModel):
     id: str
@@ -152,6 +153,8 @@ class VisitRecordData(BaseModel):
     employeeFatherName: Optional[str] = None
     servicesList: Optional[List[ServiceInRecord]] = []
     payStatus: Optional[bool] = None
+    statusId: Optional[str] = None
+    statusName: Optional[str] = None
 
 class ClientRecordsResponse(BaseModel):
     code: int
@@ -221,7 +224,8 @@ async def fetch_client_details_by_phone(phone_number: str, api_token: str) -> Op
         logger.error(f"Непредвиденная ошибка при обработке ответа от elasticByPhone для {phone_number}: {e}", exc_info=True)
     return None
 
-async def fetch_client_visit_history(client_id: str, api_token: str, internal_fetch_limit: int = 10) -> Optional[List[VisitRecordData]]:
+# --- Функция получения истории визитов ---
+async def fetch_client_visit_history(client_id: str, api_token: str, internal_fetch_limit: int = 10) -> Optional[Tuple[List[VisitRecordData], List[Dict[str, str]]]]:
     """
     Получает историю записей клиента по его ID.
     internal_fetch_limit: Количество записей, запрашиваемых у API и используемых для анализа.
@@ -249,7 +253,13 @@ async def fetch_client_visit_history(client_id: str, api_token: str, internal_fe
                         reverse=True
                     )
                     logger.info(f"Получено {len(sorted_records)} записей для clientId {client_id}. Будет возвращено до {internal_fetch_limit} для анализа.")
-                    return sorted_records[:internal_fetch_limit] # Возвращаем N записей для анализа
+
+                    # Используем глобальную функцию extract_waiting_services, чтобы не дублировать логику.
+                    limited_records = sorted_records[:internal_fetch_limit]
+                    waiting_services = extract_waiting_services(limited_records)
+
+                    # Возвращаем кортеж: (история, ожидающие услуги)
+                    return limited_records, waiting_services
                 else:
                     logger.warning(f"API getClientRecords вернуло code={parsed_response.code} или отсутствуют данные для clientId {client_id}. Сообщение API: {parsed_response.message}")
                     return None
@@ -334,12 +344,14 @@ def format_visit_history_for_prompt(visit_history: List[VisitRecordData], displa
             
             filial_name_str = record.filialName.strip() if record.filialName else "Филиал не указан"
 
-            status_info = ""
-            if record.payStatus is False:
-                status_info = " (статус: не оплачено/отменено)" 
+            waiting_statuses = {"imwaiting", "inwaiting"}
+            status_info = ""  # сброс по умолчанию
+            if record.statusId and record.statusId.lower() in waiting_statuses:
+                status_info = " (статус: ожидание клиента)"
+            elif record.payStatus is False:
+                status_info = " (статус: не оплачено/отменено)"
             elif record.payStatus is True:
                 status_info = " (статус: оплачено)"
-            # Если payStatus is None, ничего не добавляем про статус
 
             prompt_lines.append(f"- {formatted_dt}: {services_str} у {employee_full_name} в филиале '{filial_name_str}'.{status_info}")
         except Exception as e:
@@ -472,11 +484,25 @@ async def get_client_context_for_agent(
 
     if client_id_resolved_for_history:
         logger.info(f"Запрос истории посещений для ID клиента: {client_id_resolved_for_history} (лимит для анализа: {visit_history_analysis_limit})")
-        fetched_history = await fetch_client_visit_history(client_id_resolved_for_history, client_api_token, internal_fetch_limit=visit_history_analysis_limit)
-        if fetched_history:
+        fetched = await fetch_client_visit_history(client_id_resolved_for_history, client_api_token, internal_fetch_limit=visit_history_analysis_limit)
+        if fetched:
+            # fetched теперь кортеж (history, waiting_services)
+            if isinstance(fetched, tuple):
+                fetched_history, waiting_services = fetched
+            else:
+                fetched_history = fetched
+                waiting_services = []
+
             full_visit_history_for_analysis = fetched_history
             formatted_history_display = format_visit_history_for_prompt(full_visit_history_for_analysis, display_limit=visit_history_display_limit)
             context_parts.append(formatted_history_display)
+
+            # Добавляем информацию о предстоящих визитах со статусом 'Imwaiting'
+            if waiting_services:
+                upcoming_lines = [f"Запланированы (ожидают подтверждения) услуги:"]
+                for item in waiting_services:
+                    upcoming_lines.append(f"- {item['serviceName']} (ID услуги: {item['serviceId']}, ID записи: {item['recordId']})")
+                context_parts.append("\n".join(upcoming_lines))
         else:
             context_parts.append(f"История предыдущих записей для ID клиента '{client_id_resolved_for_history}' не найдена или пуста.")
             logger.info(f"История записей для ID клиента: {client_id_resolved_for_history} не найдена или пуста.")
@@ -683,6 +709,61 @@ async def add_record(
         logger.error(f"Неизвестная ошибка при вызове API записи: {e}", exc_info=True)
         return {"code": 500, "message": f"Внутренняя ошибка: {e}"}
 
+# ---------------------------------------------------------------------------
+# ФУНКЦИЯ ОБНОВЛЕНИЯ ВРЕМЕНИ СУЩЕСТВУЮЩЕЙ ЗАПИСИ (ПЕРЕНОС)
+# ---------------------------------------------------------------------------
+
+async def update_record_time(
+    record_id: str,
+    date_of_record: str,
+    start_time: str,
+    end_time: str,
+    api_url: str = "https://back.matrixcrm.ru/api/v1/AI/updateRecordTime",
+    api_token: Optional[str] = None
+) -> dict:
+    """Обновляет дату/время существующей записи (перенос).
+
+    Args:
+        record_id: ID записи, которую требуется перенести.
+        date_of_record: Новая дата (YYYY-MM-DD).
+        start_time: Новое время начала (HH:MM).
+        end_time: Новое время окончания (HH:MM).
+        api_url: Полный URL эндпоинта updateRecordTime.
+        api_token: Bearer-токен для авторизации (опционально).
+
+    Returns:
+        Словарь ответа API.
+    """
+    payload = {
+        "recordId": record_id,
+        "dateOfRecord": date_of_record,
+        "startTime": start_time,
+        "endTime": end_time,
+    }
+
+    headers = {"Content-Type": "application/json"}
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
+
+    try:
+        async with httpx.AsyncClient(verify=False) as client:
+            logger.info(f"[updateRecordTime] POST {api_url} payload={payload}")
+            response = await client.post(api_url, json=payload, headers=headers, timeout=20.0)
+            response.raise_for_status()
+            response_data = response.json()
+            logger.info(f"[updateRecordTime] Response code={response_data.get('code')} data={str(response_data.get('data', ''))[:200]}")
+            return response_data
+    except httpx.HTTPStatusError as e:
+        error_content = e.response.text
+        logger.error(f"HTTP {e.response.status_code} from updateRecordTime: {error_content}", exc_info=True)
+        return {"code": e.response.status_code, "message": f"Ошибка API: {error_content}"}
+    except httpx.RequestError as e:
+        logger.error(f"Network error updateRecordTime: {e}", exc_info=True)
+        return {"code": 500, "message": f"Ошибка сети или соединения: {e}"}
+    except Exception as e:
+        logger.error(f"Unknown error updateRecordTime: {e}", exc_info=True)
+        return {"code": 500, "message": f"Внутренняя ошибка: {e}"}
+
 async def get_filial_id_by_name_api(
     filial_name: str,
     api_token: str,
@@ -851,4 +932,26 @@ async def get_filial_services_by_categories(
     except Exception as e:
         logger.error(f"[Tenant: {tenant_id}] Неизвестная ошибка при получении услуг по категориям: {e}", exc_info=True)
         return None
+
+
+# --- Вспомогательная публичная функция: можно использовать отдельно ---
+def extract_waiting_services(visit_history: List[VisitRecordData]) -> List[Dict[str, str]]:
+    """Возвращает список услуг (serviceId, serviceName, recordId) у записей, находящихся в статусе ожидания клиента."""
+    waiting_statuses = {"imwaiting", "inwaiting"}
+    waiting: List[Dict[str, str]] = []
+
+    for rec in visit_history:
+        if rec.statusId and rec.statusId.lower() in waiting_statuses:
+            if rec.servicesList:
+                for srv in rec.servicesList:
+                    srv_id = getattr(srv, "serviceId", None)
+                    srv_name = getattr(srv, "serviceName", None)
+                    if srv_id and srv_name:
+                        waiting.append({
+                            "recordId": rec.id,
+                            "serviceId": srv_id,
+                            "serviceName": srv_name
+                        })
+
+    return waiting
 
