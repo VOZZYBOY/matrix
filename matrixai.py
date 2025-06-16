@@ -536,6 +536,30 @@ class BookAppointmentAIPayloadArgs(BaseModel):
 from clinic_functions import BookAppointmentAIPayload
 
 # --- ДОБАВЛЕНО: Схема для инструментов без аргументов ---
+
+class RescheduleAppointmentArgs(BaseModel):
+    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
+    record_id: str = Field(description="ID переносимой записи")
+    date_of_record: str = Field(description="Новая дата (YYYY-MM-DD)")
+    start_time: str = Field(description="Новое время начала (HH:MM)")
+    end_time: str = Field(description="Новое время окончания (HH:MM)")
+    api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
+
+class UpdateRecordTimeArgs(BaseModel):
+    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники) - будет установлен автоматически")
+    record_id: str = Field(description="ID переносимой записи")
+    date_of_record: str = Field(description="Новая дата (YYYY-MM-DD)")
+    start_time: str = Field(description="Новое время начала (HH:MM)")
+    end_time: str = Field(description="Новое время окончания (HH:MM)")
+    api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
+
+class CancelAppointmentArgs(BaseModel):
+    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (клиники)")
+    record_id: str = Field(description="ID отменяемой записи")
+    chain_id: str = Field(description="Chain ID, которому принадлежит запись")
+    canceling_reason: Optional[str] = Field(default=None, description="ID причины отмены (если None, ассистент выберет автоматически)")
+    api_token: Optional[str] = Field(default=None, description="Bearer-токен для авторизации (client_api_token)")
+
 class NoArgsSchema(BaseModel):
     pass
 # --- КОНЕЦ ДОБАВЛЕНИЯ ---
@@ -965,6 +989,76 @@ async def book_appointment_ai_payload_tool(**kwargs_from_llm) -> str:
         error_type = getattr(e, '__class__', Exception).__name__
         return f"Ошибка при обработке запроса на запись (AI Payload) ({error_type}): {str(e)}"
 
+async def reschedule_appointment_tool(**kwargs_from_llm) -> str:
+    logger.info(f"ENTERING reschedule_appointment_tool. Raw kwargs_from_llm: {kwargs_from_llm}")
+    try:
+        validated_args = RescheduleAppointmentArgs(**kwargs_from_llm)
+    except Exception as e:
+        logger.error(f"Ошибка валидации аргументов для reschedule_appointment_tool: {e}. Аргументы: {kwargs_from_llm}", exc_info=True)
+        return f"Ошибка: неверные или отсутствующие аргументы для переноса записи: {e}"
+
+    tenant_id = validated_args.tenant_id or kwargs_from_llm.get('tenant_id')
+    api_token = validated_args.api_token or kwargs_from_llm.get('api_token')
+
+    if not tenant_id:
+        logger.warning("tenant_id не передан LLM. Продолжим без него (не обязателен для API).")
+    else:
+        validated_args.tenant_id = tenant_id
+
+    if not api_token:
+        logger.error("CRITICAL (reschedule_appointment_tool): api_token отсутствует.")
+        return "Критическая ошибка: API токен не был предоставлен для переноса записи."
+
+    validated_args.api_token = api_token  # гарантируем передачу токена в доменный слой
+
+    handler_args = validated_args.model_dump()
+    try:
+        handler = clinic_functions.RescheduleAppointment(**handler_args)
+        return await handler.process()
+    except Exception as e:
+        logger.error(f"Ошибка при создании или обработке RescheduleAppointment: {e}", exc_info=True)
+        error_type = getattr(e, '__class__', Exception).__name__
+        return f"Ошибка при обработке запроса на перенос записи ({error_type}): {str(e)}"
+
+
+async def update_record_time_tool(**kwargs_from_llm) -> str:
+    """Перенос записи (обёртка LangChain, аналогична reschedule_appointment_tool, но relies on ReAct injection tenant_id/api_token)."""
+    logger.info(f"ENTERING update_record_time_tool. Raw kwargs_from_llm: {kwargs_from_llm}")
+    try:
+        validated_args = UpdateRecordTimeArgs(**kwargs_from_llm)
+    except Exception as e:
+        logger.error(f"Ошибка валидации аргументов для update_record_time_tool: {e}. Аргументы: {kwargs_from_llm}", exc_info=True)
+        return f"Ошибка: неверные или отсутствующие аргументы для переноса записи: {e}"
+
+    handler_args = validated_args.model_dump()
+    try:
+        handler = clinic_functions.RescheduleAppointment(**handler_args)
+        return await handler.process()
+    except Exception as e:
+        logger.error(f"Ошибка при создании или обработке RescheduleAppointment (update_record_time_tool): {e}", exc_info=True)
+        error_type = getattr(e, '__class__', Exception).__name__
+        return f"Ошибка при переносе записи ({error_type}): {e}"
+
+
+async def cancel_appointment_tool(**kwargs_from_llm) -> str:
+    """Отмена записи клиента. Если canceling_reason отсутствует, ассистент должен заранее определить её."""
+    logger.info(f"ENTERING cancel_appointment_tool. Raw kwargs_from_llm: {kwargs_from_llm}")
+    try:
+        validated_args = CancelAppointmentArgs(**kwargs_from_llm)
+    except Exception as e:
+        logger.error(f"Ошибка валидации аргументов для cancel_appointment_tool: {e}. Arg: {kwargs_from_llm}", exc_info=True)
+        return f"Ошибка: неверные или отсутствующие аргументы для отмены записи: {e}"
+
+    # Если canceling_reason не указан, оставить None; доменный слой может выбрать самостоятельно (или LLM заранее подставит).
+    handler_args = validated_args.model_dump()
+    try:
+        handler = clinic_functions.CancelAppointment(**handler_args)
+        return await handler.process()
+    except Exception as e:
+        logger.error(f"Ошибка при создании/обработке CancelAppointment: {e}", exc_info=True)
+        error_type = getattr(e, '__class__', Exception).__name__
+        return f"Ошибка при отмене записи ({error_type}): {e}"
+
 TOOL_FUNCTIONS = [
     find_employees_tool,
     get_service_price_tool,
@@ -981,11 +1075,14 @@ TOOL_FUNCTIONS = [
     list_employee_filials_tool,
     get_free_slots_tool, 
     book_appointment_tool,  
-    book_appointment_ai_payload_tool, # <--- ДОБАВЛЕН НОВЫЙ ИНСТРУМЕНТ
+    book_appointment_ai_payload_tool,  
+    reschedule_appointment_tool,
+    update_record_time_tool,  
+    cancel_appointment_tool,
 ]
 logger.info(f"Определено {len(TOOL_FUNCTIONS)} функций-инструментов для динамической привязки.")
 SYSTEM_PROMPT = """
-Ты — вежливый и информативный ассистент клиники.
+Ты — вежливый и информативный ассистент.
 
 Главные правила:
 - Для **ОБЩИХ ОПИСАНИЙ** услуг (что такое МРТ, виды массажа), специалистов (их квалификации, опыта, но НЕ того, какие конкретно услуги они где оказывают), общей справочной информации о клинике (адреса, общие правила) — используй RAG-поиск.
@@ -1045,6 +1142,11 @@ SYSTEM_PROMPT = """
    - total_price: ОБЩАЯ цена всей записи (сумма цен всех услуг из 'services_details'). Ты должен рассчитать это значение.
    - client_phone_number: Телефон клиента будет добавлен автоматически системой. НЕ ПЫТАЙСЯ ЕГО УКАЗАТЬ ИЛИ ЗАПРОСИТЬ.
    - filial_name, date_of_record, start_time, end_time, employee_name - должны быть точно определены перед вызовом.
+
+**ВАЖНО: Перенос существующей записи**
+- Вызывай `reschedule_appointment_tool` ТОЛЬКО если пользователь ЯВНО просит изменить дату или время уже существующей записи. Ключевые формулировки: «перенести запись», «сдвинуть запись», «изменить дату/время записи», «move appointment», «reschedule appointment».
+- Если пользователь явно НЕ упоминает перенос (например, спрашивает «запиши меня…»), считай это созданием НОВОЙ записи и следуй стандартному процессу (get_free_slots_tool → book_appointment_*).
+- Если запрос неоднозначен (например, «хочу пораньше»), уточни у пользователя, имеется ли в виду перенос существующей записи или новая запись.
 
 Дополнительные общие инструкции:
 - Приветствуй пользователя и предлагай помощь.
@@ -1344,7 +1446,7 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         list_services_in_category_tool: ListServicesInCategoryArgs, list_services_in_filial_tool: ListServicesInFilialArgs,
         find_services_in_price_range_tool: FindServicesInPriceRangeArgs, 
         list_all_categories_tool: ListCategoriesArgs,
-        list_employee_filials_tool: ListEmployeeFilialsArgs
+        list_employee_filials_tool: ListEmployeeFilialsArgs, reschedule_appointment_tool: RescheduleAppointmentArgs, update_record_time_tool: UpdateRecordTimeArgs, cancel_appointment_tool: CancelAppointmentArgs
     }
 
     def create_tool_wrapper_react(original_tool_func: callable, raw_data_for_tenant: Optional[List[Dict]], tenant_id_for_tool: str, configurable_dict: Dict = None): # <--- ДОБАВЛЕН configurable_dict
@@ -1544,6 +1646,15 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
                                     logger.warning(f"client_phone_number не был предоставлен для book_appointment_ai_payload_tool, Pydantic может вызвать ошибку, если поле обязательное.")
                         
                         # Добавляем tenant_id и api_token для всех инструментов, которые используют новый API
+                        elif tool_name == "cancel_appointment_tool":
+                            cfg_chain_id = configurable.get("chain_id")
+                            if not cfg_chain_id:
+                                raise ValueError("chain_id обязателен для cancel_appointment_tool, но не найден в configurable.")
+                            current_tool_args_for_invoke['chain_id'] = cfg_chain_id
+                            current_tool_args_for_invoke['tenant_id'] = cfg_tenant_id
+                            current_tool_args_for_invoke['api_token'] = cfg_client_api_token
+                            logger.info(f"[ReAct System Override] Для cancel_appointment_tool: chain_id='{cfg_chain_id}', tenant_id='{cfg_tenant_id}'")
+
                         elif tool_name in ["find_employees_tool", "get_employee_services_tool", "list_employee_filials_tool"]:
                             if not cfg_tenant_id:
                                 raise ValueError(f"tenant_id обязателен для {tool_name}, но не найден в configurable.")

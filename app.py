@@ -107,7 +107,8 @@ class MessageRequest(BaseModel):
     message: str
     user_id: Optional[str] = None
     reset_session: bool = False
-    tenant_id: str 
+    tenant_id: str
+    chain_id: Optional[str] = None
     phone_number: Optional[str] = None
     client_api_token: Optional[str] = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJJZCI6ImUwOTA0YWU2LWQ4NzMtNDA5MS1iNjFjLTQyODlhYTI3ZjY2ZSIsIk5hbWUiOiJhZG1pbiIsIlN1cm5hbWUiOiJhZG1pbiIsIlJvbGVOYW1lIjoi0JDQtNC80LjQvdC40YHRgtGA0LDRgtC-0YAiLCJFbWFpbCI6ImhhbGFsb2xzdW5AbWFpbC5jb20iLCJUZW5hbnRJZCI6Im1lZHl1bWVkLjIwMjMtMDQtMjQiLCJSb2xlSWQiOiJyb2xlMiIsIlBob3RvVXJsIjoiaHR0cHM6Ly9jZG4ubWF0cml4Y3JtLnJ1L21lZHl1bWVkLjIwMjMtMDQtMjQvOTFhMGZhYzAtYmQ1Zi00M2RkLThmNTAtNTc5YmI0NjEwZGUyLmpwZWciLCJDaXR5SWQiOiIyIiwiZXhwIjoxNzg3MTI4MDY4LCJpc3MiOiJodHRwczovL2xvY2FsaG9zdDo3MDk1IiwiYXVkIjoiaHR0cHM6Ly9sb2NhbGhvc3Q6NzA5NSJ9.v9fQ_6Fepbov-BYZIg5RgcTluQVgWZSaDDK71OIsOjE"
     images: Optional[List[ImageData]] = Field(default=None, description="Список изображений для мультимодальной обработки")
@@ -283,7 +284,8 @@ async def ask_assistant(
     
     user_id_for_crm_visit_history = request.user_id 
     reset = request.reset_session
-    tenant_id = request.tenant_id 
+    tenant_id = request.tenant_id
+    chain_id = request.chain_id 
 
     if not tenant_id:
         logger.error(f"Получен запрос без tenant_id.")
@@ -450,6 +452,7 @@ async def ask_assistant(
                     "session_id": composite_session_id,
                     "user_id": user_id_for_agent_chat_history,
                     "tenant_id": tenant_id,
+                    "chain_id": chain_id,
                     "client_api_token": request.client_api_token,
                     "phone_number": request.phone_number
                  }

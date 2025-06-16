@@ -683,7 +683,7 @@ async def add_record(
     if traffic_channel_id is not None:
         api_request_payload["trafficChannelId"] = traffic_channel_id
     
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "accept": "*/*"}
     if api_token:
         headers["Authorization"] = f"Bearer {api_token}"
 
@@ -718,6 +718,7 @@ async def update_record_time(
     date_of_record: str,
     start_time: str,
     end_time: str,
+    tenant_id: Optional[str] = None,
     api_url: str = "https://back.matrixcrm.ru/api/v1/AI/updateRecordTime",
     api_token: Optional[str] = None
 ) -> dict:
@@ -740,14 +741,16 @@ async def update_record_time(
         "startTime": start_time,
         "endTime": end_time,
     }
+    if tenant_id:
+        payload["tenantId"] = tenant_id
 
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "accept": "*/*"}
     if api_token:
         headers["Authorization"] = f"Bearer {api_token}"
 
     try:
         async with httpx.AsyncClient(verify=False) as client:
-            logger.info(f"[updateRecordTime] POST {api_url} payload={payload}")
+            logger.info(f"[updateRecordTime] POST {api_url} payload={payload} headers={ {k: (v[:10] + '...' if k=='Authorization' else v) for k, v in headers.items()} }")
             response = await client.post(api_url, json=payload, headers=headers, timeout=20.0)
             response.raise_for_status()
             response_data = response.json()
@@ -763,6 +766,101 @@ async def update_record_time(
     except Exception as e:
         logger.error(f"Unknown error updateRecordTime: {e}", exc_info=True)
         return {"code": 500, "message": f"Внутренняя ошибка: {e}"}
+
+
+async def get_cancel_reasons(
+    chain_id: str,
+    tenant_id: Optional[str] = None,
+    api_url: str = f"{CLIENT_API_BASE_URL}/ReasonRecordCancellation",
+    api_token: Optional[str] = None,
+) -> Optional[List[Dict[str, Any]]]:
+    """Возвращает список причин отмены записи для chain_id.
+    Args:
+        chain_id: Chain ID (обязателен)
+        api_token: Bearer-токен (обязателен)
+    """
+    if not api_token:
+        logger.error(f"[Tenant: {tenant_id}] api_token отсутствует для get_cancel_reasons")
+        return None
+    if not chain_id:
+        logger.error(f"[Tenant: {tenant_id}] chain_id отсутствует для get_cancel_reasons")
+        return None
+    params = {"chainId": chain_id}
+    headers = {"Authorization": f"Bearer {api_token}", "accept": "*/*"}
+    try:
+        async with httpx.AsyncClient(verify=False) as client:
+            logger.info(f"[get_cancel_reasons] GET {api_url} params={params}")
+            response = await client.get(api_url, params=params, headers=headers, timeout=20.0)
+            response.raise_for_status()
+            data = response.json()
+            # API может возвращать два формата:
+            # 1) { "code": 200, "data": [...] }
+            # 2) { "count": N, "data": [...] }
+            if "code" in data:
+                if data.get("code") == 200:
+                    return data.get("data") or []
+                logger.warning(f"[get_cancel_reasons] API вернул код {data.get('code')}. Сообщение: {data.get('message')}")
+                return None
+            else:
+                # Нет поля code — считаем формат 2
+                if isinstance(data.get("data"), list):
+                    return data["data"]
+                logger.warning(f"[get_cancel_reasons] Неожиданный формат ответа: {data}")
+                return None
+    except httpx.RequestError as e:
+        logger.error(f"Network error get_cancel_reasons: {e}", exc_info=True)
+        return None
+    except Exception as e:
+        logger.error(f"Unknown error get_cancel_reasons: {e}", exc_info=True)
+        return None
+
+async def cancel_record(
+    record_id: str,
+    chain_id: str,
+    canceling_reason: str,
+    tenant_id: Optional[str] = None,
+    api_url: str = f"{CLIENT_API_BASE_URL}/AI/cancelRecord",
+    api_token: Optional[str] = None,
+) -> dict:
+    """Отменяет запись клиента.
+    Args:
+        record_id: ID записи
+        chain_id: chainId, которому принадлежит запись
+        canceling_reason: ID либо текст причины отмены (API принимает строку)
+    Returns: ответ API JSON
+    """
+    payload = {
+        "recordId": record_id,
+        "chainId": chain_id,
+        "cancelingReason": canceling_reason,
+    }
+    if tenant_id:
+        payload["tenantId"] = tenant_id
+    headers = {"Content-Type": "application/json", "accept": "*/*"}
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
+    try:
+        async with httpx.AsyncClient(verify=False) as client:
+            logger.info(f"[cancelRecord] POST {api_url} payload={payload} headers={{'Authorization': 'Bearer ***'}}")
+            response = await client.post(api_url, json=payload, headers=headers, timeout=20.0)
+            response.raise_for_status()
+            data = response.json()
+            logger.info(f"[cancelRecord] Response code={data.get('code')} data={str(data.get('data', ''))[:100]}")
+            return data
+    except httpx.HTTPStatusError as e:
+        error_content = e.response.text
+        logger.error(f"HTTP {e.response.status_code} from cancelRecord: {error_content}", exc_info=True)
+        return {"code": e.response.status_code, "message": error_content}
+    except httpx.RequestError as e:
+        logger.error(f"Network error cancelRecord: {e}", exc_info=True)
+        return {"code": 500, "message": str(e)}
+    except Exception as e:
+        logger.error(f"Unknown error cancelRecord: {e}", exc_info=True)
+        return {"code": 500, "message": str(e)}
+
+# ---------------------------------------------------------------------------
+# ПРОЧИЕ ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ---------------------------------------------------------------------------
 
 async def get_filial_id_by_name_api(
     filial_name: str,

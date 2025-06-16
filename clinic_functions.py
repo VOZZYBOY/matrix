@@ -4,7 +4,14 @@ import logging
 import re
 from typing import Optional, List, Dict, Any, Set, Tuple
 from pydantic import BaseModel, Field
-from client_data_service import get_free_times_of_employee_by_services, add_record, get_multiple_data_from_api
+from client_data_service import (
+    get_free_times_of_employee_by_services,
+    add_record,
+    get_multiple_data_from_api,
+    update_record_time,
+    get_cancel_reasons,
+    cancel_record,
+)
 from clinic_index import get_name_by_id, normalize_text, get_id_by_name, get_service_id_by_name
 import asyncio
 from datetime import datetime, timedelta
@@ -1964,6 +1971,103 @@ class BookAppointmentAIPayload(BaseModel):
             return f"Ошибка при создании записи (AI Payload): {type(e).__name__} - {e}"
 
 
+
+
+class RescheduleAppointment(BaseModel):
+    """Перенос существующей записи клиента на новое время."""
+    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (опционально, для логов)")
+    record_id: str = Field(description="ID переносимой записи")
+    date_of_record: str = Field(description="Новая дата (YYYY-MM-DD)")
+    start_time: str = Field(description="Новое время начала (HH:MM)")
+    end_time: str = Field(description="Новое время окончания (HH:MM)")
+    api_token: Optional[str] = None
+
+    async def process(self, tenant_id: Optional[str] = None, api_token: Optional[str] = None) -> str:
+        # Берём tenant_id и токен из аргументов или из свойств экземпляра
+        tenant_to_use = tenant_id or self.tenant_id
+        token_to_use = api_token or self.api_token
+
+        try:
+            result = await update_record_time(
+                record_id=self.record_id,
+                date_of_record=self.date_of_record,
+                start_time=self.start_time,
+                end_time=self.end_time,
+                tenant_id=tenant_to_use,
+                api_token=token_to_use,
+            )
+            code = result.get("code")
+            if code == 200:
+                return (
+                    f"Запись успешно перенесена на {self.date_of_record} "
+                    f"{self.start_time}-{self.end_time}."
+                )
+            return f"Не удалось перенести запись: {result.get('message', 'Неизвестная ошибка')}"
+        except Exception as e:
+            logger.error(f"Ошибка в RescheduleAppointment.process: {e}", exc_info=True)
+            return f"Ошибка при переносе записи: {type(e).__name__} - {e}"
+
+
+class CancelAppointment(BaseModel):
+    """Отмена существующей записи клиента."""
+    tenant_id: Optional[str] = Field(default=None, description="ID тенанта (опционально, для логов)")
+    record_id: str = Field(description="ID отменяемой записи")
+    chain_id: str = Field(description="Chain ID, которому принадлежит запись")
+    canceling_reason: Optional[str] = Field(default=None, description="ID или текст причины отмены (если не указан, система выберет автоматически)")
+    api_token: Optional[str] = None
+
+    async def process(self, tenant_id: Optional[str] = None, api_token: Optional[str] = None) -> str:
+        tenant_to_use = tenant_id or self.tenant_id
+        token_to_use = api_token or self.api_token
+
+        if not token_to_use:
+            return "Критическая ошибка: отсутствует API токен для отмены записи."
+
+        try:
+            reason_to_use = None
+            reasons_list = await get_cancel_reasons(chain_id=self.chain_id, tenant_id=tenant_to_use, api_token=token_to_use)
+            if not reasons_list:
+                return "Не удалось получить список причин отмены."
+
+            # Строим словарь id->name
+            id_name_map = {str(item.get("id")): item.get("name", "") for item in reasons_list if isinstance(item, dict)}
+
+            # Если LLM передала текст причины (не число) — пытаемся найти наиболее близкую
+            if self.canceling_reason and not self.canceling_reason.isdigit():
+                import difflib
+                names = list(id_name_map.values())
+                best_match = difflib.get_close_matches(self.canceling_reason.lower(), [n.lower() for n in names], n=1, cutoff=0.3)
+                if best_match:
+                    # Получаем id по имени
+                    for rid, rname in id_name_map.items():
+                        if rname.lower() == best_match[0]:
+                            reason_to_use = rid
+                            logger.info(f"[CancelAppointment] По тексту '{self.canceling_reason}' выбран reason id={rid} ('{rname}')")
+                            break
+            elif self.canceling_reason and self.canceling_reason.isdigit():
+                reason_to_use = self.canceling_reason
+
+            # Если всё ещё не выбрано — берём первую причину
+            if not reason_to_use:
+                first_id = next(iter(id_name_map.keys()))
+                first_name = id_name_map[first_id]
+                reason_to_use = first_id
+                logger.info(f"[CancelAppointment] По умолчанию выбран первый reason id={first_id} ('{first_name}')")
+
+            result = await cancel_record(
+                record_id=self.record_id,
+                chain_id=self.chain_id,
+                canceling_reason=reason_to_use,
+                tenant_id=tenant_to_use,
+                api_token=token_to_use,
+            )
+            code = result.get("code")
+            if code == 200:
+                return "Запись успешно отменена."
+            return f"Не удалось отменить запись: {result.get('message', 'Неизвестная ошибка')}"
+        except Exception as e:
+            logger.error(f"Ошибка в CancelAppointment.process: {e}", exc_info=True)
+            return f"Ошибка при отмене записи: {type(e).__name__} - {e}"
 
 class GetServicesByCategory(BaseModel):
     """
