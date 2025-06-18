@@ -102,6 +102,8 @@
         <div class="mb-3">
             <label for="tenantIdInput" class="form-label">ID Тенанта:</label>
             <input type="text" class="form-control" id="tenantIdInput" placeholder="Введите ID тенанта (например, my_clinic)">
+            <label for="chainIdInput" class="form-label mt-2">Chain ID:</label>
+            <input type="text" class="form-control" id="chainIdInput" placeholder="Введите Chain ID (например, mainnet)">
             <button type="button" class="btn btn-secondary btn-sm mt-2" id="loadSettingsButton">Загрузить/Проверить настройки</button>
         </div>
 
@@ -193,6 +195,7 @@
     <script>
         // --- Переменные для настроек ---
         const tenantIdInput = document.getElementById('tenantIdInput');
+            const chainIdInput = document.getElementById('chainIdInput');
         const loadSettingsButton = document.getElementById('loadSettingsButton');
         const settingsForm = document.getElementById('settingsForm');
         const promptAdditionTextarea = document.getElementById('promptAddition');
@@ -235,6 +238,7 @@
         // Загрузка настроек для введенного тенанта
         async function loadTenantSettings() {
             const tenantId = tenantIdInput.value.trim();
+             const chainId = chainIdInput.value.trim() || 'default';
             if (!tenantId) {
                  showStatus('Введите ID тенанта', 'warning');
                  return;
@@ -256,7 +260,7 @@
             clinicInfoLastModified.textContent = '';
 
             try {
-                const response = await fetch(`/tenant_settings/${tenantId}`);
+                const response = await fetch(`/tenant_settings/${tenantId}/${chainId}`);
                  if (response.status === 404) {
                     promptAdditionTextarea.value = '';
                     clinicInfoAboutTextarea.value = '';
@@ -317,6 +321,7 @@
         // Сохранение настроек
         async function saveTenantSettings() {
             const tenantId = tenantIdInput.value.trim();
+             const chainId = chainIdInput.value.trim() || 'default';
             if (!tenantId) {
                  showStatus('Ошибка: Введите ID тенанта перед сохранением!', 'danger');
                  return;
@@ -362,6 +367,7 @@
                     },
                     body: JSON.stringify({
                         tenant_id: tenantId,
+                        chain_id: chainId,
                         settings: settingsToSave
                     }),
                 });
@@ -533,6 +539,7 @@
         async function sendChatMessage() {
             const message = chatInput.value.trim();
             const tenantId = tenantIdInput.value.trim();
+             const chainId = chainIdInput.value.trim() || 'default';
 
             if (!message && selectedImages.length === 0) {
                 showChatStatus('Введите сообщение или загрузите изображение', 'warning');
@@ -614,6 +621,7 @@
          // Сброс диалога
         async function resetChat() {
             const tenantId = tenantIdInput.value.trim();
+             const chainId = chainIdInput.value.trim() || 'default';
             if (!tenantId) {
                 showChatStatus('Ошибка: Сначала введите ID тенанта!', 'danger');
                 return;

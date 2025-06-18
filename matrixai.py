@@ -1431,6 +1431,12 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
     now = datetime.now(tz)
     datetime_info = f"Сегодня: {now.strftime('%d %B %Y, %A, %H:%M')} (Europe/Moscow)"
     final_system_prompt = f"{datetime_info}\\n\\n" + system_prompt_base
+    # --- Apply external system message override, if provided (e.g., from FastAPI layer) ---
+    override_system_msg = config.get("system_message") if isinstance(config, dict) else None
+    if override_system_msg:
+        # Append so that override is the last instruction (higher priority for the LLM)
+        final_system_prompt = final_system_prompt + "\n\n" + override_system_msg
+        logger.info("[SystemPrompt Override] External system_message appended for language/tool-call priority.")
     
     if tenant_config_manager:
         settings = tenant_config_manager.load_tenant_settings(tenant_id)

@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, validator
 from langchain_core.runnables import Runnable
 
 from client_data_service import get_client_context_for_agent
+from language_detector import detect_language
 
 try:
     import tenant_config_manager
@@ -30,17 +31,14 @@ except ImportError as e:
     redis_clear_history = None
     redis_get_history = None
 
-# Импорт основных компонентов из matrixai
 try:
     from matrixai import (
         agent_with_history, 
         trigger_reindex_tenant_async,
         analyze_user_message_completeness,
         should_wait_for_message_completion,
-        get_message_analysis_response,
         MESSAGE_ANALYZER_AVAILABLE,
         ANALYZER_INITIALIZED,
-        clear_accumulator
     )
     logging.info("Основные компоненты из matrixai.py успешно импортированы")
 except ImportError as e:
@@ -76,12 +74,14 @@ class TenantSettings(BaseModel):
 
 class SetTenantSettingsRequest(BaseModel):
     tenant_id: str
+    chain_id: str
     settings: TenantSettings
 
 class GetTenantSettingsResponse(BaseModel):
     prompt_addition: Optional[str] = None
     clinic_info_docs: Optional[List[Dict[str, Any]]] = None
     last_modified_general: Optional[str] = None 
+    last_modified_clinic_info: Optional[str] = None
 
 class ImageData(BaseModel):
     """Модель для передачи изображений в мультимодальном формате"""
@@ -149,7 +149,7 @@ async def lifespan(app: FastAPI):
         else:
              logger.critical("Критическая ошибка: agent_with_history из matrixai равен None.")
         
-        # Проверка статуса анализатора завершенности сообщений  
+        
         if MESSAGE_ANALYZER_AVAILABLE and ANALYZER_INITIALIZED:
             logger.info("Анализатор завершенности сообщений готов к работе")
         else:
@@ -194,7 +194,7 @@ async def prepare_multimodal_input(request: MessageRequest, client_context_str: 
     - Список блоков контента в мультимодальном формате LangChain, если есть изображения
     """
     
-    # Формируем основное текстовое сообщение
+ 
     text_message = request.message
     if client_context_str:
         text_message = f"{client_context_str}\n\nИсходное сообщение: {request.message}"
@@ -202,31 +202,31 @@ async def prepare_multimodal_input(request: MessageRequest, client_context_str: 
     else:
         logger.info("Контекст о клиенте не был сформирован.")
     
-    # Если нет изображений, возвращаем обычную строку
+    
     if not request.images:
         return text_message
     
-    # Если есть изображения, формируем мультимодальный формат
+    
     logger.info(f"Обрабатываем мультимодальный запрос с {len(request.images)} изображениями")
     
     content_blocks = []
     
-    # Добавляем текстовый блок
+    
     content_blocks.append({
         "type": "text",
         "text": text_message
     })
     
-    # Добавляем блоки изображений
+    
     for i, image in enumerate(request.images):
         try:
             if image.source_type == "base64":
-                # Валидируем base64 данные
+                
                 if not image.data:
                     logger.warning(f"Изображение {i+1}: отсутствуют base64 данные")
                     continue
                     
-                # Проверяем, что это валидный base64
+                
                 try:
                     base64.b64decode(image.data, validate=True)
                 except Exception as e:
@@ -262,7 +262,7 @@ async def prepare_multimodal_input(request: MessageRequest, client_context_str: 
             logger.error(f"Ошибка при обработке изображения {i+1}: {e}")
             continue
     
-    # Если все изображения оказались невалидными, возвращаем только текст
+    
     if len(content_blocks) == 1:
         logger.warning("Все изображения оказались невалидными, возвращаем только текст")
         return text_message
@@ -286,19 +286,19 @@ async def ask_assistant(
     reset = request.reset_session
     tenant_id = request.tenant_id
     chain_id = request.chain_id
-    # --- Объединяем tenant_id и chain_id в единый идентификатор, совпадающий с именем JSON-файла ---
-    if chain_id:  # chain_id может быть None для старых клиентов
+   
+    if chain_id:  
         tenant_id = f"{tenant_id}_{chain_id}"
 
     if not tenant_id:
         logger.error(f"Получен запрос без tenant_id.")
         raise HTTPException(status_code=400, detail="Параметр 'tenant_id' обязателен.")
 
-    # Формируем базовый user_id
+  
     base_user_id = f"{tenant_id}_{request.phone_number}" if request.phone_number else f"{tenant_id}_{generate_user_id()}"
     
-    # Получаем текущий номер сессии (без инкремента)
-    session_counter = 1  # По умолчанию первая сессия
+   
+    session_counter = 1  
     if redis_clear_history:
         try:
             from redis_history import get_current_session_number
@@ -307,17 +307,17 @@ async def ask_assistant(
             logger.warning(f"Не удалось получить счетчик сессий: {e}")
             session_counter = 1
     
-    # Формируем финальный user_id с номером сессии (всегда с суффиксом)
+   
     user_id_for_agent_chat_history = f"{base_user_id}_s{session_counter}"
     
     logger.info(f"Получен запрос от tenant '{tenant_id}', НАШ user_chat_history_id '{user_id_for_agent_chat_history}' (оригинальный request.user_id: '{request.user_id}', phone '{request.phone_number}', session: {session_counter}): {request.message[:50]}... Reset: {reset}")
 
     if reset:
         if redis_clear_history:
-            # Очищаем старую историю
+           
             cleared = redis_clear_history(tenant_id=tenant_id, user_id=user_id_for_agent_chat_history)
             
-            # Очищаем накопитель сообщений для этого пользователя
+           
             try:
                 from matrixai import clear_accumulator
                 if clear_accumulator:
@@ -326,11 +326,11 @@ async def ask_assistant(
             except Exception as e:
                 logger.warning(f"Не удалось очистить накопитель сообщений: {e}")
             
-            # Инкрементируем счетчик сессий с помощью встроенной Redis функции
+           
             try:
                 from redis_history import get_next_session_number
                 new_session_counter = get_next_session_number(tenant_id, base_user_id)
-                # Обновляем user_id для ответа с новым номером сессии
+                
                 user_id_for_agent_chat_history = f"{base_user_id}_s{new_session_counter}"
                 logger.info(f"Создана новая сессия {new_session_counter} для {base_user_id}")
             except Exception as e:
@@ -357,41 +357,40 @@ async def ask_assistant(
         composite_session_id = f"{tenant_id}:{user_id_for_agent_chat_history}"
         logger.debug(f"Создан composite_session_id для истории чата ассистента: {composite_session_id}")
 
-        # === АНАЛИЗ ЗАВЕРШЕННОСТИ СООБЩЕНИЯ ===
-        # Импортируем переменные заново для актуального состояния
+       
         from matrixai import MESSAGE_ANALYZER_AVAILABLE, ANALYZER_INITIALIZED
         
-        # Получаем предыдущие сообщения диалога для контекста (и пользователя, и ассистента)
+        
         previous_dialog_messages = []
         time_since_last_message = None
         
         if MESSAGE_ANALYZER_AVAILABLE and ANALYZER_INITIALIZED:
             try:
-                # Получаем историю чата для контекстуального анализа через LangChain
+                
                 logger.debug(f"Используем LangChain подход для получения истории")
                 
-                # Импортируем функцию из анализатора завершенности
+              
                 from message_completeness_analyzer import get_history_via_langchain
                 
-                # Получаем отформатированные сообщения через LangChain (правильно обрабатывает data.content)
+              
                 previous_dialog_messages = get_history_via_langchain(tenant_id=tenant_id, user_id=user_id_for_agent_chat_history, limit=15)
                 
-                # Берем последние 7 сообщений для полного контекста диалога
+                
                 previous_dialog_messages = previous_dialog_messages[-7:] if len(previous_dialog_messages) > 7 else previous_dialog_messages
                 
-                # Более точное вычисление времени с последнего сообщения
+                
                 time_since_last_message = None
                 if previous_dialog_messages:
-                    # Простая оценка на основе количества недавних сообщений
+                  
                     recent_user_messages = len([msg for msg in previous_dialog_messages[-3:] if "👤 Пользователь" in msg])
                     if recent_user_messages > 0:
-                        time_since_last_message = 3.0 + (recent_user_messages * 2.0)  # Примерная оценка
+                        time_since_last_message = 3.0 + (recent_user_messages * 2.0)  
                     else:
-                        time_since_last_message = 10.0  # Давно не было сообщений
+                        time_since_last_message = 10.0  
                 
                 logger.debug(f"Получено {len(previous_dialog_messages)} предыдущих сообщений диалога для анализа")
                 
-                # Анализируем завершенность текущего сообщения с контекстом
+               
                 logger.debug(f"Анализируем сообщение от {user_id_for_agent_chat_history}: '{request.message[:50]}...'")
                 
                 analysis_result, final_message = await analyze_user_message_completeness(
@@ -403,13 +402,13 @@ async def ask_assistant(
                 )
                 
                 if analysis_result:
-                    # Проверяем, нужно ли ждать завершения
+                    
                     if should_wait_for_message_completion(analysis_result):
                         logger.info(f"[Молчание] Сообщение определено как неполное. НЕ ОТВЕЧАЕМ, ждем продолжения.")
                         
-                        # НЕ ОТВЕЧАЕМ НА НЕПОЛНЫЕ СООБЩЕНИЯ! Просто возвращаем пустой ответ
+                      
                         return DebouncedMessageResponse(
-                            response="",  # Пустой ответ - система молчит
+                            response="",  
                             user_id=user_id_for_agent_chat_history,
                             is_waiting=True,
                             wait_time=analysis_result.suggested_wait_time,
@@ -421,7 +420,7 @@ async def ask_assistant(
                     logger.info(f"[Анализ завершенности] Сообщение считается завершенным. Передаем ассистенту.")
                     logger.debug(f"[Склеивание] Используем итоговое сообщение: '{final_message[:100]}...'")
                     
-                    # Используем склеенное сообщение вместо исходного
+                    
                     request.message = final_message
                     
                 else:
@@ -429,7 +428,7 @@ async def ask_assistant(
                 
             except Exception as e:
                 logger.error(f"Ошибка при анализе завершенности сообщения: {e}", exc_info=True)
-                # При ошибке анализа продолжаем обработку как обычно
+                
         else:
             logger.warning(f"[ДЕБАГ] Анализатор завершенности недоступен!")
             logger.warning(f"[ДЕБАГ] MESSAGE_ANALYZER_AVAILABLE = {MESSAGE_ANALYZER_AVAILABLE}")
@@ -445,12 +444,28 @@ async def ask_assistant(
             frequent_visit_threshold=3      
         )
 
-        # Формируем мультимодальное сообщение для агента
+        
         multimodal_input = await prepare_multimodal_input(request, client_context_str)
+
+        # Detect language and prepare system instruction
+        lang = detect_language(request.message)
+        logger.info(f"[LangDetect] detected '{lang}' for text: {request.message[:30]}")
+        if lang.startswith("en"):
+            system_message = (
+                "You are an assistant. ALWAYS answer in English regardless of the language of the question or context. "
+                "Use English words for everything except proper Russian names that do not require translation. "
+                "When helpful, you MAY call the available external tools instead of answering directly.")
+        else:
+            system_message = ("Вы — ассистент. Отвечай ТОЛЬКО на русском. "
+                    "При необходимости ты обязяан вызывать доступные внешние функции вместо прямого ответа.")
+
+
+    
 
         response_data = await agent_dependency.ainvoke(
             {"input": multimodal_input}, 
             config={
+                "system_message": system_message,
                 "configurable": {
                     "session_id": composite_session_id,
                     "user_id": user_id_for_agent_chat_history,
@@ -472,7 +487,6 @@ async def ask_assistant(
 
         logger.info(f"Ответ для {user_id_for_agent_chat_history}: {response_text[:50]}...")
         
-        # Обычный ответ (завершенное сообщение)
         return DebouncedMessageResponse(
             response=response_text,
             user_id=user_id_for_agent_chat_history,
@@ -491,6 +505,7 @@ async def health_check():
 
 @app.post("/tenant_settings", tags=["tenant_config"], status_code=200)
 async def set_tenant_settings(request: SetTenantSettingsRequest):
+    tenant_chain = f"{request.tenant_id}_{request.chain_id}"
     if not tenant_config_manager:
         raise HTTPException(status_code=503, detail="Менеджер конфигураций тенантов недоступен.")
 
@@ -505,15 +520,15 @@ async def set_tenant_settings(request: SetTenantSettingsRequest):
 
     if general_settings: 
         logger.info(f"Получен запрос на сохранение общих настроек для тенанта '{tenant_id}': {general_settings}")
-        current_settings = tenant_config_manager.load_tenant_settings(tenant_id)
+        current_settings = tenant_config_manager.load_tenant_settings(tenant_chain)
         current_settings.update(general_settings)
-        success_general = tenant_config_manager.save_tenant_settings(tenant_id, current_settings)
+        success_general = tenant_config_manager.save_tenant_settings(tenant_chain, current_settings)
         if not success_general:
              logger.error(f"Не удалось сохранить общие настройки для тенанта '{tenant_id}'.")
 
     if clinic_info_docs_data is not None: 
         logger.info(f"Получен запрос на сохранение clinic_info_docs для тенанта '{tenant_id}' ({len(clinic_info_docs_data)} док-ов)")
-        success_clinic_info = tenant_config_manager.save_tenant_clinic_info(tenant_id, clinic_info_docs_data)
+        success_clinic_info = tenant_config_manager.save_tenant_clinic_info(tenant_chain, clinic_info_docs_data)
         if not success_clinic_info:
             logger.error(f"Не удалось сохранить clinic_info_docs для тенанта '{tenant_id}'.")
         else:
@@ -535,7 +550,7 @@ async def set_tenant_settings(request: SetTenantSettingsRequest):
     if needs_reindex:
         logger.info(f"Изменения в clinic_info_docs для тенанта '{tenant_id}' требуют переиндексации. Запускаем фоновую задачу...")
         import asyncio
-        asyncio.create_task(trigger_reindex_tenant_async(tenant_id))
+        asyncio.create_task(trigger_reindex_tenant_async(tenant_chain))
         response_message += " Начата фоновая переиндексация данных клиники."
 
     if status_code == 500 and (success_general or success_clinic_info):
@@ -546,20 +561,21 @@ async def set_tenant_settings(request: SetTenantSettingsRequest):
     else:
         raise HTTPException(status_code=status_code, detail=response_message)
 
-@app.get("/tenant_settings/{tenant_id}", response_model=GetTenantSettingsResponse, tags=["tenant_config"])
-async def get_tenant_settings(tenant_id: str):
+@app.get("/tenant_settings/{tenant_id}/{chain_id}", response_model=GetTenantSettingsResponse, tags=["tenant_config"])
+async def get_tenant_settings(tenant_id: str, chain_id: str):
     if not tenant_config_manager:
         raise HTTPException(status_code=503, detail="Менеджер конфигураций тенантов недоступен.")
 
-    logger.info(f"Запрос настроек для тенанта '{tenant_id}'")
+    tenant_chain = f"{tenant_id}_{chain_id}"
+    logger.info(f"Запрос настроек для тенанта '{tenant_chain}'")
     try:
         
-        settings = tenant_config_manager.load_tenant_settings(tenant_id)
+        settings = tenant_config_manager.load_tenant_settings(tenant_chain)
         
-        clinic_info = tenant_config_manager.load_tenant_clinic_info(tenant_id)
+        clinic_info = tenant_config_manager.load_tenant_clinic_info(tenant_chain)
         
-        general_mod_time = tenant_config_manager.get_settings_file_mtime(tenant_id)
-        clinic_info_mod_time = tenant_config_manager.get_clinic_info_file_mtime(tenant_id)
+        general_mod_time = tenant_config_manager.get_settings_file_mtime(tenant_chain)
+        clinic_info_mod_time = tenant_config_manager.get_clinic_info_file_mtime(tenant_chain)
 
         
         general_mod_time_str = datetime.datetime.fromtimestamp(general_mod_time).isoformat() if general_mod_time else None
@@ -575,11 +591,11 @@ async def get_tenant_settings(tenant_id: str):
         )
 
     except FileNotFoundError:
-        logger.warning(f"Файлы настроек для тенанта '{tenant_id}' не найдены.")
-        raise HTTPException(status_code=404, detail=f"Настройки для тенанта '{tenant_id}' не найдены.")
+        logger.warning(f"Файлы настроек для тенанта '{tenant_chain}' не найдены.")
+        raise HTTPException(status_code=404, detail=f"Настройки для тенанта '{tenant_chain}' не найдены.")
     except Exception as e:
-        logger.error(f"Ошибка при загрузке настроек для тенанта '{tenant_id}': {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка при чтении настроек для '{tenant_id}'.")
+        logger.error(f"Ошибка при загрузке настроек для тенанта '{tenant_chain}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Внутренняя ошибка при чтении настроек для '{tenant_chain}'.")
 
 @app.get("/tenants", response_model=List[str], tags=["tenant_config"])
 async def get_tenant_list():
