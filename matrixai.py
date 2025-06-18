@@ -1275,8 +1275,9 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         return "Ошибка: Не удалось определить тенанта."
 
     # --- Инициализация RAG компонентов для тенанта (как и раньше) ---
+    from rag_setup import build_collection_name  # импорт внутри функции, чтобы избежать циклов
     bm25_retriever = BM25_RETRIEVERS_MAP.get(tenant_id)
-    collection_name = f"{TENANT_COLLECTION_PREFIX}{tenant_id}"
+    collection_name = build_collection_name(tenant_id)
     try:
         embeddings_wrapper = ChromaGigaEmbeddingsWrapper(EMBEDDINGS_GIGA)
         chroma_collection = CHROMA_CLIENT.get_collection(

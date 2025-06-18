@@ -3,10 +3,20 @@
 import os
 import json
 import logging
-import glob
-from typing import List, Dict, Any, Optional, Tuple
 import re
+from typing import List, Dict, Any, Optional, Tuple
+import chromadb
 
+# Импортируем функции для работы с данными тенантов
+from tenant_chain_data import discover_all_json_files, download_chain_data, build_file_path
+
+try:
+    import tenant_config_manager
+except ImportError:
+    logging.error("[RAG Setup] Не удалось импортировать tenant_config_manager. Информация о клинике из настроек не будет загружена.")
+    tenant_config_manager = None
+
+import tenant_chain_data  # Новый импорт для рекурсивного поиска JSON файлов
 
 from langchain_core.documents import Document
 
@@ -15,17 +25,26 @@ from langchain_chroma import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.retrievers import BM25Retriever
 
-import chromadb
-
-try:
-    import tenant_config_manager
-except ImportError:
-    logging.error("[RAG Setup] Не удалось импортировать tenant_config_manager. Информация о клинике из настроек не будет загружена.")
-    tenant_config_manager = None
-
 logger = logging.getLogger(__name__)
 
 TENANT_COLLECTION_PREFIX = "tenant_"
+
+import re as _re
+
+def _sanitize_fragment(fragment: str) -> str:
+    """Sanitize a part of collection name (tenant or chain)."""
+    return _re.sub(r"[^A-Za-z0-9_-]", "_", fragment) or "default"
+
+def build_collection_name(tenant_chain: str) -> str:
+    """Build a Chroma collection name from '<tenant>_<chain>' pattern."""
+    if "_" in tenant_chain:
+        tenant_part, chain_part = tenant_chain.split("_", 1)
+    else:
+        tenant_part, chain_part = tenant_chain, "default"
+    name = f"{TENANT_COLLECTION_PREFIX}{_sanitize_fragment(tenant_part)}_{_sanitize_fragment(chain_part)}"
+    # Ensure length <= 63 and valid start/end
+    name = name[:63].strip("-_")
+    return name or "tenant_default"
 SERVICE_DETAILS_FILE = "base/service_details.json" 
 
 
@@ -393,7 +412,8 @@ def initialize_rag(
         # service_details_map_loaded останется пустым, что безопасно для дальнейшей работы
 
     # --- Сканирование и индексация данных тенантов ---
-    tenant_files = glob.glob(os.path.join(data_dir, "*.json"))
+    # --- ИЗМЕНЕНО: рекурсивно ищем все json в base/<tenant_id>/
+    tenant_files = discover_all_json_files(base_dir=data_dir)
     if not tenant_files:
         logger.warning(f"Не найдено JSON файлов тенантов в директории: {data_dir}")
         # Если файлов нет, возвращаем инициализированные клиент и эмбеддинги
@@ -406,7 +426,7 @@ def initialize_rag(
             logger.warning(f"Не удалось извлечь tenant_id из имени файла: {base_name}. Пропуск файла.")
             continue
 
-        collection_name = f"{TENANT_COLLECTION_PREFIX}{tenant_id}"
+        collection_name = build_collection_name(tenant_id)
         logger.info(f"--- Обработка тенанта: {tenant_id} (Коллекция: {collection_name}) ---")
 
         # 1. Загружаем базовые данные (услуги/сотрудники) из base/
@@ -504,7 +524,7 @@ def reindex_tenant_specific_data(
         logger.error(f"Chroma клиент или объект эмбеддингов не предоставлены для переиндексации тенанта {tenant_id}.")
         return False
 
-    collection_name = f"{TENANT_COLLECTION_PREFIX}{tenant_id}"
+    collection_name = build_collection_name(tenant_id)
     tenant_file_path = os.path.join(base_data_dir, f"{tenant_id}.json")
 
     if not os.path.exists(tenant_file_path):

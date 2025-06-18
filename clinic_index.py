@@ -79,6 +79,8 @@ def normalize_text(text: Optional[str], keep_spaces: bool = False, sort_words: b
 
 TENANT_INDEXES: Dict[str, Dict[str, Dict[str, str]]] = {}
 
+
+
 ENTITY_KEYS = [
     # (name_key, id_key, keep_spaces_flag, sort_words_flag)
     ("serviceName", "serviceId", True, False),
@@ -282,6 +284,7 @@ def _select_best_id_from_multiple_matches(
 
 
 def get_id_by_name(tenant_id: str, entity: str, name: str) -> Optional[str]:
+
     """
     Получить id по имени для сущности (service, employee, filial, category) и tenant_id.
     Использует normalize_text с гарантированной стабильностью результата.

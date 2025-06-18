@@ -285,7 +285,10 @@ async def ask_assistant(
     user_id_for_crm_visit_history = request.user_id 
     reset = request.reset_session
     tenant_id = request.tenant_id
-    chain_id = request.chain_id 
+    chain_id = request.chain_id
+    # --- Объединяем tenant_id и chain_id в единый идентификатор, совпадающий с именем JSON-файла ---
+    if chain_id:  # chain_id может быть None для старых клиентов
+        tenant_id = f"{tenant_id}_{chain_id}"
 
     if not tenant_id:
         logger.error(f"Получен запрос без tenant_id.")
