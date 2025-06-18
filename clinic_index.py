@@ -112,7 +112,11 @@ def build_indexes_for_tenant(tenant_id: str, raw_data: List[Dict[str, Any]]):
         # Многозначный индекс (новый)
         name_to_ids = {}
         id_to_name = {}
+        # Безопасно пропускаем элементы, которые не являются словарями (например, случайные строки)
         for item in raw_data:
+            if not isinstance(item, dict):
+                logger.debug(f"Tenant '{tenant_id}': пропущен элемент не-словарь в raw_data: {item!r}")
+                continue
             name = item.get(name_key)
             id_ = item.get(id_key)
             if name and id_:
@@ -164,6 +168,9 @@ def build_indexes_for_tenant(tenant_id: str, raw_data: List[Dict[str, Any]]):
     
     serviceid_to_categoryid = {}
     for item in raw_data:
+        if not isinstance(item, dict):
+            logger.debug(f"Tenant '{tenant_id}': пропущен элемент не-словарь при построении service->category: {item!r}")
+            continue
         service_id = item.get("serviceId")
         category_id = item.get("categoryId")
         if service_id and category_id:

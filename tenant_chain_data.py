@@ -104,6 +104,15 @@ def download_chain_data(tenant_id: str, chain_id: str, *, api_token: Optional[st
 
     while True:
         items = _request_page(chain_id, page, page_size, api_token)
+        # Приводим ответ к списку словарей и фильтруем мусор
+        if isinstance(items, dict):
+            items = [items]
+        if not isinstance(items, list):
+            logger.warning("Некорректный тип данных страницы %s: %s. Пропуск.", page, type(items))
+            items = []
+        else:
+            # оставляем только словари
+            items = [it for it in items if isinstance(it, dict)]
         if items:
             logger.info("[Tenant %s / Chain %s] Загружена страница %s, элементов: %s", tenant_id, chain_id, page, len(items))
         if not items:
@@ -127,7 +136,57 @@ def download_chain_data(tenant_id: str, chain_id: str, *, api_token: Optional[st
     except Exception as exc:
         logger.error("Не удалось записать файл %s: %s", file_path, exc, exc_info=True)
 
+    # --- Новое: пробуем сразу переиндексировать данные для этого tenant_chain ---
+    _trigger_reindex(f"{tenant_id}_{chain_id}", all_items)
+
     return file_path
+
+
+
+
+def _trigger_reindex(tenant_chain: str, raw_data: List[dict]) -> None:
+    """Пытается запустить переиндексацию RAG для нового tenant_chain.
+
+    Работает в best-effort режиме: если необходимые объекты или функции недоступны
+    (например, функция вызвана в off-line скрипте без MatrixAI), просто логирует
+    предупреждение и продолжает работу.
+    """
+    try:
+        from rag_setup import reindex_tenant_specific_data
+        # Импортируем только если matrixai уже инициализировал объекты
+        import importlib
+        matrixai = importlib.import_module("matrixai")
+        chroma_client = getattr(matrixai, "CHROMA_CLIENT", None)
+        embeddings_obj = getattr(matrixai, "EMBEDDINGS_OBJECT", None)
+        bm25_map = getattr(matrixai, "BM25_RETRIEVERS_MAP", None)
+        docs_map = getattr(matrixai, "TENANT_DOCUMENTS_MAP", None)
+        raw_map = getattr(matrixai, "TENANT_RAW_DATA_MAP", None)
+        service_details_map = getattr(matrixai, "SERVICE_DETAILS_MAP", {})
+        if None in (chroma_client, embeddings_obj, bm25_map, docs_map, raw_map):
+            logger.debug("Переиндексация пропущена: объекты RAG ещё не инициализированы.")
+            return
+        ok = reindex_tenant_specific_data(
+            tenant_id=tenant_chain,
+            chroma_client=chroma_client,
+            embeddings_object=embeddings_obj,
+            bm25_retrievers_map=bm25_map,
+            tenant_documents_map=docs_map,
+            tenant_raw_data_map=raw_map,
+            service_details_map=service_details_map,
+            base_data_dir=BASE_STORAGE_DIR,
+            chunk_size=1000,
+            chunk_overlap=200,
+            search_k=5,
+        )
+        if ok:
+            logger.info("Переиндексация RAG выполнена для %s", tenant_chain)
+        else:
+            logger.warning("Не удалось переиндексировать данные RAG для %s", tenant_chain)
+    except ModuleNotFoundError:
+        # rag_setup или matrixai не найден – например, запускаем утилиту отдельно
+        logger.debug("Переиндексация не выполнена: rag_setup/matrixai недоступны.")
+    except Exception as exc:
+        logger.error("Ошибка при попытке переиндексации %s: %s", tenant_chain, exc, exc_info=True)
 
 
 def discover_all_json_files(base_dir: str = BASE_STORAGE_DIR) -> List[str]:
