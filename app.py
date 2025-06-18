@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List, Union
 import datetime
 import base64
-from fastapi import FastAPI, HTTPException, Depends, Request, File, UploadFile
+from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
