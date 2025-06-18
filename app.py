@@ -110,7 +110,7 @@ class MessageRequest(BaseModel):
     tenant_id: str
     chain_id: Optional[str] = None
     phone_number: Optional[str] = None
-    client_api_token: Optional[str] = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJJZCI6ImUwOTA0YWU2LWQ4NzMtNDA5MS1iNjFjLTQyODlhYTI3ZjY2ZSIsIk5hbWUiOiJhZG1pbiIsIlN1cm5hbWUiOiJhZG1pbiIsIlJvbGVOYW1lIjoi0JDQtNC80LjQvdC40YHRgtGA0LDRgtC-0YAiLCJFbWFpbCI6ImhhbGFsb2xzdW5AbWFpbC5jb20iLCJUZW5hbnRJZCI6Im1lZHl1bWVkLjIwMjMtMDQtMjQiLCJSb2xlSWQiOiJyb2xlMiIsIlBob3RvVXJsIjoiaHR0cHM6Ly9jZG4ubWF0cml4Y3JtLnJ1L21lZHl1bWVkLjIwMjMtMDQtMjQvOTFhMGZhYzAtYmQ1Zi00M2RkLThmNTAtNTc5YmI0NjEwZGUyLmpwZWciLCJDaXR5SWQiOiIyIiwiZXhwIjoxNzg3MTI4MDY4LCJpc3MiOiJodHRwczovL2xvY2FsaG9zdDo3MDk1IiwiYXVkIjoiaHR0cHM6Ly9sb2NhbGhvc3Q6NzA5NSJ9.v9fQ_6Fepbov-BYZIg5RgcTluQVgWZSaDDK71OIsOjE"
+    client_api_token: Optional[str] = None  
     images: Optional[List[ImageData]] = Field(default=None, description="Список изображений для мультимодальной обработки")
 class MessageResponse(BaseModel):
     response: str
@@ -276,12 +276,31 @@ async def read_root(request: Request):
     logger.info("Запрос корневой страницы (Admin+Chat)")
     return templates.TemplateResponse("index.html", {"request": request})
 
+from tenant_chain_data import download_chain_data
+
 @app.post("/ask", response_model=DebouncedMessageResponse, tags=["assistant"])
 async def ask_assistant(
     request: MessageRequest,
+    raw_request: Request,
     agent_dependency: Runnable = Depends(get_agent)
 ):
     
+    # --- Extract Bearer token from Authorization header
+    auth_header = raw_request.headers.get("authorization", "")
+    bearer_token: Optional[str] = None
+    if auth_header.lower().startswith("bearer "):
+        bearer_token = auth_header[7:].strip()
+    # Fallback: use token from request body if header absent/empty
+    if not bearer_token:
+        bearer_token = request.client_api_token
+
+    # Ensure latest chain data is cached (download if needed)
+    try:
+        if request.chain_id:
+            download_chain_data(request.tenant_id, request.chain_id, api_token=bearer_token)
+    except Exception as e:
+        logger.error(f"download_chain_data failed: {e}")
+
     user_id_for_crm_visit_history = request.user_id 
     reset = request.reset_session
     tenant_id = request.tenant_id
@@ -437,7 +456,7 @@ async def ask_assistant(
 
         client_context_str = await get_client_context_for_agent(
             phone_number=request.phone_number, 
-            client_api_token=request.client_api_token,
+            client_api_token=bearer_token,
             user_id_for_crm_history=user_id_for_crm_visit_history, 
             visit_history_display_limit=15,
             visit_history_analysis_limit=100,
@@ -471,7 +490,7 @@ async def ask_assistant(
                     "user_id": user_id_for_agent_chat_history,
                     "tenant_id": tenant_id,
                     "chain_id": chain_id,
-                    "client_api_token": request.client_api_token,
+                    "client_api_token": bearer_token,
                     "phone_number": request.phone_number
                  }
             }

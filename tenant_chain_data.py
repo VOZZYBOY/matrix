@@ -33,17 +33,13 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-BASE_STORAGE_DIR = "base"  # Root directory where tenant folders live
+BASE_STORAGE_DIR = "base"  
 DEFAULT_PAGE_SIZE = int(os.getenv("MATRIXCRM_PAGE_SIZE", "200"))
-DEFAULT_TIMEOUT = int(os.getenv("MATRIXCRM_TIMEOUT", "30"))
+DEFAULT_TIMEOUT = int(os.getenv("MATRIXCRM_TIMEOUT", "600"))  # 10 minutes default
 BASE_URL = os.getenv("MATRIXCRM_BASE_URL", "https://back.matrixcrm.ru")
-
-# Concrete endpoint (without query parameters)
 _ENDPOINT = f"{BASE_URL.rstrip('/')}/api/v1/AI/servicesByFilters"
 
-
 def _ensure_tenant_dir(tenant_id: str) -> str:
-    """Create `<BASE_STORAGE_DIR>/<tenant_id>` if absent and return its absolute path."""
     tenant_dir = os.path.join(BASE_STORAGE_DIR, tenant_id)
     if not os.path.isdir(tenant_dir):
         os.makedirs(tenant_dir, exist_ok=True)
@@ -54,7 +50,7 @@ def _ensure_tenant_dir(tenant_id: str) -> str:
 def build_file_path(tenant_id: str, chain_id: str) -> str:
     """Return the expected JSON file path for given tenant/chain."""
     tenant_dir = _ensure_tenant_dir(tenant_id)
-    return os.path.join(tenant_dir, f"{tenant_id}{chain_id}.json")
+    return os.path.join(tenant_dir, f"{tenant_id}_{chain_id}.json")
 
 
 def _request_page(chain_id: str, page: int, page_size: int, api_token: Optional[str]) -> List[dict]:
@@ -71,14 +67,14 @@ def _request_page(chain_id: str, page: int, page_size: int, api_token: Optional[
         r = requests.get(_ENDPOINT, params=params, headers=headers, timeout=DEFAULT_TIMEOUT)
         r.raise_for_status()
         data = r.json()
-        # Some backends wrap payload; try to unwrap common keys
         if isinstance(data, dict):
-            # E.g. {"items": [...], "hasMore": true}
             if "items" in data:
                 return data["items"]  # ignore hasMore, loop will discover emptiness
-            # E.g. {"data": [...]} wrapper
+            # Other common wrappers
             if "data" in data:
                 return data["data"]
+            if "services" in data:
+                return data["services"]
             # If dict but not wrapped list → treat as single item
             return [data]
         if isinstance(data, list):
@@ -108,6 +104,8 @@ def download_chain_data(tenant_id: str, chain_id: str, *, api_token: Optional[st
 
     while True:
         items = _request_page(chain_id, page, page_size, api_token)
+        if items:
+            logger.info("[Tenant %s / Chain %s] Загружена страница %s, элементов: %s", tenant_id, chain_id, page, len(items))
         if not items:
             break
         all_items.extend(items)
@@ -115,15 +113,13 @@ def download_chain_data(tenant_id: str, chain_id: str, *, api_token: Optional[st
             "Получена страница %s (%s элементов) для chain_id=%s", page, len(items), chain_id
         )
         if len(items) < page_size:
-            # последняя страница достигнута
             break
         page += 1
 
     if not all_items:
         logger.warning("[Tenant %s / Chain %s] Получен пустой список услуг. Файл не будет создан.", tenant_id, chain_id)
-        return file_path  # Return path (non-existent) for consistency
+        return file_path  
 
-    # Save
     try:
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(all_items, f, ensure_ascii=False, indent=2)
