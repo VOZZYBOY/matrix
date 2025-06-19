@@ -1276,27 +1276,54 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
 
     # --- Инициализация RAG компонентов для тенанта (как и раньше) ---
     from rag_setup import build_collection_name  # импорт внутри функции, чтобы избежать циклов
+    from chromadb.errors import InvalidCollectionException
     bm25_retriever = BM25_RETRIEVERS_MAP.get(tenant_id)
     collection_name = build_collection_name(tenant_id)
+    embeddings_wrapper = ChromaGigaEmbeddingsWrapper(EMBEDDINGS_GIGA)
     try:
-        embeddings_wrapper = ChromaGigaEmbeddingsWrapper(EMBEDDINGS_GIGA)
         chroma_collection = CHROMA_CLIENT.get_collection(
             name=collection_name,
             embedding_function=embeddings_wrapper
         )
-        chroma_vectorstore = Chroma(
-            client=CHROMA_CLIENT,
-            collection_name=collection_name,
-            embedding_function=embeddings_wrapper,
+    except InvalidCollectionException:
+        # Коллекция ещё не создана для данного тенанта – создаём её «на лету»
+        logger.warning(f"Коллекция '{collection_name}' для тенанта {tenant_id} отсутствует. Запускаем переиндексацию...")
+        success = rag_setup.reindex_tenant_specific_data(
+            tenant_id=tenant_id,
+            chroma_client=CHROMA_CLIENT,
+            embeddings_object=EMBEDDINGS_GIGA,
+            bm25_retrievers_map=BM25_RETRIEVERS_MAP,
+            tenant_documents_map=TENANT_DOCUMENTS_MAP,
+            tenant_raw_data_map=TENANT_RAW_DATA_MAP,
+            service_details_map=SERVICE_DETAILS_MAP_GLOBAL,
+            base_data_dir=os.getenv("BASE_DATA_DIR", "base"),
+            chunk_size=int(os.getenv("CHUNK_SIZE", 1000)),
+            chunk_overlap=int(os.getenv("CHUNK_OVERLAP", 200)),
+            search_k=search_k_global
         )
-        chroma_retriever = chroma_vectorstore.as_retriever(search_kwargs={"k": search_k_global})
-        logger.info(f"Chroma ретривер для коллекции '{collection_name}' (tenant: {tenant_id}) получен.")
-    except ValueError as e: 
-        logger.error(f"Ошибка ChromaDB при получении коллекции или создании ретривера '{collection_name}' для тенанта {tenant_id}: {e}", exc_info=True)
+        if not success:
+            logger.error(f"Не удалось создать коллекцию '{collection_name}' для тенанта {tenant_id}.")
+            return f"Ошибка: Не удалось подготовить базу знаний для филиала '{tenant_id}'."
+        logger.info(f"Коллекция '{collection_name}' успешно создана. Повторяем получение...")
+        chroma_collection = CHROMA_CLIENT.get_collection(
+            name=collection_name,
+            embedding_function=embeddings_wrapper
+        )
+        bm25_retriever = BM25_RETRIEVERS_MAP.get(tenant_id)  # Обновляем BM25 после переиндексации
+    except ValueError as e:
+        logger.error(f"Ошибка ChromaDB при получении коллекции '{collection_name}' для тенанта {tenant_id}: {e}", exc_info=True)
         return f"Ошибка: Проблема совместимости с базой знаний ChromaDB для филиала '{tenant_id}'. {e}"
     except Exception as e:
-        logger.error(f"Не удалось получить Chroma коллекцию или ретривер '{collection_name}' для тенанта {tenant_id}: {e}", exc_info=True)
+        logger.error(f"Не удалось получить или создать Chroma коллекцию '{collection_name}' для тенанта {tenant_id}: {e}", exc_info=True)
         return f"Ошибка: Не удалось получить доступ к базе знаний для филиала '{tenant_id}'."
+    
+    chroma_vectorstore = Chroma(
+        client=CHROMA_CLIENT,
+        collection_name=collection_name,
+        embedding_function=embeddings_wrapper,
+    )
+    chroma_retriever = chroma_vectorstore.as_retriever(search_kwargs={"k": search_k_global})
+    logger.info(f"Chroma ретривер для коллекции '{collection_name}' (tenant: {tenant_id}) готов.")
 
     if not bm25_retriever:
         logger.warning(f"BM25 ретривер для тенанта {tenant_id} не найден. Будет создан EnsembleRetriever только с векторным поиском.")

@@ -18,3 +18,4 @@ aiohttp == 3.11.11
 fuzzywuzzy == 0.18.0
 python-levenshtein == 0.25.1
 langdetect == 1.0.9
+pytest == 8.2.0

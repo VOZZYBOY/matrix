@@ -71,10 +71,28 @@ def load_service_details(file_path: str = SERVICE_DETAILS_FILE) -> Dict[Tuple[st
                 logger.warning(f"Пропуск элемента не-словаря в файле деталей услуг: {service_info}")
                 continue
 
-            service_name = service_info.get("service_name")
-            category_name = service_info.get("category")
-            indications = service_info.get("indications")
-            contraindications = service_info.get("contraindications")
+           
+            service_name = (
+                service_info.get("service_name")
+                or service_info.get("serviceName")
+                or service_info.get("service")
+                or service_info.get("serviceTitle")
+            )
+            category_name = (
+                service_info.get("category")
+                or service_info.get("category_name")
+                or service_info.get("categoryName")
+            )
+            indications = (
+                service_info.get("indications")
+                or service_info.get("indicationList")
+                or service_info.get("indicationsList")
+            )
+            contraindications = (
+                service_info.get("contraindications")
+                or service_info.get("contraindicationList")
+                or service_info.get("contraindicationsList")
+            )
 
             if not service_name or not category_name:
                 logger.warning(f"Пропуск услуги без имени или категории в файле деталей: {service_info}")
@@ -155,11 +173,11 @@ def preprocess_for_rag_v2(data: List[Dict[str, Any]], service_details_map: Dict[
     documents = []
     # Документы по услугам
     for srv_id, info in services_data.items():
-        # Добавляем только если есть осмысленное имя и описание
-        if not info.get("name") or info.get("name") == "Без названия" or \
-           not info.get("description") or info["description"].lower() in ('', 'null', 'нет описания'):
+        # Добавляем, если есть осмысленное название услуги; описание может отсутствовать
+        if not info.get("name") or info.get("name") == "Без названия":
             continue
-        text_content = f"Услуга: {info['name']}\nКатегория: {info['category']}\nОписание: {info['description']}"
+        desc_text = info.get("description") or "Описание отсутствует"
+        text_content = f"Услуга: {info['name']}\nКатегория: {info['category']}\nОписание: {desc_text}"
         
         # --- ДОБАВЛЕНО: Попытка обогатить данными из service_details_map ---
         norm_s_name_lookup = normalize_text(info.get("original_service_name"), keep_spaces=True)
@@ -556,6 +574,28 @@ def reindex_tenant_specific_data(
     if not all_tenant_docs:
         logger.warning(f"Нет документов (base + clinic_info) для переиндексации для тенанта {tenant_id}. Возможно, будут удалены старые данные.")
         # Если документов нет, мы должны очистить старые данные этого тенанта из карт
+        collection_name = build_collection_name(tenant_id)
+
+        # 1. Удаляем старую коллекцию (если была) для чистоты
+        try:
+            chroma_client.delete_collection(collection_name)
+        except Exception as e:
+            logger.info(f"Попытка удаления коллекции '{collection_name}' для тенанта {tenant_id} (возможно, ее не было): {e}")
+
+        # 2. Создаем пустую коллекцию-заглушку, чтобы дальнейший get_collection не бросал исключение
+        try:
+            chroma_client.create_collection(name=collection_name, embedding_function=embeddings_object)
+            logger.info(f"Создана пустая коллекция-заглушка '{collection_name}' для тенанта {tenant_id}.")
+        except Exception as e:
+            logger.warning(f"Не удалось создать пустую коллекцию '{collection_name}' для тенанта {tenant_id}: {e}")
+
+        # 3. Убираем старые данные из карт
+        bm25_retrievers_map.pop(tenant_id, None)
+        tenant_documents_map.pop(tenant_id, None)
+        tenant_raw_data_map.pop(tenant_id, None)
+
+        # Возвращаем True: состояние консистентно (пустая коллекция готова)
+        return True
         # и удалить его коллекцию из Chroma
         tenant_documents_map.pop(tenant_id, None)
         tenant_raw_data_map.pop(tenant_id, None)

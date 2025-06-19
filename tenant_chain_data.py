@@ -39,6 +39,27 @@ DEFAULT_TIMEOUT = int(os.getenv("MATRIXCRM_TIMEOUT", "600"))  # 10 minutes defau
 BASE_URL = os.getenv("MATRIXCRM_BASE_URL", "https://back.matrixcrm.ru")
 _ENDPOINT = f"{BASE_URL.rstrip('/')}/api/v1/AI/servicesByFilters"
 
+# --- Вспомогательная функция нормализации ---
+from typing import Any
+
+def _normalize_items(obj: Any) -> List[dict]:
+    """Преобразует произвольный JSON-объект, полученный от API, к списку словарей.
+    Возвращает пустой список, если в объекте нет ни одного валидного элемента-словаря."""
+    # Если это сразу список – фильтруем только словари
+    if isinstance(obj, list):
+        return [it for it in obj if isinstance(it, dict)]
+
+    # Если это словарь – ищем типичные ключи-обёртки
+    if isinstance(obj, dict):
+        for key in ("items", "data", "services"):
+            if key in obj and isinstance(obj[key], list):
+                return [it for it in obj[key] if isinstance(it, dict)]
+        # Возможно, это одиночный элемент-словарь
+        return [obj]
+
+    # Любой другой тип не поддерживается
+    return []
+
 def _ensure_tenant_dir(tenant_id: str) -> str:
     tenant_dir = os.path.join(BASE_STORAGE_DIR, tenant_id)
     if not os.path.isdir(tenant_dir):
@@ -103,26 +124,20 @@ def download_chain_data(tenant_id: str, chain_id: str, *, api_token: Optional[st
     page_size = DEFAULT_PAGE_SIZE
 
     while True:
-        items = _request_page(chain_id, page, page_size, api_token)
-        # Приводим ответ к списку словарей и фильтруем мусор
-        if isinstance(items, dict):
-            items = [items]
-        if not isinstance(items, list):
-            logger.warning("Некорректный тип данных страницы %s: %s. Пропуск.", page, type(items))
-            items = []
-        else:
-            # оставляем только словари
-            items = [it for it in items if isinstance(it, dict)]
+        # --- Запрос страницы и нормализация ---
+        items_raw = _request_page(chain_id, page, page_size, api_token)
+        items = _normalize_items(items_raw)
+
         if items:
             logger.info("[Tenant %s / Chain %s] Загружена страница %s, элементов: %s", tenant_id, chain_id, page, len(items))
-        if not items:
+            all_items.extend(items)
+        else:
+            logger.warning("Страница %s не содержит валидных элементов (исходный тип: %s)", page, type(items_raw))
+
+        # Если нет новых элементов или фактический размер страницы меньше запрошенного — завершаем цикл
+        if not items or len(items) < page_size:
             break
-        all_items.extend(items)
-        logger.debug(
-            "Получена страница %s (%s элементов) для chain_id=%s", page, len(items), chain_id
-        )
-        if len(items) < page_size:
-            break
+
         page += 1
 
     if not all_items:

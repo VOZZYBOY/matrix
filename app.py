@@ -732,4 +732,4 @@ if __name__ == "__main__":
     app_port = int(os.getenv("APP_PORT", 8001))
     log_level = os.getenv("APP_LOG_LEVEL", "info").lower()
     logger.info(f"Starting FastAPI server via uvicorn on {app_host}:{app_port}")
-    uvicorn.run("app:app", host=app_host, port=app_port, log_level=log_level, reload=True)
+    uvicorn.run("app:app", host=app_host, port=app_port, log_level=log_level, reload=False)
