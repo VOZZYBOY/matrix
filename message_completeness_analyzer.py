@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
 import time
+import re
 
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import BaseMessage, messages_from_dict
@@ -127,6 +128,15 @@ class MessageCompletenessAnalyzer:
 - COMPLETE: 0 секунд (отвечаем сразу)
 - INCOMPLETE: 5 секунд (ждем продолжения)
 
+КРАТКИЕ ПОДТВЕРЖДЕНИЯ:
+Сообщения, состоящие ТОЛЬКО из коротких слов подтверждения или одиночных эмодзи ("да", "ок", "супер", "👍" и др.), полученные менее чем через 15 секунд после ответа ассистента, считаются INCOMPLETE и не требуют ответа.
+
+ПРИМЕРЫ ПОДТВЕРЖДЕНИЙ (INCOMPLETE):
+❌ "да"
+❌ "ок"
+❌ "супер"
+❌ "👍"
+
 """
 
     def _create_cache_key(self, context: MessageContext) -> str:
@@ -199,10 +209,9 @@ class MessageCompletenessAnalyzer:
 Длина: {len(context.current_message)} символов
 Слов: {len(context.current_message.split())}"""
 
-        # Добавляем историю чата для контекста
         if context.previous_messages:
             history_text = "\n".join([
-                msg for msg in context.previous_messages[-5:]  # Последние 5 сообщений
+                msg for msg in context.previous_messages[-5:]  
             ])
             request += f"""
 
@@ -230,7 +239,16 @@ class MessageCompletenessAnalyzer:
             return CompletenessStatus.INCOMPLETE
             
         
-        if len(message) < 2:
+        # Проверяем распространённые слова-подтверждения (acknowledgements)
+        normalized = re.sub(r"[^\w\s]", "", message.lower()).strip()
+        ack_words = {
+            "да", "ок", "okay", "окей", "супер", "хорошо",
+            "понятно", "yep", "yeah", "sure", "got it", "roger"
+        }
+        if normalized in ack_words:
+            return CompletenessStatus.INCOMPLETE
+
+        if len(message) <= 2:
             return CompletenessStatus.INCOMPLETE
             
         
