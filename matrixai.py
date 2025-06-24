@@ -1274,6 +1274,9 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         question = raw_input or ""
         logger.info(f"Получен текстовый ввод: {question[:100]}...")
     
+    # Получаем историю сообщений из input_dict
+    history_messages: List[BaseMessage] = input_dict.get("history", [])
+    
     # Проверка на техническое сообщение от бэкэнда (подтверждение администратора)
     if question.strip() == "Давай(техническое сообщение,от бэкэнда)":
         logger.info("Получено техническое подтверждение от администратора.")
@@ -1309,7 +1312,6 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         else:
             return "Техническое подтверждение получено, но история сообщений пуста или не содержит сообщений ассистента."
     
-    history_messages: List[BaseMessage] = input_dict.get("history", [])
     configurable = config.get("configurable", {})
     composite_session_id = configurable.get("session_id")
 
