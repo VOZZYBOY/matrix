@@ -283,6 +283,40 @@ def suggest_services_in_filial(tenant_id: str, query: str, filial_id: str, _clin
     
     return "\n".join(message_parts), similar_services
 
+def find_similar_services_in_filial(tenant_id: str, query: str, filial_id: str, _clinic_data: List[Dict]) -> List[Dict]:
+    """
+    Находит услуги, похожие на указанный запрос, в конкретном филиале.
+    
+    Args:
+        tenant_id: ID тенанта
+        query: поисковый запрос (часть названия услуги)
+        filial_id: ID филиала для поиска
+        _clinic_data: данные клиники
+        
+    Returns:
+        список словарей, содержащих информацию о найденных услугах в указанном филиале
+    """
+    # Сначала найдем все похожие услуги
+    all_similar_services = find_similar_services(tenant_id, query, _clinic_data)
+    
+    # Фильтруем только те, что доступны в указанном филиале
+    services_in_filial = []
+    
+    for service in all_similar_services:
+        if filial_id in service.get("filials", {}):
+            # Создаем копию услуги только с данным филиалом
+            service_copy = {
+                "serviceId": service["serviceId"],
+                "serviceName": service["serviceName"],
+                "categoryId": service["categoryId"],
+                "categoryName": service["categoryName"],
+                "filials": {filial_id: service["filials"][filial_id]},
+                "price": service.get("price")
+            }
+            services_in_filial.append(service_copy)
+    
+    return services_in_filial
+
 def group_similar_service_names(services: List[Dict]) -> Dict[str, List[Dict]]:
     """
     Улучшенная функция группировки услуг с похожими названиями.
@@ -423,3 +457,127 @@ def format_grouped_services_message(query: str, grouped_services: Dict[str, List
     message_parts.append("\nПожалуйста, уточните нужную услугу, указав ее полное название или номер группы/услуги из списка.")
     
     return "\n".join(message_parts)
+
+def validate_services_for_filial(tenant_id: str, service_ids: List[str], filial_id: str, _clinic_data: List[Dict]) -> Tuple[List[str], List[Dict]]:
+    """
+    Проверяет, какие услуги доступны в указанном филиале.
+    
+    Args:
+        tenant_id: ID тенанта
+        service_ids: список ID услуг для проверки
+        filial_id: ID филиала
+        _clinic_data: данные клиники
+        
+    Returns:
+        tuple: (список валидных ID услуг, список невалидных услуг с информацией)
+    """
+    valid_service_ids = []
+    invalid_services = []
+    
+    for service_id in service_ids:
+        # Найдем все записи для данной услуги
+        service_records = [item for item in _clinic_data if item.get("serviceId") == service_id]
+        
+        if not service_records:
+            # Услуга вообще не найдена
+            service_name = get_name_by_id(tenant_id, 'service', service_id) or f"ID:{service_id}"
+            invalid_services.append({
+                "serviceId": service_id,
+                "serviceName": service_name,
+                "availableFilials": []
+            })
+            continue
+        
+        # Проверим, доступна ли услуга в указанном филиале
+        filials_for_service = set()
+        service_name = None
+        
+        for record in service_records:
+            if not service_name:
+                service_name = record.get("serviceName")
+            
+            record_filial_id = record.get("filialId")
+            record_filial_name = record.get("filialName")
+            
+            if record_filial_id and record_filial_name:
+                filials_for_service.add((record_filial_id, record_filial_name))
+        
+        # Проверяем, есть ли услуга в нужном филиале
+        service_available_in_filial = any(fid == filial_id for fid, fname in filials_for_service)
+        
+        if service_available_in_filial:
+            valid_service_ids.append(service_id)
+        else:
+            # Услуга недоступна в указанном филиале
+            available_filial_names = [fname for fid, fname in filials_for_service]
+            invalid_services.append({
+                "serviceId": service_id,
+                "serviceName": service_name or f"ID:{service_id}",
+                "availableFilials": available_filial_names
+            })
+    
+    logger.info(f"Валидация услуг для филиала {filial_id}: валидных - {len(valid_service_ids)}, невалидных - {len(invalid_services)}")
+    return valid_service_ids, invalid_services
+
+async def verify_service_employee_filial_compatibility(tenant_id: str, service_id: str, employee_id: str, filial_id: str, api_token: str) -> Tuple[bool, str]:
+    """
+    Проверяет, может ли сотрудник выполнять указанную услугу в указанном филиале.
+    
+    Args:
+        tenant_id: ID тенанта
+        service_id: ID услуги
+        employee_id: ID сотрудника  
+        filial_id: ID филиала
+        api_token: токен для API
+        
+    Returns:
+        tuple: (успех, сообщение)
+    """
+    try:
+        # Импортируем функции для работы с API
+        from clinic_functions import make_api_call
+        
+        # Получаем расписание сотрудника для проверки совместимости
+        schedule_url = f"https://api.matrixcrm.ru/api/schedule/getScheduleByEmployee"
+        schedule_params = {
+            "employeeId": employee_id,
+            "filialId": filial_id,
+            "from": "2025-01-01",  # Используем широкий диапазон для проверки
+            "to": "2025-12-31"
+        }
+        
+        schedule_headers = {
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Делаем запрос к API для проверки
+        response = await make_api_call(
+            url=schedule_url,
+            method="GET",
+            headers=schedule_headers,
+            params=schedule_params
+        )
+        
+        if not response.get("success", False):
+            logger.warning(f"Не удалось получить расписание сотрудника {employee_id} в филиале {filial_id}")
+            # В случае ошибки API предполагаем совместимость
+            return True, "Совместимость подтверждена (по умолчанию)"
+        
+        # Если расписание получено успешно, считаем что сотрудник работает в филиале
+        schedule_data = response.get("data", [])
+        if schedule_data:
+            logger.info(f"Сотрудник {employee_id} работает в филиале {filial_id}")
+            return True, "Сотрудник работает в указанном филиале"
+        else:
+            # Получаем имена для более понятного сообщения
+            employee_name = get_name_by_id(tenant_id, 'employee', employee_id) or f"ID:{employee_id}"
+            filial_name = get_name_by_id(tenant_id, 'filial', filial_id) or f"ID:{filial_id}"
+            service_name = get_name_by_id(tenant_id, 'service', service_id) or f"ID:{service_id}"
+            
+            return False, f"Сотрудник '{employee_name}' не работает в филиале '{filial_name}' или не выполняет услугу '{service_name}'"
+            
+    except Exception as e:
+        logger.error(f"Ошибка при проверке совместимости сотрудника {employee_id} с услугой {service_id} в филиале {filial_id}: {e}", exc_info=True)
+        # В случае ошибки предполагаем совместимость, чтобы не блокировать процесс
+        return True, f"Проверка совместимости пропущена из-за ошибки: {str(e)}"

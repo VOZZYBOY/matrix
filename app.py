@@ -303,25 +303,28 @@ async def ask_assistant(
 
     user_id_for_crm_visit_history = request.user_id 
     reset = request.reset_session
-    tenant_id = request.tenant_id
+    base_tenant_id = request.tenant_id  # Сохраняем базовый tenant_id для API
     chain_id = request.chain_id
    
+    # Формируем комбинированный tenant_id для локального поиска данных
     if chain_id:  
-        tenant_id = f"{tenant_id}_{chain_id}"
+        combined_tenant_id = f"{base_tenant_id}_{chain_id}"
+    else:
+        combined_tenant_id = base_tenant_id
 
-    if not tenant_id:
+    if not base_tenant_id:
         logger.error(f"Получен запрос без tenant_id.")
         raise HTTPException(status_code=400, detail="Параметр 'tenant_id' обязателен.")
 
   
-    base_user_id = f"{tenant_id}_{request.phone_number}" if request.phone_number else f"{tenant_id}_{generate_user_id()}"
+    base_user_id = f"{combined_tenant_id}_{request.phone_number}" if request.phone_number else f"{combined_tenant_id}_{generate_user_id()}"
     
    
     session_counter = 1  
     if redis_clear_history:
         try:
             from redis_history import get_current_session_number
-            session_counter = get_current_session_number(tenant_id, base_user_id)
+            session_counter = get_current_session_number(combined_tenant_id, base_user_id)
         except Exception as e:
             logger.warning(f"Не удалось получить счетчик сессий: {e}")
             session_counter = 1
@@ -329,18 +332,18 @@ async def ask_assistant(
    
     user_id_for_agent_chat_history = f"{base_user_id}_s{session_counter}"
     
-    logger.info(f"Получен запрос от tenant '{tenant_id}', НАШ user_chat_history_id '{user_id_for_agent_chat_history}' (оригинальный request.user_id: '{request.user_id}', phone '{request.phone_number}', session: {session_counter}): {request.message[:50]}... Reset: {reset}")
+    logger.info(f"Получен запрос от tenant '{combined_tenant_id}', НАШ user_chat_history_id '{user_id_for_agent_chat_history}' (оригинальный request.user_id: '{request.user_id}', phone '{request.phone_number}', session: {session_counter}): {request.message[:50]}... Reset: {reset}")
 
     if reset:
         if redis_clear_history:
            
-            cleared = redis_clear_history(tenant_id=tenant_id, user_id=user_id_for_agent_chat_history)
+            cleared = redis_clear_history(tenant_id=combined_tenant_id, user_id=user_id_for_agent_chat_history)
             
            
             try:
                 from matrixai import clear_accumulator
                 if clear_accumulator:
-                    clear_accumulator(f"{tenant_id}:{user_id_for_agent_chat_history}")
+                    clear_accumulator(f"{combined_tenant_id}:{user_id_for_agent_chat_history}")
                     logger.info(f"Очищен накопитель сообщений для {user_id_for_agent_chat_history}")
             except Exception as e:
                 logger.warning(f"Не удалось очистить накопитель сообщений: {e}")
@@ -348,14 +351,14 @@ async def ask_assistant(
            
             try:
                 from redis_history import get_next_session_number
-                new_session_counter = get_next_session_number(tenant_id, base_user_id)
+                new_session_counter = get_next_session_number(combined_tenant_id, base_user_id)
                 
                 user_id_for_agent_chat_history = f"{base_user_id}_s{new_session_counter}"
                 logger.info(f"Создана новая сессия {new_session_counter} для {base_user_id}")
             except Exception as e:
                 logger.error(f"Ошибка при инкременте счетчика сессий: {e}")
             
-            logger.info(f"Запрос на сброс сессии для tenant '{tenant_id}', user_id '{user_id_for_agent_chat_history}'. Сессия удалена: {cleared}")
+            logger.info(f"Запрос на сброс сессии для tenant '{combined_tenant_id}', user_id '{user_id_for_agent_chat_history}'. Сессия удалена: {cleared}")
             return DebouncedMessageResponse(
                 response="История чата была очищена. Начинаем новую сессию.", 
                 user_id=user_id_for_agent_chat_history,
@@ -363,7 +366,7 @@ async def ask_assistant(
                 is_complete=True
             )
         else:
-             logger.error(f"Функция redis_clear_history не доступна для tenant '{tenant_id}', user_id '{user_id_for_agent_chat_history}'")
+             logger.error(f"Функция redis_clear_history не доступна для tenant '{combined_tenant_id}', user_id '{user_id_for_agent_chat_history}'")
              return DebouncedMessageResponse(
                  response="Запрос на сброс сессии получен, но функция очистки истории в Redis недоступна. Сообщение не было обработано.", 
                  user_id=user_id_for_agent_chat_history,
@@ -373,7 +376,7 @@ async def ask_assistant(
 
     try:
         start_time = time.time()
-        composite_session_id = f"{tenant_id}:{user_id_for_agent_chat_history}"
+        composite_session_id = f"{combined_tenant_id}:{user_id_for_agent_chat_history}"
         logger.debug(f"Создан composite_session_id для истории чата ассистента: {composite_session_id}")
 
        
@@ -392,7 +395,7 @@ async def ask_assistant(
                 from message_completeness_analyzer import get_history_via_langchain
                 
               
-                previous_dialog_messages = get_history_via_langchain(tenant_id=tenant_id, user_id=user_id_for_agent_chat_history, limit=15)
+                previous_dialog_messages = get_history_via_langchain(tenant_id=combined_tenant_id, user_id=user_id_for_agent_chat_history, limit=15)
                 
                 
                 previous_dialog_messages = previous_dialog_messages[-7:] if len(previous_dialog_messages) > 7 else previous_dialog_messages
@@ -415,7 +418,7 @@ async def ask_assistant(
                 analysis_result, final_message = await analyze_user_message_completeness(
                     message=request.message,
                     user_id=user_id_for_agent_chat_history,
-                    tenant_id=tenant_id,
+                    tenant_id=combined_tenant_id,
                     previous_messages=previous_dialog_messages,
                     time_since_last=time_since_last_message
                 )
@@ -488,7 +491,7 @@ async def ask_assistant(
                 "configurable": {
                     "session_id": composite_session_id,
                     "user_id": user_id_for_agent_chat_history,
-                    "tenant_id": tenant_id,
+                    "tenant_id": base_tenant_id,  # Передаем базовый tenant_id для API
                     "chain_id": chain_id,
                     "client_api_token": bearer_token,
                     "phone_number": request.phone_number
@@ -496,7 +499,7 @@ async def ask_assistant(
             }
         )
         end_time = time.time()
-        logger.info(f"Агент ответил для tenant '{tenant_id}', user '{user_id_for_agent_chat_history}' за {end_time - start_time:.2f} сек.")
+        logger.info(f"Агент ответил для tenant '{combined_tenant_id}', user '{user_id_for_agent_chat_history}' за {end_time - start_time:.2f} сек.")
 
         if isinstance(response_data, str):
             response_text = response_data

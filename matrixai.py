@@ -593,14 +593,23 @@ async def get_free_slots_tool(**kwargs_from_llm) -> str:
         logger.error(f"Ошибка валидации аргументов для get_free_slots_tool: {e}. Аргументы: {kwargs_from_llm}", exc_info=True)
         return f"Ошибка: неверные или отсутствующие аргументы для получения слотов: {e}"
     
-    tenant_id_from_kwargs = validated_args.tenant_id
+    # Базовый tenant_id для API запросов
+    base_tenant_id = validated_args.tenant_id
     api_token_from_kwargs = validated_args.api_token
+    
+    # Получаем chain_id из kwargs (не из схемы Pydantic)
+    chain_id = kwargs_from_llm.get('chain_id')
+    
+    # Комбинированный tenant_id для поиска в локальных данных (с chain_id)
+    combined_tenant_id = f"{base_tenant_id}_{chain_id}" if chain_id else base_tenant_id
 
-    logger.info(f"get_free_slots - Retrieved from validated_args - tenant_id: {tenant_id_from_kwargs}")
+    logger.info(f"get_free_slots - Base tenant_id для API: {base_tenant_id}")
+    logger.info(f"get_free_slots - Chain ID: {chain_id}")
+    logger.info(f"get_free_slots - Combined tenant_id для локального поиска: {combined_tenant_id}")
     logger.info(f"get_free_slots - Retrieved from validated_args - api_token: {'******' if api_token_from_kwargs else None}")
 
-    if not tenant_id_from_kwargs:
-        logger.error(f"CRITICAL (get_free_slots): tenant_id (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
+    if not base_tenant_id:
+        logger.error(f"CRITICAL (get_free_slots): base_tenant_id (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
         return "Критическая ошибка: ID тенанта не был предоставлен системе для вызова get_free_slots_tool."
 
     if not api_token_from_kwargs: # Токен тоже важен
@@ -626,9 +635,9 @@ async def get_free_slots_tool(**kwargs_from_llm) -> str:
 
     # Преобразование имен в ID
     logger.info(f"[get_free_slots_tool] Попытка получить ID для employee: '{employee_name_from_llm}'")
-    employee_id = get_id_by_name(tenant_id_from_kwargs, 'employee', employee_name_from_llm)
+    employee_id = get_id_by_name(combined_tenant_id, 'employee', employee_name_from_llm)
     logger.info(f"[get_free_slots_tool] Попытка получить ID для filial: '{filial_name_from_llm}'")
-    filial_id = get_id_by_name(tenant_id_from_kwargs, 'filial', filial_name_from_llm)
+    filial_id = get_id_by_name(combined_tenant_id, 'filial', filial_name_from_llm)
     
     # Создаем переменные для отслеживания нечетких совпадений
     ambiguous_services = []
@@ -640,24 +649,24 @@ async def get_free_slots_tool(**kwargs_from_llm) -> str:
     if service_names_from_llm:
         for s_name in service_names_from_llm:
             logger.info(f"[get_free_slots_tool] Попытка получить ID для service: '{s_name}'")
-            s_id = get_id_by_name(tenant_id_from_kwargs, 'service', s_name)
+            s_id = get_id_by_name(combined_tenant_id, 'service', s_name)
             
             # Если ID не найден, ищем похожие услуги
             if not s_id:
                 # Сначала проверим, есть ли похожие услуги в указанном филиале
                 if filial_id:
                     message, similar_services = service_disambiguation.suggest_services_in_filial(
-                        tenant_id_from_kwargs, s_name, filial_id, TENANT_RAW_DATA_MAP.get(tenant_id_from_kwargs, [])
+                        combined_tenant_id, s_name, filial_id, TENANT_RAW_DATA_MAP.get(combined_tenant_id, [])
                     )
                     # Если в филиале нет похожих услуг, ищем везде
                     if not similar_services:
                         message, similar_services = service_disambiguation.suggest_services(
-                            tenant_id_from_kwargs, s_name, TENANT_RAW_DATA_MAP.get(tenant_id_from_kwargs, [])
+                            combined_tenant_id, s_name, TENANT_RAW_DATA_MAP.get(combined_tenant_id, [])
                         )
                 else:
                     # Если филиал не определен, ищем везде
                     message, similar_services = service_disambiguation.suggest_services(
-                        tenant_id_from_kwargs, s_name, TENANT_RAW_DATA_MAP.get(tenant_id_from_kwargs, [])
+                        combined_tenant_id, s_name, TENANT_RAW_DATA_MAP.get(combined_tenant_id, [])
                     )
                 
                 if similar_services and len(similar_services) <= 5:  # Ограничиваем количество предложений
@@ -698,38 +707,15 @@ async def get_free_slots_tool(**kwargs_from_llm) -> str:
         problematic_services = [s_name for s_name, s_id in zip(service_names_from_llm, service_ids) if not s_id]
         return f"Не удалось найти ID для следующих услуг: {', '.join(problematic_services)}"
 
-    # Проверяем совместимость услуг с филиалом
-    import service_disambiguation
-    valid_service_ids, invalid_services = service_disambiguation.validate_services_for_filial(
-        tenant_id_from_kwargs, [s_id for s_id in service_ids if s_id], filial_id, TENANT_RAW_DATA_MAP.get(tenant_id_from_kwargs, [])
-    )
-    
-    # Если есть несовместимые услуги
-    if invalid_services:
-        response_parts = ["Некоторые выбранные услуги недоступны в указанном филиале:"]
-        
-        for invalid_service in invalid_services:
-            service_name = invalid_service["serviceName"]
-            available_filials = invalid_service["availableFilials"]
-            
-            if available_filials:
-                response_parts.append(f"- Услуга '{service_name}' доступна в следующих филиалах: {', '.join(available_filials)}")
-            else:
-                response_parts.append(f"- Услуга '{service_name}' не найдена ни в одном филиале")
-        
-        response_parts.append("\nПожалуйста, выберите другую услугу или другой филиал.")
-        return "\n".join(response_parts)
-    
-    # Проверяем, выполняет ли сотрудник эти услуги в указанном филиале
-    for service_id in valid_service_ids:
-        success, message = await service_disambiguation.verify_service_employee_filial_compatibility(
-            tenant_id_from_kwargs, service_id, employee_id, filial_id, api_token_from_kwargs
-        )
-        if not success:
-            return message
+    # API сам проверит совместимость услуг, сотрудника и филиала
+    # Убираем избыточные локальные проверки - доверяем API
+    valid_service_ids = [s_id for s_id in service_ids if s_id]
 
+    # Важно: tenant_id_from_kwargs уже содержит ТОЛЬКО базовый tenant_id из configurable
+    # Он НЕ содержит chain_id, так как в app.py передается отдельно tenant_id и chain_id
+    
     handler_args = {
-        "tenant_id": tenant_id_from_kwargs, # Используем извлеченное значение
+        "tenant_id": base_tenant_id, # Используем только базовый tenant_id для API
         "employee_id": employee_id,
         "service_ids": valid_service_ids,  # Используем только валидные ID услуг
         "date_time": date_time_from_llm,
@@ -748,12 +734,20 @@ async def get_free_slots_tool(**kwargs_from_llm) -> str:
         return f"Ошибка при обработке запроса на свободные слоты ({error_type}): {str(e)}"
 
 async def book_appointment_tool(*, config=None, **kwargs_from_llm) -> str:
-    tenant_id_from_config = kwargs_from_llm.get('tenant_id')
+    base_tenant_id = kwargs_from_llm.get('tenant_id')
     api_token_from_config = kwargs_from_llm.get('api_token')
+    chain_id = kwargs_from_llm.get('chain_id')  # Получаем chain_id из kwargs
 
-    if not tenant_id_from_config:
+    if not base_tenant_id:
         logger.error(f"tenant_id отсутствует в аргументах ({kwargs_from_llm}) для BookAppointment.")
         return "Критическая ошибка: ID тенанта не был предоставлен для вызова BookAppointment."
+
+    # Формируем комбинированный tenant_id для поиска в локальных данных
+    combined_tenant_id = f"{base_tenant_id}_{chain_id}" if chain_id else base_tenant_id
+    
+    logger.info(f"book_appointment_tool - Base tenant_id для API: {base_tenant_id}")
+    logger.info(f"book_appointment_tool - Chain ID: {chain_id}")
+    logger.info(f"book_appointment_tool - Combined tenant_id для локального поиска: {combined_tenant_id}")
 
     # Извлекаем все необходимые поля от LLM
     phone_number_from_llm = kwargs_from_llm.get('phone_number')
@@ -785,23 +779,24 @@ async def book_appointment_tool(*, config=None, **kwargs_from_llm) -> str:
         logger.error(f"[book_appointment_tool] Отсутствуют обязательные поля от LLM: {', '.join(missing_fields)}. Аргументы от LLM: {kwargs_from_llm}")
         return f"Ошибка: отсутствуют обязательные поля от LLM для записи: {', '.join(missing_fields)}"
     
-    # Преобразование имен в ID
+    # Преобразование имен в ID - используем комбинированный tenant_id для локального поиска
     logger.info(f"[book_appointment_tool] Попытка получить ID для service: '{service_name_from_llm}'")
-    service_id = get_id_by_name(tenant_id_from_config, 'service', service_name_from_llm)
+    service_id = get_id_by_name(combined_tenant_id, 'service', service_name_from_llm)
     logger.info(f"[book_appointment_tool] Попытка получить ID для employee: '{employee_name_from_llm}'")
-    employee_id = get_id_by_name(tenant_id_from_config, 'employee', employee_name_from_llm)
+    employee_id = get_id_by_name(combined_tenant_id, 'employee', employee_name_from_llm)
     logger.info(f"[book_appointment_tool] Попытка получить ID для filial: '{filial_name_from_llm}'")
-    filial_id = get_id_by_name(tenant_id_from_config, 'filial', filial_name_from_llm)
+    filial_id = get_id_by_name(combined_tenant_id, 'filial', filial_name_from_llm)
     logger.info(f"[book_appointment_tool] Попытка получить ID для category: '{category_name_from_llm}'")
-    category_id = get_id_by_name(tenant_id_from_config, 'category', category_name_from_llm)
+    category_id = get_id_by_name(combined_tenant_id, 'category', category_name_from_llm)
 
     if not service_id: return f"Не удалось найти ID для услуги: '{service_name_from_llm}'"
     if not employee_id: return f"Не удалось найти ID для сотрудника: '{employee_name_from_llm}'"
     if not filial_id: return f"Не удалось найти ID для филиала: '{filial_name_from_llm}'"
     if not category_id: return f"Не удалось найти ID для категории: '{category_name_from_llm}'"
 
+    # Используем базовый tenant_id для API запросов (без chain_id)
     handler_args = {
-        "tenant_id": tenant_id_from_config,
+        "tenant_id": base_tenant_id, # Используем только базовый tenant_id для API
         "phone_number": phone_number_from_llm,
         "service_id": service_id,
         "employee_id": employee_id,
@@ -842,15 +837,23 @@ async def book_appointment_ai_payload_tool(**kwargs_from_llm) -> str:
         return f"Ошибка: неверные или отсутствующие аргументы для создания записи: {e}"
 
     # Извлекаем системные поля из validated_args
-    tenant_id_from_kwargs = validated_args.tenant_id
+    base_tenant_id = validated_args.tenant_id
     api_token_from_kwargs = validated_args.api_token
     client_phone_number_from_kwargs = validated_args.client_phone_number
+    
+    # Получаем chain_id из kwargs (не из схемы Pydantic)
+    chain_id = kwargs_from_llm.get('chain_id')
 
-    logger.info(f"book_appointment_ai_payload_tool - Retrieved from validated_args - tenant_id: {tenant_id_from_kwargs}")
+    # Формируем комбинированный tenant_id для поиска в локальных данных
+    combined_tenant_id = f"{base_tenant_id}_{chain_id}" if chain_id else base_tenant_id
+
+    logger.info(f"book_appointment_ai_payload_tool - Base tenant_id для API: {base_tenant_id}")
+    logger.info(f"book_appointment_ai_payload_tool - Chain ID: {chain_id}")
+    logger.info(f"book_appointment_ai_payload_tool - Combined tenant_id для локального поиска: {combined_tenant_id}")
     logger.info(f"book_appointment_ai_payload_tool - Retrieved from validated_args - api_token: {'******' if api_token_from_kwargs else None}")
     logger.info(f"book_appointment_ai_payload_tool - Retrieved from validated_args - client_phone_number: {client_phone_number_from_kwargs}")
 
-    if not tenant_id_from_kwargs:
+    if not base_tenant_id:
         logger.error(f"CRITICAL (book_appointment_ai_payload_tool): tenant_id (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
         return "Критическая ошибка: ID тенанта не был предоставлен системе для вызова book_appointment_ai_payload_tool."
     
@@ -862,8 +865,9 @@ async def book_appointment_ai_payload_tool(**kwargs_from_llm) -> str:
         logger.error(f"CRITICAL (book_appointment_ai_payload_tool): client_phone_number (из validated_args) is missing or None. Validated Args: {validated_args.model_dump_json(indent=2)}")
         return "Критическая ошибка: Номер телефона клиента не был предоставлен системе для вызова book_appointment_ai_payload_tool."
 
-    filial_id = get_id_by_name(tenant_id_from_kwargs, 'filial', validated_args.filial_name)
-    to_employee_id = get_id_by_name(tenant_id_from_kwargs, 'employee', validated_args.employee_name)
+    # Используем комбинированный tenant_id для поиска в локальных данных
+    filial_id = get_id_by_name(combined_tenant_id, 'filial', validated_args.filial_name)
+    to_employee_id = get_id_by_name(combined_tenant_id, 'employee', validated_args.employee_name)
 
     if not filial_id:
         return f"Не удалось найти ID для филиала: '{validated_args.filial_name}'"
@@ -899,20 +903,20 @@ async def book_appointment_ai_payload_tool(**kwargs_from_llm) -> str:
             if duration_from_llm is None: missing_fields_in_item.append("'durationService'")
             return f"Ошибка: неполные данные в одном из элементов services_details: {', '.join(missing_fields_in_item)} обязательны. Получено: {service_item_from_llm.model_dump_json(indent=2)}"
 
-        service_id = get_id_by_name(tenant_id_from_kwargs, 'service', service_name)
+        service_id = get_id_by_name(combined_tenant_id, 'service', service_name)
         if not service_id:
             return f"Не удалось найти ID для услуги: '{service_name}'"
 
         # --- Определение parent_id (categoryId) ---
-        parent_id = get_category_id_by_service_id(tenant_id_from_kwargs, service_id)
+        parent_id = get_category_id_by_service_id(combined_tenant_id, service_id)
         
         if not parent_id and category_name: # Если по service_id не нашли, и LLM передал category_name
             logger.warning(f"Не удалось найти categoryId по serviceId='{service_id}'. Пытаемся найти по categoryName='{category_name}' от LLM.")
-            parent_id = get_id_by_name(tenant_id_from_kwargs, 'category', category_name)
+            parent_id = get_id_by_name(combined_tenant_id, 'category', category_name)
         
         if not parent_id: # Если parent_id все еще не найден
             # Попытка извлечь categoryId или categoryName из SERVICE_DETAILS_MAP_GLOBAL как последний шанс перед ошибкой
-            service_info_for_category_fallback = SERVICE_DETAILS_MAP_GLOBAL.get((tenant_id_from_kwargs, service_id))
+            service_info_for_category_fallback = SERVICE_DETAILS_MAP_GLOBAL.get((combined_tenant_id, service_id))
             if service_info_for_category_fallback:
                 map_category_id = service_info_for_category_fallback.get('categoryId')
                 if map_category_id:
@@ -922,7 +926,7 @@ async def book_appointment_ai_payload_tool(**kwargs_from_llm) -> str:
                     map_category_name = service_info_for_category_fallback.get('categoryName')
                     if map_category_name:
                         logger.warning(f"В SERVICE_DETAILS_MAP_GLOBAL для serviceId '{service_id}' есть categoryName '{map_category_name}', но нет categoryId. Пытаюсь найти ID для этого имени.")
-                        parent_id = get_id_by_name(tenant_id_from_kwargs, 'category', map_category_name)
+                        parent_id = get_id_by_name(combined_tenant_id, 'category', map_category_name)
                         if parent_id:
                             logger.info(f"Найден categoryId '{parent_id}' по categoryName из SERVICE_DETAILS_MAP_GLOBAL.")
             
@@ -931,7 +935,7 @@ async def book_appointment_ai_payload_tool(**kwargs_from_llm) -> str:
         
         # service_info_from_map больше не используется для цены и длительности
         # но может быть использован для получения канонического имени услуги, если оно отличается
-        service_info_from_map = SERVICE_DETAILS_MAP_GLOBAL.get((tenant_id_from_kwargs, service_id))
+        service_info_from_map = SERVICE_DETAILS_MAP_GLOBAL.get((combined_tenant_id, service_id))
         
         api_service_name_for_payload = service_name # По умолчанию используем имя от LLM
         if service_info_from_map and service_info_from_map.get('serviceName'):
@@ -976,7 +980,7 @@ async def book_appointment_ai_payload_tool(**kwargs_from_llm) -> str:
         "color_code_record": validated_args.color_code_record or "",
         "traffic_channel": validated_args.traffic_channel or 0,
         "traffic_channel_id": validated_args.traffic_channel_id or "9", # API может ожидать строку '9' по умолчанию
-        "tenant_id": tenant_id_from_kwargs # <--- ДОБАВЛЕНО: передаем tenant_id
+        "tenant_id": base_tenant_id # Используем базовый tenant_id для API
     }
 
     try:
@@ -1088,11 +1092,27 @@ SYSTEM_PROMPT = """
 - **RU:** Если вопрос НЕ связан с медициной, услугами клиники, расписанием врачей или записью, вежливо откажись отвечать. Кратко сообщи, что ассистент специализируется только на медицинских вопросах и записи в клинику. **ЗАПРЕЩЕНО давать фактический ответ на немедицинскую тему.**
 - **EN:** If the question is NOT related to medicine, clinic services, doctor schedules, or appointments, politely refuse to answer. Briefly state that the assistant specializes only in medical questions and clinic appointments. **DO NOT give a factual answer on a non-medical topic.**
 
-Ты — вежливый и информативный ассистент, который помогает администраторам клиники (людям-операторам).
+Ты — вежливый и информативный ассистент, который помогает администраторам клиники (людям-операторам) в интерфейсе бэкэнда.
 - Ты подготавливаешь черновики ответов, которые администратор может отредактировать перед отправкой пациенту.
-- Прежде чем вызывать какие-либо функции для записи, переноса или отмены (`book_appointment_tool`, `reschedule_appointment_tool`, `cancel_appointment_tool`), ты должен СНАЧАЛА предложить администратору возможное действие и явно попросить подтвердить его нажатием галочки.
-- Подтверждением служит сообщение **строго** вида `Давай(техническое сообщение,от бэкэнда)` — оно приходит от бэкэнда после нажатия галочки.
-- Лишь после получения такого технического сообщения выполняй соответствующую функцию и отправляй пациенту финальное подтверждение.
+- **КРИТИЧЕСКИ ВАЖНО О ПОДТВЕРЖДЕНИИ ДЕЙСТВИЙ:** Прежде чем вызывать какие-либо функции для записи, переноса или отмены (`book_appointment_tool`, `reschedule_appointment_tool`, `cancel_appointment_tool`), ты должен СНАЧАЛА предложить администратору конкретное действие и попросить подтвердить его нажатием кнопки "Принять" в интерфейсе.
+- **ПОДТВЕРЖДЕНИЕ ОТ АДМИНИСТРАТОРА:** Когда администратор нажимает кнопку "Принять" в интерфейсе, тебе приходит сообщение **строго** вида `Давай(техническое сообщение,от бэкэнда)` — это техническое сообщение от бэкэнда, означающее одобрение администратора.
+- **ТОЛЬКО ПОСЛЕ** получения такого технического сообщения выполняй соответствующую функцию и формируй финальное подтверждение для пациента.
+- **НЕ ВЫПОЛНЯЙ** функции записи/переноса/отмены без получения подтверждения `Давай(техническое сообщение,от бэкэнда)`!
+
+**ПРИМЕР РАБОЧЕГО ПРОЦЕССА:**
+1. Пациент: "Запишите меня к врачу Иванову на завтра"
+2. Ты: "Готов записать вас к доктору Иванову на [дата] в [время]. Для подтверждения записи администратор должен нажать кнопку 'Принять'."
+3. Администратор нажимает "Принять" → приходит: `Давай(техническое сообщение,от бэкэнда)`
+4. Ты вызываешь функцию записи и отвечаешь: "Запись подтверждена! Вы записаны к доктору Иванову на [дата] в [время]."
+
+**КАК ФОРМУЛИРОВАТЬ ПРЕДЛОЖЕНИЯ О ДЕЙСТВИЯХ:**
+- Всегда ясно опиши, какое именно действие будет выполнено
+- Укажи все детали: врач, услуга, дата, время, филиал
+- Обязательно добавь фразу о необходимости подтверждения администратором
+- Примеры формулировок:
+  * "Готов записать вас к [врач] на услугу '[услуга]' в филиале '[филиал]' на [дата] в [время]. Для подтверждения записи администратор должен нажать кнопку 'Принять'."
+  * "Могу перенести вашу запись на [новая дата] в [новое время]. Для подтверждения переноса администратор должен нажать кнопку 'Принять'."
+  * "Готов отменить вашу запись на [дата] в [время] к [врач]. Для подтверждения отмены администратор должен нажать кнопку 'Принять'."
 
 
 Главные правила:
@@ -1183,7 +1203,7 @@ class TenantAwareRedisChatMessageHistory(BaseChatMessageHistory):
         self.session_id = session_id
         logger.debug(f"Инициализирован TenantAwareRedisChatMessageHistory для tenant='{self.tenant_id}', session='{self.session_id}'")
     @property
-    def messages(self) -> List[BaseMessage]:  # type: ignore
+    def messages(self) -> List[BaseMessage]:
         """Получение сообщений из Redis."""
         logger.debug(f"Запрос истории для tenant='{self.tenant_id}', session='{self.session_id}'")
         items = redis_history.get_history(self.tenant_id, self.session_id)
@@ -1254,6 +1274,41 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         question = raw_input or ""
         logger.info(f"Получен текстовый ввод: {question[:100]}...")
     
+    # Проверка на техническое сообщение от бэкэнда (подтверждение администратора)
+    if question.strip() == "Давай(техническое сообщение,от бэкэнда)":
+        logger.info("Получено техническое подтверждение от администратора.")
+        
+        # Анализируем историю сообщений для поиска последнего предложения о действии
+        last_assistant_message = None
+        for msg in reversed(history_messages):
+            if isinstance(msg, AIMessage):
+                last_assistant_message = msg
+                break
+        
+        if last_assistant_message and last_assistant_message.content:
+            content = str(last_assistant_message.content)
+            logger.info(f"Найдено последнее сообщение ассистента: {content[:100]}...")
+            
+            # Ищем ключевые фразы, указывающие на предложение действия
+            action_keywords = [
+                "для подтверждения", "нажать кнопку", "принять", 
+                "подтвердить", "готов записать", "запишу", "перенесу", "отменю"
+            ]
+            
+            if any(keyword in content.lower() for keyword in action_keywords):
+                logger.info("Обнаружено предложение действия в последнем сообщении. Система готова выполнить его.")
+                # Вместо простого ответа, продолжаем обработку с модифицированным промптом
+                # Добавляем специальную инструкцию в системный промпт
+                special_instruction = "\n\n**ТЕХНИЧЕСКОЕ ПОДТВЕРЖДЕНИЕ ПОЛУЧЕНО:** Администратор подтвердил выполнение действия. Выполни соответствующую функцию СЕЙЧАС, основываясь на контексте предыдущего сообщения."
+                config["system_message"] = special_instruction
+                # Заменяем вопрос на запрос о выполнении действия
+                question = "Выполни подтвержденное администратором действие"
+                logger.info("Модифицирован промпт для выполнения подтвержденного действия.")
+            else:
+                return "Техническое подтверждение получено, но не найдено соответствующее предложение действия в истории."
+        else:
+            return "Техническое подтверждение получено, но история сообщений пуста или не содержит сообщений ассистента."
+    
     history_messages: List[BaseMessage] = input_dict.get("history", [])
     configurable = config.get("configurable", {})
     composite_session_id = configurable.get("session_id")
@@ -1291,7 +1346,6 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
             embedding_function=embeddings_wrapper
         )
     except InvalidCollectionException:
-        # Коллекция ещё не создана для данного тенанта – создаём её «на лету»
         logger.warning(f"Коллекция '{collection_name}' для тенанта {tenant_id} отсутствует. Запускаем переиндексацию...")
         success = rag_setup.reindex_tenant_specific_data(
             tenant_id=tenant_id,
@@ -1492,7 +1546,10 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
         list_services_in_category_tool: ListServicesInCategoryArgs, list_services_in_filial_tool: ListServicesInFilialArgs,
         find_services_in_price_range_tool: FindServicesInPriceRangeArgs, 
         list_all_categories_tool: ListCategoriesArgs,
-        list_employee_filials_tool: ListEmployeeFilialsArgs, reschedule_appointment_tool: RescheduleAppointmentArgs, update_record_time_tool: UpdateRecordTimeArgs, cancel_appointment_tool: CancelAppointmentArgs
+        list_employee_filials_tool: ListEmployeeFilialsArgs, 
+        reschedule_appointment_tool: RescheduleAppointmentArgs, 
+        update_record_time_tool: UpdateRecordTimeArgs, 
+        cancel_appointment_tool: CancelAppointmentArgs
     }
 
     def create_tool_wrapper_react(original_tool_func: callable, raw_data_for_tenant: Optional[List[Dict]], tenant_id_for_tool: str, configurable_dict: Dict = None): # <--- ДОБАВЛЕН configurable_dict
@@ -1558,13 +1615,31 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
 
         if tool_name == "get_free_slots_tool":
             current_args_schema = GetFreeSlotsArgs
-            func_for_tool = tool_function 
+            # Создаём обёртку для передачи chain_id из configurable
+            async def get_free_slots_wrapper(tool_func=tool_function, **kwargs):
+                # Добавляем chain_id из configurable в kwargs
+                if configurable and 'chain_id' in configurable:
+                    kwargs['chain_id'] = configurable['chain_id']
+                return await tool_func(**kwargs)
+            func_for_tool = get_free_slots_wrapper
         elif tool_name == "book_appointment_tool":
             current_args_schema = BookAppointmentArgs
-            func_for_tool = tool_function
+            # Создаём обёртку для передачи chain_id из configurable
+            async def book_appointment_wrapper(tool_func=tool_function, **kwargs):
+                # Добавляем chain_id из configurable в kwargs
+                if configurable and 'chain_id' in configurable:
+                    kwargs['chain_id'] = configurable['chain_id']
+                return await tool_func(**kwargs)
+            func_for_tool = book_appointment_wrapper
         elif tool_name == "book_appointment_ai_payload_tool":
             current_args_schema = BookAppointmentAIPayloadArgs
-            func_for_tool = tool_function
+            # Создаём обёртку для передачи chain_id из configurable  
+            async def book_appointment_ai_payload_wrapper(tool_func=tool_function, **kwargs):
+                # Добавляем chain_id из configurable в kwargs
+                if configurable and 'chain_id' in configurable:
+                    kwargs['chain_id'] = configurable['chain_id']
+                return await tool_func(**kwargs)
+            func_for_tool = book_appointment_ai_payload_wrapper
         elif tool_function in tool_func_to_schema_map:
             current_args_schema = tool_func_to_schema_map.get(tool_function)
             func_for_tool = create_tool_wrapper_react(tool_function, TENANT_RAW_DATA_MAP.get(tenant_id, []), tenant_id, configurable) # <--- ПЕРЕДАЕМ configurable
@@ -1684,6 +1759,12 @@ async def run_agent_like_chain(input_dict: Dict, config: RunnableConfig) -> str:
                                 raise ValueError(f"tenant_id обязателен для {tool_name}, но не найден в configurable.")
                             current_tool_args_for_invoke['tenant_id'] = cfg_tenant_id
                             current_tool_args_for_invoke.setdefault('api_token', cfg_client_api_token) # Устанавливаем, если нет
+                            
+                            # Добавляем chain_id для формирования комбинированного tenant_id в локальном поиске
+                            cfg_chain_id = configurable.get("chain_id")
+                            if cfg_chain_id:
+                                current_tool_args_for_invoke['chain_id'] = cfg_chain_id
+                            
                             if tool_name == "book_appointment_ai_payload_tool":
                                 logger.info(f"[ReAct System Override] Перед установкой client_phone_number для book_appointment_ai_payload_tool. cfg_phone_number = '{cfg_phone_number}'") # <--- ДОБАВЛЕН ЛОГ
                                 current_tool_args_for_invoke['client_phone_number'] = cfg_phone_number # <-- НОВЫЙ КОД: Принудительная установка
