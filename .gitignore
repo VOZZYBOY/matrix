@@ -28,3 +28,9 @@ api.log
 
 # Конфиденциальные данные
 .env
+
+# Большие файлы данных
+base/*.json
+!base/service_details.json
+cleaned_data.json
+*.json.bak
