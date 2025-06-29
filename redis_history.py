@@ -5,19 +5,19 @@ import json
 import logging
 from typing import List, Dict, Optional, Any
 from dotenv import load_dotenv
-# Добавляем импорт BaseChatMessageHistory
+
 from langchain_core.chat_history import BaseChatMessageHistory
-# Добавляем импорт для конвертации
+
 from langchain_core.messages import BaseMessage, messages_from_dict, messages_to_dict
 
-# Загружаем переменные окружения (если есть .env файл)
+
 load_dotenv()
 
 # Настраиваем логирование
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Настройки Redis (можно вынести в переменные окружения)
+
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_DB = int(os.getenv("REDIS_DB", 0))
@@ -25,21 +25,21 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
 REDIS_KEY_PREFIX = "chat_history"
 DEFAULT_TTL_SECONDS = 3600 * 24
 
-# Инициализация клиента Redis
+
 try:
     redis_client = redis.Redis(
         host=REDIS_HOST,
         port=REDIS_PORT,
         db=REDIS_DB,
         password=REDIS_PASSWORD,
-        decode_responses=False # Будем декодировать сами после JSON
+        decode_responses=False 
     )
-    # Проверяем соединение
+   
     redis_client.ping()
     logger.info(f"Успешное подключение к Redis: {REDIS_HOST}:{REDIS_PORT}, DB: {REDIS_DB}")
 except redis.exceptions.ConnectionError as e:
     logger.error(f"Не удалось подключиться к Redis: {e}", exc_info=True)
-    redis_client = None # Устанавливаем в None, чтобы функции могли это проверить
+    redis_client = None 
 
 def _get_redis_key(tenant_id: str, user_id: str) -> str:
     """Формирует ключ для Redis."""
@@ -66,11 +66,11 @@ def add_message(tenant_id: str, user_id: str, message_data: Dict[str, Any]) -> b
 
     try:
         key = _get_redis_key(tenant_id, user_id)
-        # Сериализуем сообщение в JSON строку
+      
         message_json = json.dumps(message_data, ensure_ascii=False)
-        # Добавляем в конец списка
+       
         redis_client.rpush(key, message_json)
-        # Устанавливаем/обновляем время жизни ключа
+      
         redis_client.expire(key, DEFAULT_TTL_SECONDS)
         logger.debug(f"Сообщение добавлено для {key}")
         return True
@@ -159,7 +159,7 @@ def clear_history(tenant_id: str, user_id: str) -> bool:
         key = _get_redis_key(tenant_id, user_id)
         deleted_count = redis_client.delete(key)
         logger.info(f"История для {key} удалена. Количество удаленных ключей: {deleted_count}")
-        return True # Возвращаем True даже если ключа не было (deleted_count=0)
+        return True 
     except ValueError as ve:
          logger.error(f"Ошибка формирования ключа: {ve}")
          return False
@@ -185,7 +185,7 @@ def get_current_session_number(tenant_id: str, base_user_id: str) -> int:
     
     try:
         session_counter_key = f"session_counter:{tenant_id}:{base_user_id}"
-        # Получаем текущее значение БЕЗ инкремента
+       
         current_value = redis_client.get(session_counter_key)
         session_number = int(current_value) if current_value else 1
         logger.debug(f"Текущий номер сессии для {tenant_id}/{base_user_id}: {session_number}")
@@ -212,9 +212,9 @@ def get_next_session_number(tenant_id: str, base_user_id: str) -> int:
     
     try:
         session_counter_key = f"session_counter:{tenant_id}:{base_user_id}"
-        # Инкрементируем счетчик и получаем новое значение
+     
         session_number = redis_client.incr(session_counter_key)
-        # Устанавливаем TTL для счетчика (например, 7 дней)
+       
         redis_client.expire(session_counter_key, 7 * 24 * 3600)
         logger.debug(f"Новый номер сессии для {tenant_id}/{base_user_id}: {session_number}")
         return session_number
@@ -226,7 +226,7 @@ def get_next_session_number(tenant_id: str, base_user_id: str) -> int:
         return 1
 
 
-# <<< НАЧАЛО НОВОГО КОДА >>>
+
 class TenantAwareRedisChatMessageHistory(BaseChatMessageHistory):
     """
     Класс истории сообщений чата, совместимый с LangChain,
@@ -251,9 +251,9 @@ class TenantAwareRedisChatMessageHistory(BaseChatMessageHistory):
         self.ttl = ttl
 
     @property
-    def messages(self) -> List[BaseMessage]:  # type: ignore
+    def messages(self) -> List[BaseMessage]: 
         """Получает сообщения из Redis."""
-        items_dict = get_history(self.tenant_id, self.session_id, limit=1000) # Получаем как словари
+        items_dict = get_history(self.tenant_id, self.session_id, limit=1000) 
         # Конвертируем словари обратно в объекты BaseMessage
         messages = messages_from_dict(items_dict)
         return messages
@@ -262,15 +262,15 @@ class TenantAwareRedisChatMessageHistory(BaseChatMessageHistory):
         """Добавляет сообщение в Redis."""
         # Конвертируем объект BaseMessage в словарь
         message_dict = messages_to_dict([message])[0]
-        # Используем существующую функцию add_message
+     
         success = add_message(self.tenant_id, self.session_id, message_dict)
         if not success:
-            # Можно добавить более специфичную обработку ошибок, если нужно
+          
             logger.error(f"Не удалось добавить сообщение в Redis для ключа {self.key}")
-            # raise RuntimeError(f"Failed to add message to Redis for key {self.key}") # Опционально
+           
 
     def clear(self) -> None:
         """Очищает историю в Redis."""
-        # Используем существующую функцию clear_history
+    
         clear_history(self.tenant_id, self.session_id)
 
