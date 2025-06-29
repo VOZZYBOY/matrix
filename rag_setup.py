@@ -7,7 +7,7 @@ import re
 from typing import List, Dict, Any, Optional, Tuple
 import chromadb
 
-# Импортируем функции для работы с данными тенантов
+
 from tenant_chain_data import discover_all_json_files, download_chain_data, build_file_path
 
 try:
@@ -16,7 +16,7 @@ except ImportError:
     logging.error("[RAG Setup] Не удалось импортировать tenant_config_manager. Информация о клинике из настроек не будет загружена.")
     tenant_config_manager = None
 
-import tenant_chain_data  # Новый импорт для рекурсивного поиска JSON файлов
+import tenant_chain_data 
 
 from langchain_core.documents import Document
 
@@ -42,7 +42,7 @@ def build_collection_name(tenant_chain: str) -> str:
     else:
         tenant_part, chain_part = tenant_chain, "default"
     name = f"{TENANT_COLLECTION_PREFIX}{_sanitize_fragment(tenant_part)}_{_sanitize_fragment(chain_part)}"
-    # Ensure length <= 63 and valid start/end
+  
     name = name[:63].strip("-_")
     return name or "tenant_default"
 SERVICE_DETAILS_FILE = "base/service_details.json" 
@@ -121,10 +121,10 @@ def load_service_details(file_path: str = SERVICE_DETAILS_FILE) -> Dict[Tuple[st
         logger.error(f"Ошибка загрузки или обработки файла деталей услуг '{file_path}': {e}", exc_info=True)
     return service_details_map
 
-# --- Конец: Новая функция для загрузки деталей услуг ---
 
 
-# --- Функция предобработки данных из JSON (услуги/сотрудники) ---
+
+
 def preprocess_for_rag_v2(data: List[Dict[str, Any]], service_details_map: Dict[Tuple[str, str], Dict[str, Any]]) -> List[Document]:
     """Готовит документы по услугам и сотрудникам из JSON для RAG."""
     services_data = {}
@@ -138,7 +138,7 @@ def preprocess_for_rag_v2(data: List[Dict[str, Any]], service_details_map: Dict[
             logger.warning(f"Пропуск элемента не-словаря в данных: {item}")
             continue
 
-        # Обработка услуг
+      
         srv_id = item.get("serviceId")
         if srv_id:
             if srv_id not in services_data:
@@ -151,10 +151,10 @@ def preprocess_for_rag_v2(data: List[Dict[str, Any]], service_details_map: Dict[
             current_desc = services_data[srv_id].get("description", "")
             if new_desc and new_desc.lower() not in ('', 'null', 'нет описания') and len(new_desc) > len(current_desc):
                 services_data[srv_id]["description"] = new_desc
-            # --- ДОБАВЛЕНО: Сохраняем оригинальное имя категории и услуги для сопоставления с service_details.json ---
+          
             services_data[srv_id]["original_service_name"] = item.get("serviceName", "Без названия")
             services_data[srv_id]["original_category_name"] = item.get("categoryName", "Без категории")
-            # --- КОНЕЦ ДОБАВЛЕНИЯ ---
+           
 
         # Обработка сотрудников
         emp_id = item.get("employeeId")
@@ -173,13 +173,13 @@ def preprocess_for_rag_v2(data: List[Dict[str, Any]], service_details_map: Dict[
     documents = []
     # Документы по услугам
     for srv_id, info in services_data.items():
-        # Добавляем, если есть осмысленное название услуги; описание может отсутствовать
+        
         if not info.get("name") or info.get("name") == "Без названия":
             continue
         desc_text = info.get("description") or "Описание отсутствует"
         text_content = f"Услуга: {info['name']}\nКатегория: {info['category']}\nОписание: {desc_text}"
         
-        # --- ДОБАВЛЕНО: Попытка обогатить данными из service_details_map ---
+    -
         norm_s_name_lookup = normalize_text(info.get("original_service_name"), keep_spaces=True)
         norm_cat_name_lookup = normalize_text(info.get("original_category_name"), keep_spaces=True)
         service_key = (norm_s_name_lookup, norm_cat_name_lookup)
@@ -196,7 +196,7 @@ def preprocess_for_rag_v2(data: List[Dict[str, Any]], service_details_map: Dict[
             if indications_text or contraindications_text:
                 text_content += indications_text + contraindications_text
                 logger.debug(f"Добавлены показания/противопоказания для услуги '{info['name']}' категории '{info['category']}'.")
-        # --- КОНЕЦ ДОБАВЛЕНИЯ ---
+      
 
         metadata = {"id": f"srv_{srv_id}", "type": "service", "name": info['name'], "category": info['category'], "source": "base_json"}
         documents.append(Document(page_content=text_content, metadata=metadata))
@@ -405,7 +405,7 @@ def initialize_rag(
         
         if force_recreate_chroma:
             logger.warning("Флаг force_recreate_chroma установлен. Попытка удаления всех коллекций тенантов...")
-            # Получаем список существующих коллекций, чтобы не зависеть от файлов
+           
             try:
                 existing_collections = chroma_client.list_collections()
                 for collection in existing_collections:
@@ -420,22 +420,20 @@ def initialize_rag(
 
     except Exception as e:
         logger.critical(f"Критическая ошибка инициализации ChromaDB клиента: {e}", exc_info=True)
-        return None, embeddings_object, {}, {}, {}, {} # <-- ИЗМЕНЕНО: возвращаем пустой словарь
-
-    # --- ДОБАВЛЕНО: Загрузка деталей услуг ---
+        return None, embeddings_object, {}, {}, {}, {} 
+  
     try:
-        service_details_map_loaded = load_service_details() # Использует SERVICE_DETAILS_FILE по умолчанию
+        service_details_map_loaded = load_service_details()
     except Exception as e:
         logger.error(f"Не удалось загрузить service_details.json: {e}. Продолжение без дополнительных деталей услуг.", exc_info=True)
-        # service_details_map_loaded останется пустым, что безопасно для дальнейшей работы
+       
 
-    # --- Сканирование и индексация данных тенантов ---
-    # --- ИЗМЕНЕНО: рекурсивно ищем все json в base/<tenant_id>/
+
     tenant_files = discover_all_json_files(base_dir=data_dir)
     if not tenant_files:
         logger.warning(f"Не найдено JSON файлов тенантов в директории: {data_dir}")
-        # Если файлов нет, возвращаем инициализированные клиент и эмбеддинги
-        return chroma_client, embeddings_object, {}, {}, {}, service_details_map_loaded # <-- ИЗМЕНЕНО
+      
+        return chroma_client, embeddings_object, {}, {}, {}, service_details_map_loaded 
 
     for tenant_file_path in tenant_files:
         base_name = os.path.basename(tenant_file_path)
@@ -447,13 +445,13 @@ def initialize_rag(
         collection_name = build_collection_name(tenant_id)
         logger.info(f"--- Обработка тенанта: {tenant_id} (Коллекция: {collection_name}) ---")
 
-        # 1. Загружаем базовые данные (услуги/сотрудники) из base/
+        
         base_docs, tenant_raw_data = load_tenant_base_data(tenant_id, tenant_file_path, service_details_map_loaded)
         if tenant_raw_data:
-            # all_raw_base_data.extend(tenant_raw_data) # Сохраняем сырые данные <-- УДАЛЕНО
-            tenant_raw_data_map[tenant_id] = tenant_raw_data # <-- ДОБАВЛЕНО: Сохраняем сырые данные в карту
+            
+            tenant_raw_data_map[tenant_id] = tenant_raw_data # 
 
-        # 2. Загружаем специфичную информацию о клинике из tenant_configs/
+       
         clinic_info_docs = []
         if tenant_config_manager:
             clinic_info_data = tenant_config_manager.load_tenant_clinic_info(tenant_id)
@@ -461,7 +459,7 @@ def initialize_rag(
         else:
             logger.warning(f"tenant_config_manager не импортирован, clinic_info для тенанта {tenant_id} не будет загружена.")
 
-        # 3. Объединяем документы
+      
         all_tenant_docs = base_docs + clinic_info_docs
 
         if not all_tenant_docs:
@@ -470,10 +468,10 @@ def initialize_rag(
 
         logger.info(f"Всего {len(all_tenant_docs)} документов для индексации для тенанта {tenant_id} (Base: {len(base_docs)}, ClinicInfo: {len(clinic_info_docs)}).")
 
-        # +++ Сохраняем объединенные документы для этого тенанта +++
+        
         tenant_documents_map[tenant_id] = all_tenant_docs
 
-        # 4. Индексируем объединенные документы в Chroma
+        
         index_documents_to_collection(
             chroma_client=chroma_client,
             embeddings_object=embeddings_object,
@@ -481,11 +479,11 @@ def initialize_rag(
             documents=all_tenant_docs,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
-            # force_recreate обрабатывается выше для всех коллекций тенантов
+          
             force_recreate=False
         )
 
-        # 5. Создаем BM25 ретривер для тенанта на объединенных данных
+      
         try:
             tenant_bm25 = BM25Retriever.from_documents(all_tenant_docs, k=search_k)
             bm25_retrievers_map[tenant_id] = tenant_bm25
@@ -494,11 +492,10 @@ def initialize_rag(
             logger.error(f"Ошибка создания BM25 ретривера для тенанта '{tenant_id}': {e}", exc_info=True)
 
     logger.info(f"=== Инициализация RAG завершена. Обработано тенантов: {len(bm25_retrievers_map)} ===")
-    # Возвращаем карту BM25 ретриверов и карту документов тенантов
-    # return chroma_client, embeddings_object, bm25_retrievers_map, tenant_documents_map, all_raw_base_data <-- УДАЛЕНО
-    return chroma_client, embeddings_object, bm25_retrievers_map, tenant_documents_map, tenant_raw_data_map, service_details_map_loaded # <-- ИЗМЕНЕНО
+    
+    return chroma_client, embeddings_object, bm25_retrievers_map, tenant_documents_map, tenant_raw_data_map, service_details_map_loaded
 
-# --- Начало: Новая функция для переиндексации данных одного тенанта ---
+
 
 def reindex_tenant_specific_data(
     tenant_id: str,
@@ -506,9 +503,9 @@ def reindex_tenant_specific_data(
     embeddings_object: GigaChatEmbeddings,
     bm25_retrievers_map: Dict[str, BM25Retriever],
     tenant_documents_map: Dict[str, List[Document]],
-    tenant_raw_data_map: Dict[str, List[Dict[str, Any]]], # Используем List[Dict[str, Any]] для raw_data
-    service_details_map: Dict[Tuple[str, str], Dict[str, Any]], # <--- ДОБАВЛЕНО
-    base_data_dir: str, # Путь к директории 'base'
+    tenant_raw_data_map: Dict[str, List[Dict[str, Any]]], 
+    service_details_map: Dict[Tuple[str, str], Dict[str, Any]], 
+    base_data_dir: str, 
     chunk_size: int,
     chunk_overlap: int,
     search_k: int
@@ -550,12 +547,12 @@ def reindex_tenant_specific_data(
         base_docs = []
         current_tenant_raw_base_data = []
     else:
-        # 1. Загружаем базовые данные (услуги/сотрудники) из base/
+ 
         base_docs, current_tenant_raw_base_data = load_tenant_base_data(tenant_id, tenant_file_path, service_details_map)
-        if current_tenant_raw_base_data is None: # load_tenant_base_data может вернуть None для raw_data в случае ошибки
+        if current_tenant_raw_base_data is None: 
             current_tenant_raw_base_data = []
 
-    # 2. Загружаем специфичную информацию о клинике из tenant_configs/ (самую свежую)
+
     clinic_info_docs = []
     if tenant_config_manager:
         try:
@@ -564,39 +561,39 @@ def reindex_tenant_specific_data(
             logger.info(f"Для тенанта {tenant_id} загружено {len(clinic_info_docs)} док-ов из clinic_info.")
         except Exception as e:
             logger.error(f"Ошибка загрузки clinic_info для тенанта {tenant_id} при переиндексации: {e}", exc_info=True)
-            # Продолжаем без clinic_info_docs, если не удалось загрузить
+            
     else:
         logger.warning(f"tenant_config_manager не импортирован, clinic_info для тенанта {tenant_id} не будет перезагружена.")
 
-    # 3. Объединяем документы
+ 
     all_tenant_docs = base_docs + clinic_info_docs
 
     if not all_tenant_docs:
         logger.warning(f"Нет документов (base + clinic_info) для переиндексации для тенанта {tenant_id}. Возможно, будут удалены старые данные.")
-        # Если документов нет, мы должны очистить старые данные этого тенанта из карт
+       
         collection_name = build_collection_name(tenant_id)
 
-        # 1. Удаляем старую коллекцию (если была) для чистоты
+      
         try:
             chroma_client.delete_collection(collection_name)
         except Exception as e:
             logger.info(f"Попытка удаления коллекции '{collection_name}' для тенанта {tenant_id} (возможно, ее не было): {e}")
 
-        # 2. Создаем пустую коллекцию-заглушку, чтобы дальнейший get_collection не бросал исключение
+       
         try:
             chroma_client.create_collection(name=collection_name, embedding_function=embeddings_object)
             logger.info(f"Создана пустая коллекция-заглушка '{collection_name}' для тенанта {tenant_id}.")
         except Exception as e:
             logger.warning(f"Не удалось создать пустую коллекцию '{collection_name}' для тенанта {tenant_id}: {e}")
 
-        # 3. Убираем старые данные из карт
+      
         bm25_retrievers_map.pop(tenant_id, None)
         tenant_documents_map.pop(tenant_id, None)
         tenant_raw_data_map.pop(tenant_id, None)
 
-        # Возвращаем True: состояние консистентно (пустая коллекция готова)
+    
         return True
-        # и удалить его коллекцию из Chroma
+    
         tenant_documents_map.pop(tenant_id, None)
         tenant_raw_data_map.pop(tenant_id, None)
         bm25_retrievers_map.pop(tenant_id, None)
@@ -604,19 +601,17 @@ def reindex_tenant_specific_data(
             chroma_client.delete_collection(collection_name)
             logger.info(f"Коллекция Chroma '{collection_name}' для тенанта {tenant_id} удалена, так как нет новых документов.")
         except Exception as e:
-            # Это может произойти, если коллекции и не было
+          
             logger.info(f"Попытка удаления коллекции '{collection_name}' для тенанта {tenant_id} (возможно, ее не было): {e}")
         logger.info(f"--- Переиндексация для тенанта: {tenant_id} завершена (данные удалены, так как нет новых документов) ---")
-        return True # Считаем успешным, так как состояние консистентно
+        return True 
 
     logger.info(f"Всего {len(all_tenant_docs)} документов для переиндексации для тенанта {tenant_id} (Base: {len(base_docs)}, ClinicInfo: {len(clinic_info_docs)}).")
 
-    # Обновляем карты в памяти (эти объекты передаются по ссылке, так что изменения отразятся в вызывающем коде)
     tenant_documents_map[tenant_id] = all_tenant_docs
-    tenant_raw_data_map[tenant_id] = current_tenant_raw_base_data # Обновляем сырые данные из base/
+    tenant_raw_data_map[tenant_id] = current_tenant_raw_base_data 
 
-    # 4. Индексируем объединенные документы в Chroma
-    # Мы всегда хотим пересоздать коллекцию для этого тенанта, чтобы отразить изменения
+   
     logger.info(f"Принудительное пересоздание коллекции '{collection_name}' для тенанта {tenant_id}.")
     vectorstore = index_documents_to_collection(
         chroma_client=chroma_client,
@@ -625,34 +620,27 @@ def reindex_tenant_specific_data(
         documents=all_tenant_docs,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
-        force_recreate=True # Ключевой момент - всегда пересоздаем
+        force_recreate=True 
     )
 
     if not vectorstore:
         logger.error(f"Не удалось пересоздать/проиндексировать коллекцию Chroma '{collection_name}' для тенанта {tenant_id}.")
-        # Попытаемся откатить изменения в картах? Или оставить как есть, но пометить как ошибку?
-        # Пока просто логируем и возвращаем False.
+        
         return False
 
-    # 5. Создаем/Обновляем BM25 ретривер для тенанта на объединенных данных
+  
     try:
         tenant_bm25 = BM25Retriever.from_documents(all_tenant_docs, k=search_k)
         bm25_retrievers_map[tenant_id] = tenant_bm25
         logger.info(f"BM25 ретривер для тенанта '{tenant_id}' (k={search_k}) обновлен/создан на {len(all_tenant_docs)} док-х.")
     except Exception as e:
         logger.error(f"Ошибка обновления/создания BM25 ретривера для тенанта '{tenant_id}': {e}", exc_info=True)
-        return False # Ошибка при создании BM25 также считается неудачей
+        return False 
 
     logger.info(f"--- Переиндексация для тенанта: {tenant_id} успешно завершена ---")
     return True
 
-# --- Конец: Новая функция для переиндексации данных одного тенанта ---
 
-# --- ДОБАВЛЕНО: Функция нормализации текста (если еще не существует или импортирована глобально) ---
-# Поместим ее сюда, чтобы избежать проблем с circular import, если она используется только внутри rag_setup
-# Если она есть в другом общем модуле, лучше импортировать оттуда.
-# Для текущего контекста, предположим, что она нужна здесь или будет предоставлена.
-# Важно: если она уже есть где-то, этот блок нужно будет адаптировать.
 
 _text_normalize_pattern = re.compile(r'\s+')
 
