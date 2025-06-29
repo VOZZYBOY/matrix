@@ -67,7 +67,7 @@ except ImportError as e:
     initialize_analyzer = None
     clear_accumulator = None
 
-GIGACHAT_CREDENTIALS = "OTkyYTgyNGYtMjRlNC00MWYyLTg3M2UtYWRkYWVhM2QxNTM1OjA5YWRkODc0LWRjYWItNDI2OC04ZjdmLWE4ZmEwMDIxMThlYw=="
+GIGACHAT_CREDENTIALS = ""
 JSON_DATA_PATH = os.environ.get("JSON_DATA_PATH", "base/cleaned_data.json")
 CHROMA_PERSIST_DIR = os.environ.get("CHROMA_PERSIST_DIR", "chroma_db_clinic_giga")
 GIGA_EMBEDDING_MODEL = os.environ.get("GIGA_EMBEDDING_MODEL", "EmbeddingsGigaR")
@@ -78,7 +78,7 @@ try:
     chat_model = ChatOpenAI(
         model="gpt-4.1",
         max_tokens=16384, 
-        api_key="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"
+        api_key=""
     )
     logger.info("Чат модель OpenAI (gpt-4.1) инициализирована.")
 except Exception as e:
