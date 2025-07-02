@@ -147,8 +147,7 @@ def initialize_message_analyzer():
     if MESSAGE_ANALYZER_AVAILABLE and initialize_analyzer:
         try:
             # Используем тот же ключ, что и для основной модели OpenAI
-            openai_api_key = "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"
-            
+            openai_api_key = 
             # Инициализируем анализатор с o3-mini моделью
             initialize_analyzer(openai_api_key, model_name="o3-mini")
             logger.info("Анализатор завершенности сообщений успешно инициализирован")
